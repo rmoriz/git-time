@@ -282,6 +282,19 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
     })
 }
 
+/// The digest of `der` in the length the expected fingerprint is written in.
+///
+/// SHA-1 (20 octets) and SHA-256 (32) are both published by authorities and both
+/// pinned; taking the length from the expectation keeps a mismatched spelling a
+/// mismatch instead of silently comparing the wrong digest.
+fn matching_digest(expected: &str, der: &[u8]) -> String {
+    if expected.split(':').count() == 20 {
+        git_time_core::trust::sha1_fingerprint(der)
+    } else {
+        git_time_core::trust::fingerprint(der)
+    }
+}
+
 /// Why a fetched bundle was not pinned.
 enum AnchorProblem {
     /// It is not a certificate bundle, or could not be written.
@@ -331,7 +344,7 @@ fn install_anchor(
     })?;
     let fingerprint = anchors::fingerprint(&der);
     if let Some(expected) = authority.fingerprint {
-        let found = git_time_core::trust::fingerprint(&der);
+        let found = matching_digest(expected, &der);
         if !expected.eq_ignore_ascii_case(&found) {
             // Nothing is written at all: an expected-but-wrong root must not
             // become the anchor merely because it parsed.

@@ -12,6 +12,7 @@ repository = "https://github.com/rmoriz/git-time"
 publish = false
 
 [workspace.dependencies]
+sha1 = "0.10"
 sha2 = "0.10"
 thiserror = "2"
 proptest = "1"

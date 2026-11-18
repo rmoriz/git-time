@@ -138,29 +138,29 @@ what makes the first pin reviewable.
 
 | Preset | Endpoint | Root |
 |---|---|---|
-| `freetsa` | `https://freetsa.org/tsr` | pinned |
+| `freetsa` | `https://freetsa.org/tsr` | pinned SHA-256 fingerprint |
 | `ai-moda` | `https://rfc3161.ai.moda` | TOFU (load balancer over several CAs) |
-| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned |
-| `certum` | `http://time.certum.pl` | pinned, plain http |
-| `izenpe` | `http://tsa.izenpe.com` | pinned, plain http |
-| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | TOFU, plain http |
-| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | TOFU, plain http |
-| `aped` | `https://timestamp.aped.gov.gr/qtss` | TOFU |
-| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | TOFU, plain http |
-| `swisssign` | `http://tsa.swisssign.net` | TOFU, plain http |
-| `apple` | `http://timestamp.apple.com/ts01` | TOFU, plain http |
-| `dfn` | `http://zeitstempel.dfn.de` | TOFU, plain http |
-| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | TOFU, plain http |
-| `comodoca` | `http://timestamp.comodoca.com` | TOFU, plain http |
-| `digicert` | `http://timestamp.digicert.com` | TOFU, plain http |
-| `identrust` | `http://timestamp.identrust.com` | TOFU, plain http |
-| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | TOFU, plain http |
-| `ssl-com` | `http://ts.ssl.com` | TOFU, plain http |
-| `belgium` | `http://tsa.belgium.be/connect` | TOFU, plain http |
-| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | TOFU |
-| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | TOFU, plain http |
-| `lex-persona` | `http://tsa.lex-persona.com/tsa` | TOFU, plain http |
-| `accv` | `http://tss.accv.es:8318/tsa` | TOFU, plain http |
+| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned SHA-1 fingerprint |
+| `certum` | `http://time.certum.pl` | pinned SHA-1 fingerprint, , plain http |
+| `izenpe` | `http://tsa.izenpe.com` | pinned SHA-256 fingerprint, unverified, , plain http |
+| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | pinned SHA-1 fingerprint, , plain http |
+| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | pinned SHA-1 fingerprint, , plain http |
+| `aped` | `https://timestamp.aped.gov.gr/qtss` | pinned SHA-1 fingerprint |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | TOFU, , plain http |
+| `swisssign` | `http://tsa.swisssign.net` | TOFU, , plain http |
+| `apple` | `http://timestamp.apple.com/ts01` | pinned SHA-1 fingerprint, , plain http |
+| `dfn` | `http://zeitstempel.dfn.de` | pinned SHA-1 fingerprint, , plain http |
+| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | pinned SHA-1 fingerprint, , plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | TOFU, , plain http |
+| `digicert` | `http://timestamp.digicert.com` | pinned SHA-1 fingerprint, , plain http |
+| `identrust` | `http://timestamp.identrust.com` | pinned SHA-1 fingerprint, , plain http |
+| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | pinned SHA-1 fingerprint, , plain http |
+| `ssl-com` | `http://ts.ssl.com` | pinned SHA-1 fingerprint, , plain http |
+| `belgium` | `http://tsa.belgium.be/connect` | pinned SHA-1 fingerprint, , plain http |
+| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | pinned SHA-1 fingerprint |
+| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | pinned SHA-1 fingerprint, , plain http |
+| `lex-persona` | `http://tsa.lex-persona.com/tsa` | pinned SHA-1 fingerprint, , plain http |
+| `accv` | `http://tss.accv.es:8318/tsa` | pinned SHA-1 fingerprint, , plain http |
 
 A `http://` authority is recorded with `time.tsa.<id>.insecure-http = true` and warns once per
 authority whenever the policy is loaded — that is, at seal time — because the token integrity comes
@@ -173,6 +173,13 @@ Each endpoint appears once. An authority that answers on several URLs keeps one 
 carried on its TLS port only, and `http://time.certum.pl` is the `certum` row, so no `certum-legacy`
 row exists. A query string belongs to the endpoint and is stored and posted verbatim, as with
 `cra-ge`.
+
+The pinned values were measured by querying the endpoint and walking the chain (the reply's
+certificates, plus the AIA `caIssuers` pointer where the root was not embedded). `izenpe` is the
+exception: fetching its root failed, so its value is supplied and **unverified**. Two earlier values
+were wrong for their endpoint and are replaced by the measured ones — `sectigo` and `certum` now
+carry the fingerprint of the root their endpoint actually chains to. Without that, a pinned preset
+would refuse its own authority forever.
 
 ### `git time tsa select [--preset public|none] [--interactive] [--dry-run]`
 

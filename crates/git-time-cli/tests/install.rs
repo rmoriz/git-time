@@ -1224,16 +1224,16 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
         stdout.contains("tsa: 23 configured"),
         "every preset is written: {stdout}"
     );
-    // Freetsa and the nineteen TOFU presets: twenty anchors pinned. Sectigo,
-    // Certum and Izenpe get the throwaway CA, so their published root does not
-    // match.
-    assert_eq!(stdout.matches("sha256 ").count(), 20, "{stdout}");
+    // The only matching root is FreeTSA's; the four TOFU presets take whatever
+    // is fetched, so five anchors pin. Every other published root is measured
+    // against the throwaway CA and refused.
+    assert_eq!(stdout.matches("sha256 ").count(), 5, "{stdout}");
     assert!(
         stdout.contains("freetsa: root fingerprint matches"),
         "the match is said out loud: {stdout}"
     );
     assert!(
-        stdout.contains("3 root fingerprint(s) did not match"),
+        stdout.contains("18 root fingerprint(s) did not match"),
         "the refusals are summarised: {stdout}"
     );
 

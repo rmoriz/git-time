@@ -94,27 +94,32 @@ from it. It is ordered the two originals, then the published roots, then trust o
 |---|---|---|
 | `freetsa` | `https://freetsa.org/tsr` | pinned SHA-256 fingerprint |
 | `ai-moda` | `https://rfc3161.ai.moda` | trust on first use (load balancer over several CAs) |
-| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned SHA-256 fingerprint |
-| `certum` | `http://time.certum.pl` | pinned SHA-256 fingerprint, plain http |
-| `izenpe` | `http://tsa.izenpe.com` | pinned SHA-256 fingerprint, plain http |
-| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | trust on first use, plain http |
-| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | trust on first use, plain http |
-| `aped` | `https://timestamp.aped.gov.gr/qtss` | trust on first use |
+| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned SHA-1 fingerprint |
+| `certum` | `http://time.certum.pl` | pinned SHA-1 fingerprint, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | pinned SHA-256 fingerprint, unverified, plain http |
+| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | pinned SHA-1 fingerprint, plain http |
+| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | pinned SHA-1 fingerprint, plain http |
+| `aped` | `https://timestamp.aped.gov.gr/qtss` | pinned SHA-1 fingerprint |
 | `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | trust on first use, plain http |
 | `swisssign` | `http://tsa.swisssign.net` | trust on first use, plain http |
-| `apple` | `http://timestamp.apple.com/ts01` | trust on first use, plain http |
-| `dfn` | `http://zeitstempel.dfn.de` | trust on first use, plain http |
-| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | trust on first use, plain http |
+| `apple` | `http://timestamp.apple.com/ts01` | pinned SHA-1 fingerprint, plain http |
+| `dfn` | `http://zeitstempel.dfn.de` | pinned SHA-1 fingerprint, plain http |
+| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | pinned SHA-1 fingerprint, plain http |
 | `comodoca` | `http://timestamp.comodoca.com` | trust on first use, plain http |
-| `digicert` | `http://timestamp.digicert.com` | trust on first use, plain http |
-| `identrust` | `http://timestamp.identrust.com` | trust on first use, plain http |
-| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | trust on first use, plain http |
-| `ssl-com` | `http://ts.ssl.com` | trust on first use, plain http |
-| `belgium` | `http://tsa.belgium.be/connect` | trust on first use, plain http |
-| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | trust on first use |
-| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | trust on first use, plain http |
-| `lex-persona` | `http://tsa.lex-persona.com/tsa` | trust on first use, plain http |
-| `accv` | `http://tss.accv.es:8318/tsa` | trust on first use, plain http |
+| `digicert` | `http://timestamp.digicert.com` | pinned SHA-1 fingerprint, plain http |
+| `identrust` | `http://timestamp.identrust.com` | pinned SHA-1 fingerprint, plain http |
+| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | pinned SHA-1 fingerprint, plain http |
+| `ssl-com` | `http://ts.ssl.com` | pinned SHA-1 fingerprint, plain http |
+| `belgium` | `http://tsa.belgium.be/connect` | pinned SHA-1 fingerprint, plain http |
+| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | pinned SHA-1 fingerprint |
+| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | pinned SHA-1 fingerprint, plain http |
+| `lex-persona` | `http://tsa.lex-persona.com/tsa` | pinned SHA-1 fingerprint, plain http |
+| `accv` | `http://tss.accv.es:8318/tsa` | pinned SHA-1 fingerprint, plain http |
+
+Root fingerprints were measured by querying each endpoint and walking its chain, except izenpe's,
+which is supplied and unverified. Two earlier values were wrong for their endpoint and were
+replaced by measured ones: `sectigo` belongs to a different Sectigo root than the one the endpoint
+chains to, and `certum` too (`07:E0:32:E0:…`, Certum Trusted Network CA).
 
 A pinned fingerprint makes the *first* fetch verifiable: a bundle whose root hashes to anything
 else is refused and an existing pin is left alone. Where no fingerprint is published the fetch is

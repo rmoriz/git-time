@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use der::Decode;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject as _;
+use sha1::Sha1;
 use sha2::{Digest as _, Sha256};
 use sigstore_types::DerCertificate;
 use x509_cert::Certificate;
@@ -36,7 +37,21 @@ use x509_cert::Certificate;
 /// written. The empty string is impossible: a certificate always has a digest.
 #[must_use]
 pub fn fingerprint(der: &[u8]) -> String {
-    let digest = Sha256::digest(der);
+    colon(&Sha256::digest(der))
+}
+
+/// The SHA-1 fingerprint of the certificate `der`, in the same spelling.
+///
+/// Some authorities publish this shorter form and nothing else, so a preset can
+/// pin 20 octets where another pins 32. SHA-1 collisions do not matter here: a
+/// pinned root is compared as a whole value, not used to sign anything.
+#[must_use]
+pub fn sha1_fingerprint(der: &[u8]) -> String {
+    colon(&Sha1::digest(der))
+}
+
+/// The preset spelling of a digest: uppercase hex octets, colon separated.
+fn colon(digest: &[u8]) -> String {
     let mut out = String::with_capacity(digest.len() * 3);
     for (index, byte) in digest.iter().enumerate() {
         use std::fmt::Write as _;

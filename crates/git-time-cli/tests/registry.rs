@@ -1117,7 +1117,7 @@ fn a_published_fingerprint_mismatch_is_refused() {
     let repo = Repo::new();
     repo.init();
     let ca = std::fs::read_to_string(&repo.authority.ca).expect("the CA");
-    let fetched = fingerprint_colon(&first_der(&ca));
+    let der = first_der(&ca);
 
     for id in ["sectigo", "certum", "izenpe"] {
         let added = repo.run_time_env(&["tsa", "preset", "add", id], &repo.fetch_ca());
@@ -1138,6 +1138,13 @@ fn a_published_fingerprint_mismatch_is_refused() {
             .and_then(|preset| preset.fingerprint)
             .expect("a published root");
         assert!(stderr.contains(published), "{id}: {stderr}");
+        // The fetched value is printed in the same digest length as the
+        // published one, so it can be compared side by side.
+        let fetched = if published.split(':').count() == 20 {
+            git_time_core::trust::sha1_fingerprint(&der)
+        } else {
+            fingerprint_colon(&der)
+        };
         assert!(stderr.contains(&fetched), "{id}: {stderr}");
         // The entry is still configured, so doctor can name the gap.
         assert!(repo.config(&format!("time.tsa.{id}.url")).is_some(), "{id}");
@@ -1201,7 +1208,7 @@ fn select_enables_exactly_the_chosen_authorities() {
     let chosen = repo.run_time_with_stdin(
         &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
-        "1,2,8\n",
+        "1,2,9\n",
     );
     assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
 
@@ -1209,7 +1216,7 @@ fn select_enables_exactly_the_chosen_authorities() {
     for (id, url) in [
         ("freetsa", "https://freetsa.org/tsr"),
         ("ai-moda", "https://rfc3161.ai.moda"),
-        ("aped", "https://timestamp.aped.gov.gr/qtss"),
+        ("cartaodecidadao", "http://ts.cartaodecidadao.pt/tsa/server"),
     ] {
         assert_eq!(
             repo.config(&format!("time.tsa.{id}.url")).as_deref(),
@@ -1230,7 +1237,7 @@ fn select_enables_exactly_the_chosen_authorities() {
     }
 
     // Anything not chosen stays unconfigured.
-    for id in ["sectigo", "certum", "izenpe", "dfn"] {
+    for id in ["sectigo", "certum", "izenpe", "aped"] {
         assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
     }
 }
