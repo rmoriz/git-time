@@ -18,8 +18,32 @@ $ git time verify                             # judges the evidence, gates CI
 `cargo install` without `--path` needs the crates published, which they are not yet; use the
 `--path` form above, or build and put `target/release/git-time` on `PATH`.
 
-`install --preset public` enables every built-in authority. To choose a subset instead, run
-`git time tsa select` and pick by number; `git time tsa preset list` shows the table first.
+`--preset public`, the default, writes the curated pair — `freetsa` and `digicert`, both pinned
+against a measured root — so a commit costs two requests and one plain-http warning. `--preset all`
+writes all 22. To choose yourself, `git time tsa select` shows the table with each row's scope and
+trust tier and takes a selection:
+
+```console
+$ git time tsa select
+1) freetsa https://freetsa.org/tsr default pinned A6:37:9E:7C:…:AA:BC
+2) digicert http://timestamp.digicert.com default pinned 05:63:B8:63:…:4D:43 insecure-http
+3) sectigo https://timestamp.sectigo.com/qualified opt-in pinned CB:73:94:4C:…:43:07
+…
+8) cartaodecidadao http://ts.cartaodecidadao.pt/tsa/server opt-in tofu insecure-http
+Authorities to enable (e.g. 1,3-4, all, none): 1,2,8
+enabled freetsa (https://freetsa.org/tsr) fingerprint A6:37:9E:7C:…:AA:BC
+enabled digicert (http://timestamp.digicert.com) fingerprint 05:63:B8:63:…:4D:43
+enabled cartaodecidadao (http://ts.cartaodecidadao.pt/tsa/server) fingerprint 61:A2:9F:…:3E
+```
+
+`pinned` means the fetched root is checked against the table and a mismatch is a refusal. `tofu`
+means nothing can be checked: the fingerprint printed at pin time is the only reviewable artifact,
+and `git time anchor pin` writes it to `time.anchors-lock` afterwards so a later change shows up.
+
+No prompt is needed in a script: `git time tsa select --preset public|none`,
+`git time tsa preset add <id>` and `git time tsa add <url>` never ask. A stdin that is not a
+terminal is refused with exit `2` rather than left to hang; `--interactive` says an answer is being
+piped.
 
 ## Install from a release binary
 
@@ -77,7 +101,7 @@ add third
 
 X-RFC3161-Imprint: sha256:826b49a7b93ae87cf483701418fddbf95d0c43bc2dcb6571e222331288ee5a7a
 X-RFC3161-Object: 71068e2caa5a3fbf20d03ad72c55d012caed45d2
-X-RFC3161-Fail: id=ai-moda; reason=anchor-ai-moda-could-not-be-read…
+X-RFC3161-Fail: id=digicert; reason=anchor-digicert-could-not-be-read…
 X-RFC3161-Fail: id=freetsa; reason=timeout
 ```
 
@@ -86,35 +110,34 @@ authority failed and why. A dead TSA costs evidence, never a commit.
 
 ## Built-in authorities
 
-`git time install --preset public` writes all of these entries and fetches their anchors. The
-table lives in `git_time_core::presets`; `git time tsa preset add <name>` writes the same keys
-from it. It is ordered the two originals, then the published roots, then trust on first use.
+`git time install --preset public` writes the two `default` rows and fetches their anchors;
+`--preset all` writes every row. The table lives in `git_time_core::presets`, and
+`git time tsa preset add <name>` writes the same keys from it. The `default` rows come first.
 
-| Preset | Endpoint | Root |
-|---|---|---|
-| `freetsa` | `https://freetsa.org/tsr` | pinned SHA-256 fingerprint |
-| `ai-moda` | `https://rfc3161.ai.moda` | trust on first use (load balancer over several CAs) |
-| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned SHA-1 fingerprint |
-| `certum` | `http://time.certum.pl` | pinned SHA-1 fingerprint, plain http |
-| `izenpe` | `http://tsa.izenpe.com` | pinned SHA-256 fingerprint, unverified, plain http |
-| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | pinned SHA-1 fingerprint, plain http |
-| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | pinned SHA-1 fingerprint, plain http |
-| `aped` | `https://timestamp.aped.gov.gr/qtss` | pinned SHA-1 fingerprint |
-| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | trust on first use, plain http |
-| `swisssign` | `http://tsa.swisssign.net` | trust on first use, plain http |
-| `apple` | `http://timestamp.apple.com/ts01` | pinned SHA-1 fingerprint, plain http |
-| `dfn` | `http://zeitstempel.dfn.de` | pinned SHA-1 fingerprint, plain http |
-| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | pinned SHA-1 fingerprint, plain http |
-| `comodoca` | `http://timestamp.comodoca.com` | trust on first use, plain http |
-| `digicert` | `http://timestamp.digicert.com` | pinned SHA-1 fingerprint, plain http |
-| `identrust` | `http://timestamp.identrust.com` | pinned SHA-1 fingerprint, plain http |
-| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | pinned SHA-1 fingerprint, plain http |
-| `ssl-com` | `http://ts.ssl.com` | pinned SHA-1 fingerprint, plain http |
-| `belgium` | `http://tsa.belgium.be/connect` | pinned SHA-1 fingerprint, plain http |
-| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | pinned SHA-1 fingerprint |
-| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | pinned SHA-1 fingerprint, plain http |
-| `lex-persona` | `http://tsa.lex-persona.com/tsa` | pinned SHA-1 fingerprint, plain http |
-| `accv` | `http://tss.accv.es:8318/tsa` | pinned SHA-1 fingerprint, plain http |
+| Preset | Endpoint | Scope | Root |
+|---|---|---|---|
+| `freetsa` | `https://freetsa.org/tsr` | default | pinned SHA-256 fingerprint |
+| `digicert` | `http://timestamp.digicert.com` | default | pinned SHA-1 fingerprint, plain http |
+| `sectigo` | `https://timestamp.sectigo.com/qualified` | opt-in | pinned SHA-1 fingerprint |
+| `certum` | `http://time.certum.pl` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | opt-in | pinned SHA-256 fingerprint, unverified, plain http |
+| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `aped` | `https://timestamp.aped.gov.gr/qtss` | opt-in | pinned SHA-1 fingerprint |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | trust on first use, plain http |
+| `swisssign` | `http://tsa.swisssign.net` | opt-in | trust on first use, plain http |
+| `apple` | `http://timestamp.apple.com/ts01` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `dfn` | `http://zeitstempel.dfn.de` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | opt-in | trust on first use, plain http |
+| `identrust` | `http://timestamp.identrust.com` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `ssl-com` | `http://ts.ssl.com` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `belgium` | `http://tsa.belgium.be/connect` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | opt-in | pinned SHA-1 fingerprint |
+| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `lex-persona` | `http://tsa.lex-persona.com/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `accv` | `http://tss.accv.es:8318/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 
 Root fingerprints were measured by querying each endpoint and walking its chain, except izenpe's,
 which is supplied and unverified. Two earlier values were wrong for their endpoint and were

@@ -374,10 +374,12 @@ fn preset_list(_repo: &Repo) -> Exit {
     for preset in &presets::PRESETS {
         let anchor = anchors::dir().join(format!("{}.pem", preset.name));
         println!(
-            "{} {} {} {} ({})",
+            "{} {} {} {} {} ({})",
             preset.name,
             preset.url,
             preset.alg,
+            // What `install` writes by default, and what is opt-in.
+            if preset.curated { "default" } else { "opt-in" },
             // A pinned root is verifiable on the first fetch; the rest are
             // trust on first use and say so here as well as at the pin.
             preset.fingerprint.unwrap_or("tofu"),
@@ -468,10 +470,11 @@ async fn select(
 fn ask() -> Result<Vec<usize>, Exit> {
     for (index, preset) in presets::PRESETS.iter().enumerate() {
         println!(
-            "{}) {} {} {}{}",
+            "{}) {} {} {} {}{}",
             index + 1,
             preset.name,
             preset.url,
+            if preset.curated { "default" } else { "opt-in" },
             match preset.fingerprint {
                 Some(fingerprint) => format!("pinned {fingerprint}"),
                 None => "tofu".to_owned(),
@@ -610,8 +613,10 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
                     .find(|anchor| anchor.id == preset.name)
                     .map(|anchor| anchor.path)
                     .unwrap_or_else(|| anchors::dir().join(format!("{}.pem", preset.name)));
+                // The spelling authorities publish, so the line can be compared
+                // with the preset table at a glance.
                 let fingerprint = crate::cmd::anchor::first_certificate_at(&anchor)
-                    .map(|der| anchors::fingerprint(&der))
+                    .map(|der| git_time_core::trust::sha1_fingerprint(&der))
                     .unwrap_or_default();
                 println!(
                     "enabled {} ({}) fingerprint {fingerprint}",

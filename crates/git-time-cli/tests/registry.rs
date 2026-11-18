@@ -572,10 +572,16 @@ fn fingerprint_after(stdout: &str, marker: &str) -> String {
         .split_whitespace()
         .next()
         .unwrap_or_else(|| panic!("a fingerprint after `{marker}` in {stdout}"));
-    assert_eq!(token.len(), 64, "a SHA-256 is 64 hex digits: {token}");
+    // SHA-256 in plain hex, or SHA-1 in the colons-and-uppercase spelling.
     assert!(
-        token.bytes().all(|byte| byte.is_ascii_hexdigit()),
-        "a SHA-256 is hex: {token}"
+        token.len() == 64 || token.len() == 59,
+        "a SHA-256 or a SHA-1 fingerprint: {token}"
+    );
+    assert!(
+        token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b':'),
+        "a fingerprint is hex: {token}"
     );
     token.to_owned()
 }
@@ -1036,6 +1042,21 @@ fn preset_list_names_every_preset_and_marks_the_trust_level() {
     );
     assert!(listing.contains("tofu"), "{listing}");
     assert!(listing.contains("http://time.certum.pl"), "{listing}");
+    // The scope is a column: only the curated pair is a default.
+    for name in ["freetsa", "digicert"] {
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.starts_with(name) && line.contains(" default ")),
+            "{name} is a default: {listing}"
+        );
+    }
+    assert!(
+        listing
+            .lines()
+            .any(|line| line.starts_with("sectigo") && line.contains(" opt-in ")),
+        "the rest is opt-in: {listing}"
+    );
 }
 
 #[test]
@@ -1088,9 +1109,9 @@ fn preset_add_of_a_tofu_preset_prints_the_fetched_fingerprint() {
         "GIT_TIME_ANCHOR_FETCH_CMD",
         format!("cat {}", pstr(&freetsa_root())),
     )];
-    let added = repo.run_time_env(&["tsa", "preset", "add", "ai-moda"], &fetch);
+    let added = repo.run_time_env(&["tsa", "preset", "add", "comodoca"], &fetch);
     assert!(added.status.success(), "{}", text(&added.stderr));
-    assert!(repo.anchors().join("ai-moda.pem").exists(), "the anchor");
+    assert!(repo.anchors().join("comodoca.pem").exists(), "the anchor");
 
     let stdout = text(&added.stdout);
     assert!(stdout.contains("trust on first use"), "{stdout}");
@@ -1208,15 +1229,15 @@ fn select_enables_exactly_the_chosen_authorities() {
     let chosen = repo.run_time_with_stdin(
         &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
-        "1,2,9\n",
+        "1,9,14\n",
     );
     assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
 
     let stdout = text(&chosen.stdout);
     for (id, url) in [
         ("freetsa", "https://freetsa.org/tsr"),
-        ("ai-moda", "https://rfc3161.ai.moda"),
         ("cartaodecidadao", "http://ts.cartaodecidadao.pt/tsa/server"),
+        ("comodoca", "http://timestamp.comodoca.com"),
     ] {
         assert_eq!(
             repo.config(&format!("time.tsa.{id}.url")).as_deref(),
@@ -1233,11 +1254,12 @@ fn select_enables_exactly_the_chosen_authorities() {
             .find(|line| line.starts_with(&format!("enabled {id} ")))
             .unwrap_or_else(|| panic!("{id} enabled: {stdout}"));
         let printed = fingerprint_after(line, "fingerprint ");
-        assert_eq!(printed.len(), 64, "{line}");
+        assert_eq!(printed.len(), 59, "the SHA-1 spelling: {line}");
+        assert!(printed.contains(':'), "colon separated: {line}");
     }
 
     // Anything not chosen stays unconfigured.
-    for id in ["sectigo", "certum", "izenpe", "aped"] {
+    for id in ["digicert", "sectigo", "certum", "izenpe", "aped"] {
         assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
     }
 }
@@ -1323,7 +1345,10 @@ fn select_dry_run_prints_the_plan_and_writes_nothing() {
     assert_eq!(plan.status.code(), Some(0), "{}", text(&plan.stderr));
     let stdout = text(&plan.stdout);
     assert!(stdout.contains("would enable freetsa"), "{stdout}");
-    assert!(stdout.contains("would enable ai-moda"), "{stdout}");
+    assert!(stdout.contains("would enable digicert"), "{stdout}");
+    // The table itself carries the scope, so the choice is made on it.
+    assert!(stdout.contains(" default "), "{stdout}");
+    assert!(stdout.contains(" opt-in "), "{stdout}");
     assert_eq!(repo.config("time.tsa.freetsa.url"), None, "nothing written");
     assert!(!repo.anchors().join("freetsa.pem").exists());
 
@@ -1363,13 +1388,13 @@ fn select_reports_a_failed_authority_and_still_pins_the_others() {
     let stdout = text(&chosen.stdout);
     assert!(stdout.contains("enabled freetsa "), "{stdout}");
     assert!(
-        stdout.contains("failed ai-moda: no anchor could be pinned"),
+        stdout.contains("failed digicert: no anchor could be pinned"),
         "{stdout}"
     );
     assert!(repo.anchors().join("freetsa.pem").exists());
     assert_eq!(
-        repo.config("time.tsa.ai-moda.url").as_deref(),
-        Some("https://rfc3161.ai.moda")
+        repo.config("time.tsa.digicert.url").as_deref(),
+        Some("http://timestamp.digicert.com")
     );
 }
 

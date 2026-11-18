@@ -274,6 +274,43 @@ async fn deadline_cuts_off_a_slow_source_and_keeps_the_fast_ones() {
     assert_eq!(slow.hits(), 1);
 }
 
+/// Many authorities, the quorum long since met, one straggler: the run must end
+/// at the deadline, not when the straggler does. That is what keeps
+/// `install --preset all` usable.
+#[tokio::test]
+async fn a_met_quorum_does_not_wait_for_a_straggler() {
+    let fast = Stub::spawn(vec![Step::ok(GRANTED)]).await;
+    let slow = Stub::spawn(vec![Step::ok(GRANTED).after(Duration::from_secs(5))]).await;
+
+    // Twenty sources, one of them slow; the fast stub answers nineteen.
+    let mut ids: Vec<String> = (0..19).map(|index| format!("fast{index}")).collect();
+    ids.push("slow".to_owned());
+    let mut backends: Vec<Arc<dyn TsaBackend>> = (0..19)
+        .map(|index| fast.backend(&format!("fast{index}")))
+        .collect();
+    backends.push(slow.backend("slow"));
+
+    let started = Instant::now();
+    let outcome = run(&backends, &request(), &policy(2, Duration::from_secs(1))).await;
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(1200),
+        "the deadline bounded the run, not the straggler: {elapsed:?}"
+    );
+    assert!(outcome.tokens.len() >= 2, "the quorum is in hand");
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|(id, reason)| id == "slow" && reason == "timeout"),
+        "the straggler is named: {:?}",
+        outcome.failures
+    );
+    // Every source is still accounted for, whichever way it went.
+    assert_eq!(outcome.tokens.len() + outcome.failures.len(), 20);
+}
+
 #[tokio::test]
 async fn sources_are_reported_in_source_order_with_distinct_nonces() {
     // Later sources answer first, so completion order is the reverse of

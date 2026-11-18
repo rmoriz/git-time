@@ -1080,7 +1080,7 @@ fn tsa_presets_write_the_expected_config() {
         &["config", "--get-regexp", "^time\\.tsa\\."],
     ));
     assert!(!after_none.contains("time.tsa.freetsa"), "{after_none}");
-    assert!(!after_none.contains("time.tsa.ai-moda"), "{after_none}");
+    assert!(!after_none.contains("time.tsa.digicert"), "{after_none}");
 
     // The default preset with a fetch that fails: a warning, still exit 0, and
     // the missing anchors are what doctor complains about.
@@ -1095,16 +1095,19 @@ fn tsa_presets_write_the_expected_config() {
     );
     let stderr = text(&public.stderr);
     assert!(stderr.contains("freetsa"), "{stderr}");
-    assert!(stderr.contains("ai-moda"), "{stderr}");
+    assert!(stderr.contains("digicert"), "{stderr}");
 
     let listing = text(&git(
         repo.path(),
         &["config", "--get-regexp", "^time\\.tsa\\."],
     ));
     assert!(listing.contains("time.tsa.freetsa.url"), "{listing}");
-    assert!(listing.contains("time.tsa.ai-moda.url"), "{listing}");
+    assert!(listing.contains("time.tsa.digicert.url"), "{listing}");
     assert!(listing.contains("https://freetsa.org/tsr"), "{listing}");
-    assert!(listing.contains("https://rfc3161.ai.moda"), "{listing}");
+    assert!(
+        listing.contains("http://timestamp.digicert.com"),
+        "{listing}"
+    );
 
     let doctor = repo.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
@@ -1210,10 +1213,34 @@ fn a_merge_after_install_is_sealed() {
     assert_eq!(repo.blocks(&repo.head()), 1);
 }
 
+/// Without a flag, `install` writes the curated pair and nothing else: the
+/// default must not cost a request per preset on every commit.
+#[test]
+fn install_without_a_flag_writes_only_the_curated_authorities() {
+    let repo = Repo::blank();
+    let install = repo.run_time_env(&["install"], &repo.fetch_known_root());
+    assert!(install.status.success(), "{}", text(&install.stderr));
+
+    let listing = text(&git(
+        repo.path(),
+        &["config", "--get-regexp", r"^time\.tsa\.[a-z-]*\.url$"],
+    ));
+    // The stub this fixture serves is not a preset, so only presets are counted.
+    let mut ids: Vec<&str> = listing
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .filter_map(|key| key.strip_prefix("time.tsa."))
+        .filter_map(|key| key.strip_suffix(".url"))
+        .filter(|id| git_time_core::presets::find(id).is_some())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["digicert", "freetsa"], "{listing}");
+}
+
 #[test]
 fn install_fetches_anchors_and_prints_their_fingerprints() {
     let repo = Repo::new();
-    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
+    let install = repo.run_time_env(&["install", "--preset", "all"], &repo.fetch_known_root());
     assert!(
         install.status.success(),
         "install failed: {}",
@@ -1221,13 +1248,13 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
     );
     let stdout = text(&install.stdout);
     assert!(
-        stdout.contains("tsa: 23 configured"),
+        stdout.contains("tsa: 22 configured"),
         "every preset is written: {stdout}"
     );
-    // The only matching root is FreeTSA's; the four TOFU presets take whatever
-    // is fetched, so five anchors pin. Every other published root is measured
-    // against the throwaway CA and refused.
-    assert_eq!(stdout.matches("sha256 ").count(), 5, "{stdout}");
+    // The only matching root is FreeTSA's; the remaining two TOFU presets take
+    // whatever is fetched, so four anchors pin. Every other published root is
+    // measured against the throwaway CA and refused.
+    assert_eq!(stdout.matches("sha256 ").count(), 4, "{stdout}");
     assert!(
         stdout.contains("freetsa: root fingerprint matches"),
         "the match is said out loud: {stdout}"
@@ -1241,7 +1268,7 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
     assert!(stdout.contains("trust on first use"), "{stdout}");
     for (id, source) in [
         ("freetsa", freetsa_root()),
-        ("ai-moda", repo.authority.ca.clone()),
+        ("comodoca", repo.authority.ca.clone()),
     ] {
         let anchor = repo.anchors().join(format!("{id}.pem"));
         assert_eq!(
@@ -1250,7 +1277,7 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
             "the fetched anchor is stored: {id}"
         );
     }
-    for id in ["freetsa", "ai-moda"] {
+    for id in ["freetsa", "comodoca"] {
         let anchor = repo.anchors().join(format!("{id}.pem"));
         let configured = text(&git(
             repo.path(),
@@ -1268,7 +1295,7 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
 #[test]
 fn install_refuses_a_root_whose_fingerprint_does_not_match() {
     let repo = Repo::blank();
-    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca());
+    let install = repo.run_time_env(&["install", "--preset", "all"], &repo.fetch_ca());
     assert!(
         install.status.success(),
         "the hooks are still worth wiring: {}",

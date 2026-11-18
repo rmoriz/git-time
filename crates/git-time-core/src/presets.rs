@@ -9,13 +9,12 @@
 //! for, the policy they request, and — where the root is known — the
 //! fingerprint that root must have.
 //!
-//! The order is deliberate: the two originals, then the three whose root was
-//! measured first, then the rest. FreeTSA publishes a plain PEM; for every other
-//! preset the anchor URL *is* the endpoint, because no certificate download is
-//! served there. The fetch asks the endpoint for a token and takes the
-//! self-signed root of the chain it replies with — the same mechanism
-//! `rfc3161.ai.moda` needs as a load balancer over several CAs. None of those
-//! certificate URLs could be measured from here, so none are invented.
+//! The order is deliberate: the curated default first, then the rest of the
+//! measured roots, then the ones that are trust on first use. FreeTSA publishes
+//! a plain PEM; for every other preset the anchor URL *is* the endpoint, because
+//! no certificate download is served there. The fetch asks the endpoint for a
+//! token and takes the self-signed root of the chain it replies with. None of
+//! those certificate URLs could be measured from here, so none are invented.
 //!
 //! # Why an expected fingerprint
 //!
@@ -28,9 +27,21 @@
 //!
 //! Where no fingerprint is known the fetch is TOFU, so the writer prints the
 //! fetched root fingerprint prominently: that line is the only thing that makes
-//! the first pin reviewable. `ai-moda` is TOFU for a second reason too — it is a
-//! load balancer in front of several CAs, so there is no single expected root;
-//! it answered with a DigiCert root when it was measured.
+//! the first pin reviewable.
+//!
+//! # Which two are the default
+//!
+//! `freetsa` and `digicert`. DigiCert carries a measured fingerprint and is the
+//! most available of the remaining set; Sectigo is not the second default
+//! because its endpoint refuses the TLS handshake on some stacks. Two, not one,
+//! so `required = 1` still has a second authority to fall back on, and no more
+//! than two because every configured authority costs a request on every commit
+//! and every plain-http one costs a warning line. The rest is opt-in.
+//!
+//! `ai-moda` was dropped from the table: it appears on no live-TSA list we were
+//! given, and as a load balancer over several CAs it is the one authority that
+//! can never have a correct pinned fingerprint — it answered with a DigiCert
+//! root the day it was measured.
 //!
 //! # Where the fingerprints come from
 //!
@@ -82,11 +93,19 @@ pub struct Preset {
     pub fingerprint: Option<&'static str>,
     /// Whether the endpoint is plain `http://` and is accepted as such.
     pub insecure_http: bool,
+    /// Whether `install --preset public` writes it.
+    ///
+    /// [`curated`] is a prefix of the table. A default that queries every
+    /// endpoint and warns about every plain-http transport on every commit is not
+    /// a default, it is a denial of service against the user's own latency
+    /// budget; the rest is opt-in through `--preset all`, `tsa preset add` or
+    /// `tsa select`.
+    pub curated: bool,
 }
 
 /// The built-in presets, in the order they are written: the two originals, the
 /// three with a published root, then the seven that are trust on first use.
-pub const PRESETS: [Preset; 23] = [
+pub const PRESETS: [Preset; 22] = [
     Preset {
         name: "freetsa",
         url: "https://freetsa.org/tsr",
@@ -97,19 +116,17 @@ pub const PRESETS: [Preset; 23] = [
             "A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC",
         ),
         insecure_http: false,
+        curated: true,
     },
     Preset {
-        name: "ai-moda",
-        url: "https://rfc3161.ai.moda",
-        // A plain GET answers prose; the fetch asks for a token and takes the
-        // root of the chain it replies with.
-        anchor_url: "https://rfc3161.ai.moda",
+        name: "digicert",
+        url: "http://timestamp.digicert.com",
+        anchor_url: "http://timestamp.digicert.com",
         alg: "sha256",
         policy: None,
-        // A load balancer over several CAs: no single root to pin beforehand,
-        // so the fetched one is printed for review (trust on first use).
-        fingerprint: None,
-        insecure_http: false,
+        fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),
+        insecure_http: true,
+        curated: true,
     },
     Preset {
         name: "sectigo",
@@ -121,6 +138,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("CB:73:94:4C:04:2E:53:BF:C4:57:9D:2F:71:2F:3E:EA:99:FE:43:07"),
         insecure_http: false,
+        curated: false,
     },
     Preset {
         name: "certum",
@@ -130,6 +148,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("07:E0:32:E0:20:B7:2C:3F:19:2F:06:28:A2:59:3A:19:A7:0F:06:9E"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "izenpe",
@@ -141,11 +160,11 @@ pub const PRESETS: [Preset; 23] = [
             "8E:5B:8B:AE:DC:4D:58:BE:0E:30:1C:CC:B6:ED:17:3C:08:D7:C7:7C:E4:35:09:73:38:9F:F1:AF:A1:1D:7A:65",
         ),
         insecure_http: true,
+        curated: false,
     },
-    // Four endpoints keep no fingerprint: ai-moda is a load balancer over
-    // several CAs (it answered with a DigiCert root this time), and for
-    // comodoca, cartaodecidadao and swisssign no root could be measured here.
-    // Their fetched fingerprint is printed and has to be compared by a reader.
+    // Three endpoints keep no fingerprint: for comodoca, cartaodecidadao and
+    // swisssign no root could be measured here. Their fetched fingerprint is
+    // printed and has to be compared by a reader.
     Preset {
         name: "acs-microsoft",
         url: "http://timestamp.acs.microsoft.com",
@@ -154,6 +173,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("F4:00:42:E2:E5:F7:E8:EF:81:89:FE:D1:55:19:AE:CE:42:C3:BF:A2"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "globalsign-r6",
@@ -163,6 +183,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "aped",
@@ -172,6 +193,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("44:4D:AE:31:5D:00:21:9C:6A:15:2F:0C:C0:2A:AE:32:3B:F9:C6:AC"),
         insecure_http: false,
+        curated: false,
     },
     Preset {
         name: "cartaodecidadao",
@@ -181,6 +203,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: None,
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "swisssign",
@@ -190,6 +213,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: None,
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "apple",
@@ -199,6 +223,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("61:1E:5B:66:2C:59:3A:08:FF:58:D1:4A:E2:24:52:D1:98:DF:6C:60"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "dfn",
@@ -208,6 +233,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"),
         insecure_http: true,
+        curated: false,
     },
     // The owner's live-TSA list, minus the endpoints already above. Its
     // `certum-legacy` entry is skipped: it names exactly the `certum` endpoint,
@@ -220,6 +246,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "comodoca",
@@ -229,15 +256,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: None,
         insecure_http: true,
-    },
-    Preset {
-        name: "digicert",
-        url: "http://timestamp.digicert.com",
-        anchor_url: "http://timestamp.digicert.com",
-        alg: "sha256",
-        policy: None,
-        fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),
-        insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "identrust",
@@ -247,6 +266,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("BA:29:41:60:77:98:3F:F4:F3:EF:F2:31:05:3B:2E:EA:6D:4D:45:FD"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "quovadis-eu",
@@ -256,6 +276,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("1B:8E:EA:57:96:29:1A:C9:39:EA:B8:0A:81:1A:73:73:C0:93:79:67"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "ssl-com",
@@ -265,6 +286,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("B7:AB:33:08:D1:EA:44:77:BA:14:80:12:5A:6F:BD:A9:36:49:0C:BB"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "belgium",
@@ -274,6 +296,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("98:98:9F:EE:C1:6A:D7:74:61:54:15:E9:3A:96:3E:A3:EE:F5:FE:4F"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         // The same authority also answers on `http://tsa.cesnet.cz:3161/tsa`;
@@ -285,6 +308,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("E7:84:74:90:F7:11:43:FC:CE:F6:F6:5A:30:DA:1F:23:9E:0F:D7:BA"),
         insecure_http: false,
+        curated: false,
     },
     Preset {
         // The query string is part of the endpoint: it selects the worker and
@@ -296,6 +320,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("9E:79:CD:4E:A8:C2:79:08:11:D6:DA:43:ED:23:90:A6:CE:FF:35:3C"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "lex-persona",
@@ -305,6 +330,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("88:21:9A:14:A6:A1:FF:5B:62:25:17:F7:00:1E:C3:02:C3:11:01:D7"),
         insecure_http: true,
+        curated: false,
     },
     Preset {
         name: "accv",
@@ -314,6 +340,7 @@ pub const PRESETS: [Preset; 23] = [
         policy: None,
         fingerprint: Some("93:05:7A:88:15:C6:4F:CE:88:2F:FA:91:16:52:28:78:BC:53:64:17"),
         insecure_http: true,
+        curated: false,
     },
 ];
 
@@ -326,6 +353,14 @@ pub fn find(name: &str) -> Option<&'static Preset> {
 /// The names of every preset, in table order.
 pub fn names() -> impl Iterator<Item = &'static str> {
     PRESETS.iter().map(|preset| preset.name)
+}
+
+/// The presets `install --preset public` writes: the curated default.
+///
+/// They are a prefix of [`PRESETS`], so the order `install` writes is always the
+/// table order.
+pub fn curated() -> impl Iterator<Item = &'static Preset> {
+    PRESETS.iter().filter(|preset| preset.curated)
 }
 
 #[cfg(test)]
@@ -402,8 +437,8 @@ mod tests {
         }
     }
 
-    /// Exactly four endpoints keep no fingerprint, and they are the ones that
-    /// cannot have one: a load balancer, and three whose root was not measured.
+    /// Exactly three endpoints keep no fingerprint, and they are the ones whose
+    /// root could not be measured.
     #[test]
     fn only_the_unmeasurable_endpoints_are_tofu() {
         let tofu: Vec<&str> = PRESETS
@@ -411,10 +446,7 @@ mod tests {
             .filter(|preset| preset.fingerprint.is_none())
             .map(|preset| preset.name)
             .collect();
-        assert_eq!(
-            tofu,
-            ["ai-moda", "cartaodecidadao", "swisssign", "comodoca"]
-        );
+        assert_eq!(tofu, ["cartaodecidadao", "swisssign", "comodoca"]);
 
         let pinned: Vec<&str> = PRESETS
             .iter()
@@ -424,13 +456,30 @@ mod tests {
         assert_eq!(pinned.len(), PRESETS.len() - tofu.len());
     }
 
-    /// The two originals stay first: a reorder is a user-visible change to what
-    /// `install` writes, and to the indices `tsa select` shows.
+    /// The default scope stays small and pinned: a preset that fires a request
+    /// on every commit is opt-in, and the curated ones are a prefix so `install`
+    /// writes them in table order.
     #[test]
-    fn the_originals_stay_first() {
+    fn the_curated_default_is_two_pinned_roots_and_a_prefix() {
+        let curated: Vec<&str> = curated().map(|preset| preset.name).collect();
+        assert_eq!(curated, ["freetsa", "digicert"]);
+        assert_eq!(
+            PRESETS[..curated.len()]
+                .iter()
+                .map(|preset| preset.name)
+                .collect::<Vec<_>>(),
+            curated,
+            "the curated presets come first"
+        );
+    }
+
+    /// The curated default stays first: a reorder is a user-visible change to
+    /// what `install` writes, and to the indices `tsa select` shows.
+    #[test]
+    fn the_curated_pair_stays_first() {
         assert_eq!(
             names().take(5).collect::<Vec<_>>(),
-            ["freetsa", "ai-moda", "sectigo", "certum", "izenpe"]
+            ["freetsa", "digicert", "sectigo", "certum", "izenpe"]
         );
     }
 
@@ -444,6 +493,7 @@ mod tests {
         assert_eq!(
             insecure,
             [
+                "digicert",
                 "certum",
                 "izenpe",
                 "acs-microsoft",
@@ -454,7 +504,6 @@ mod tests {
                 "dfn",
                 "globalsign-advanced",
                 "comodoca",
-                "digicert",
                 "identrust",
                 "quovadis-eu",
                 "ssl-com",

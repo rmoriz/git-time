@@ -12,10 +12,10 @@
 //! same inputs produce the same token and failure order however the network
 //! answers.
 
-use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt as _};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
 use super::{StampRequest, TsaBackend};
 
@@ -84,6 +84,12 @@ pub async fn run(
 /// as `timeout` and abandoned. A source whose request cannot even be built (an
 /// invalid imprint or policy) is recorded with that error and never contacted.
 ///
+/// The run ends as soon as it can: once the quorum is in hand and every other
+/// source has answered, and once the deadline is up while the quorum is already
+/// in hand, the stragglers are not worth the wait and become `timeout` records.
+/// That is what keeps `--preset all` near `deadline` instead of near the slowest
+/// authority.
+///
 /// The function has no error return: the outcome is always a value. A length
 /// mismatch is a programming error and pads with the first template, so the zip
 /// below cannot hide a source.
@@ -97,11 +103,40 @@ pub async fn run_each(
         sources.len(),
         "one request per source, or the padding below would run a source twice"
     );
-    let results = join_all(sources.iter().enumerate().map(|(index, source)| {
+    let (required, deadline) = (policy.required, policy.deadline);
+    let deadline_at = Instant::now() + deadline;
+    let mut pending = FuturesUnordered::new();
+    for (index, source) in sources.iter().enumerate() {
         let template = requests.get(index).or_else(|| requests.first());
-        stamp_one(source, template, policy.deadline)
-    }))
-    .await;
+        pending.push(async move { (index, stamp_one(source, template, deadline).await) });
+    }
+
+    // Indexed, so the outcome can be reassembled in source order however the
+    // network answers.
+    let mut results: Vec<Option<Stamped>> = sources.iter().map(|_| None).collect();
+    let mut successes = 0_usize;
+
+    loop {
+        let item = match timeout_at(deadline_at, pending.next()).await {
+            Ok(item) => item,
+            // Past the deadline. Enough tokens already: the stragglers are not
+            // worth the latency and become timeouts below. Not enough: keep
+            // waiting — every source has its own deadline and resolves on its
+            // own, so this cannot hang.
+            Err(_) if successes >= required => break,
+            Err(_) => pending.next().await,
+        };
+        let Some((index, result)) = item else { break };
+        if result.is_ok() {
+            successes += 1;
+        }
+        results[index] = Some(result);
+        // Everything answered, so there is nothing left to wait for.
+        if results.iter().all(Option::is_some) {
+            break;
+        }
+    }
+
     debug_assert_eq!(
         sources.len(),
         results.len(),
@@ -114,16 +149,23 @@ pub async fn run_each(
     };
     for (source, result) in sources.iter().zip(results) {
         match result {
-            Ok((token, request)) => outcome.tokens.push(StampedToken {
+            Some(Ok((token, request))) => outcome.tokens.push(StampedToken {
                 id: source.id().to_owned(),
                 token,
                 request,
             }),
-            Err(reason) => outcome.failures.push((source.id().to_owned(), reason)),
+            Some(Err(reason)) => outcome.failures.push((source.id().to_owned(), reason)),
+            // Left pending when the quorum was already met at the deadline.
+            None => outcome
+                .failures
+                .push((source.id().to_owned(), "timeout".to_owned())),
         }
     }
     outcome
 }
+
+/// What one source produced: its token and the request behind it, or a reason.
+type Stamped = Result<(Vec<u8>, StampRequest), String>;
 
 /// One source: build its request, bound the call, map everything to a reason.
 async fn stamp_one(

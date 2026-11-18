@@ -37,8 +37,10 @@ use crate::cmd::{Exit, anchors, git_stdout, hooks, open};
 /// Which authorities `install` configures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Preset {
-    /// The public authorities of the built-in preset table.
+    /// The curated default: the two plain public authorities.
     Public,
+    /// Every authority in the preset table.
+    All,
     /// No authority at all.
     None,
 }
@@ -94,14 +96,15 @@ pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: 
     }
 
     let preset = if no_tsa { Preset::None } else { preset };
-    let authorities: &[Authority] = match preset {
-        Preset::Public => &presets::PRESETS,
-        Preset::None => &[],
+    let authorities: Vec<&Authority> = match preset {
+        Preset::Public => presets::curated().collect(),
+        Preset::All => presets::PRESETS.iter().collect(),
+        Preset::None => Vec::new(),
     };
     let mut kept = 0_usize;
     let mut unpinned = Vec::new();
     let mut mismatched = 0_usize;
-    for authority in authorities {
+    for authority in &authorities {
         match pin(&repo, authority).await {
             Ok(pinned) => {
                 kept += pinned.kept;

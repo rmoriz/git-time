@@ -292,6 +292,8 @@ impl Policy {
         }
 
         policy.tsas = read_tsas(repo)?;
+        // Every authority that travels in the clear, for the one warning below.
+        let mut insecure: Vec<&TsaConfig> = Vec::new();
         for tsa in &policy.tsas {
             policy.backends.push(Arc::new(HttpBackend {
                 id: tsa.id.clone(),
@@ -299,15 +301,9 @@ impl Policy {
                 timeout: tsa.timeout,
             }));
             // The transport is not what makes a token evidence, but a reader
-            // deserves to know the imprint travelled in the clear. Said once per
-            // authority, here, where the backend is built — that is seal time.
+            // deserves to know the imprint travelled in the clear.
             if tsa.insecure_http {
-                eprintln!(
-                    "rfc3161: warning: `{}` is configured over plain http ({}); the token is \
-                     verified against the pinned anchor, but the imprint is exposed and the \
-                     authority can be blocked in transit",
-                    tsa.id, tsa.url
-                );
+                insecure.push(tsa);
             }
             // One bundle at a time: a missing or unparseable anchor belongs to
             // its own authority and must not take the pinned ones down with it.
@@ -317,6 +313,32 @@ impl Policy {
                     .anchor_failures
                     .insert(tsa.id.clone(), error.to_string());
             }
+        }
+        // One line, not one per authority: with `--preset all` a per-authority
+        // warning would bury the seal output. Said here, where the backends are
+        // built — that is, at seal time. Five ids are named, the rest counted.
+        if !insecure.is_empty() {
+            const NAMED: usize = 5;
+            let shown: Vec<&str> = insecure
+                .iter()
+                .take(NAMED)
+                .map(|tsa| tsa.id.as_str())
+                .collect();
+            let mut list = shown.join(", ");
+            if insecure.len() > shown.len() {
+                list.push_str(&format!(", and {} more", insecure.len() - shown.len()));
+            }
+            eprintln!(
+                "rfc3161: warning: {} {} plain http ({}); integrity is still verified, \
+                 transport is not",
+                insecure.len(),
+                if insecure.len() == 1 {
+                    "authority uses"
+                } else {
+                    "authorities use"
+                },
+                list
+            );
         }
         Ok(policy)
     }

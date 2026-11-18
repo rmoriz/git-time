@@ -131,40 +131,47 @@ Print the built-in presets, or configure one, anchor included, through the insta
 for an unknown name. A root fingerprint that does not match is a refusal, so a pinned preset never
 takes a substituted root.
 
-The table is ordered: the two original presets first, then the presets with a published root, then
-those that are trust on first use (`ai-moda` is an original and TOFU). For the TOFU presets no
-value can be checked, so `preset add` prints the fetched root fingerprint in full — that line is
-what makes the first pin reviewable.
+`install --preset public`, the default, writes the two `default` rows: `freetsa` and `digicert`,
+both pinned against a measured root. `--preset all` writes every row. Two is the default because
+every configured authority costs a request on every commit and every plain-http one costs a warning;
+`digicert` is the second because it is pinned and the most available of the rest, and two rather
+than one so `required = 1` still has a fallback. `sectigo` is not a default: its endpoint refuses
+the TLS handshake on some stacks. Everything else is opt-in.
 
-| Preset | Endpoint | Root |
-|---|---|---|
-| `freetsa` | `https://freetsa.org/tsr` | pinned SHA-256 fingerprint |
-| `ai-moda` | `https://rfc3161.ai.moda` | TOFU (load balancer over several CAs) |
-| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned SHA-1 fingerprint |
-| `certum` | `http://time.certum.pl` | pinned SHA-1 fingerprint, , plain http |
-| `izenpe` | `http://tsa.izenpe.com` | pinned SHA-256 fingerprint, unverified, , plain http |
-| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | pinned SHA-1 fingerprint, , plain http |
-| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | pinned SHA-1 fingerprint, , plain http |
-| `aped` | `https://timestamp.aped.gov.gr/qtss` | pinned SHA-1 fingerprint |
-| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | TOFU, , plain http |
-| `swisssign` | `http://tsa.swisssign.net` | TOFU, , plain http |
-| `apple` | `http://timestamp.apple.com/ts01` | pinned SHA-1 fingerprint, , plain http |
-| `dfn` | `http://zeitstempel.dfn.de` | pinned SHA-1 fingerprint, , plain http |
-| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | pinned SHA-1 fingerprint, , plain http |
-| `comodoca` | `http://timestamp.comodoca.com` | TOFU, , plain http |
-| `digicert` | `http://timestamp.digicert.com` | pinned SHA-1 fingerprint, , plain http |
-| `identrust` | `http://timestamp.identrust.com` | pinned SHA-1 fingerprint, , plain http |
-| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | pinned SHA-1 fingerprint, , plain http |
-| `ssl-com` | `http://ts.ssl.com` | pinned SHA-1 fingerprint, , plain http |
-| `belgium` | `http://tsa.belgium.be/connect` | pinned SHA-1 fingerprint, , plain http |
-| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | pinned SHA-1 fingerprint |
-| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | pinned SHA-1 fingerprint, , plain http |
-| `lex-persona` | `http://tsa.lex-persona.com/tsa` | pinned SHA-1 fingerprint, , plain http |
-| `accv` | `http://tss.accv.es:8318/tsa` | pinned SHA-1 fingerprint, , plain http |
+The table is ordered the `default` rows first. For a TOFU row no value can be checked, so
+`preset add` prints the fetched root fingerprint in full — that line is what makes the first pin
+reviewable, and `git time anchor pin` records it in `time.anchors-lock` afterwards so a later
+change is visible.
 
-A `http://` authority is recorded with `time.tsa.<id>.insecure-http = true` and warns once per
-authority whenever the policy is loaded — that is, at seal time — because the token integrity comes
-from the signature against the pinned root, not from the transport.
+| Preset | Endpoint | Scope | Root |
+|---|---|---|---|
+| `freetsa` | `https://freetsa.org/tsr` | default | pinned SHA-256 fingerprint |
+| `digicert` | `http://timestamp.digicert.com` | default | pinned SHA-1 fingerprint, plain http |
+| `sectigo` | `https://timestamp.sectigo.com/qualified` | opt-in | pinned SHA-1 fingerprint |
+| `certum` | `http://time.certum.pl` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | opt-in | pinned SHA-256 fingerprint, unverified, plain http |
+| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `aped` | `https://timestamp.aped.gov.gr/qtss` | opt-in | pinned SHA-1 fingerprint |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | TOFU, plain http |
+| `swisssign` | `http://tsa.swisssign.net` | opt-in | TOFU, plain http |
+| `apple` | `http://timestamp.apple.com/ts01` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `dfn` | `http://zeitstempel.dfn.de` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | opt-in | TOFU, plain http |
+| `identrust` | `http://timestamp.identrust.com` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `ssl-com` | `http://ts.ssl.com` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `belgium` | `http://tsa.belgium.be/connect` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | opt-in | pinned SHA-1 fingerprint |
+| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `lex-persona` | `http://tsa.lex-persona.com/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `accv` | `http://tss.accv.es:8318/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+
+A `http://` authority is recorded with `time.tsa.<id>.insecure-http = true`. At seal time, where the
+policy is loaded, all of them share **one** warning line: five ids are named, the rest counted
+(`… and 2 more`). The token integrity comes from the signature against the pinned root, not from
+the transport; only the imprint and availability are exposed.
 
 Every preset but `freetsa` is fetched by asking the endpoint for a token and taking the self-signed
 root of the reply; only FreeTSA publishes a plain PEM.
@@ -187,16 +194,31 @@ Choose interactively which preset authorities this repository uses, then pin the
 remove the preset sections that were not chosen. A section whose id is not a preset is untouched.
 
 ```
-1) freetsa https://freetsa.org/tsr pinned A6:37:…
-2) ai-moda https://rfc3161.ai.moda tofu
+1) freetsa https://freetsa.org/tsr default pinned A6:37:9E:7C:…:AA:BC
+2) digicert http://timestamp.digicert.com default pinned 05:63:B8:63:…:4D:43 insecure-http
+3) sectigo https://timestamp.sectigo.com/qualified opt-in pinned CB:73:94:4C:…:43:07
+4) certum http://time.certum.pl opt-in pinned 07:E0:32:E0:…:06:9E insecure-http
 …
-Authorities to enable (e.g. 1,3-4, all, none): 1,3-4
+10) swisssign http://tsa.swisssign.net opt-in tofu insecure-http
+…
+22) accv http://tss.accv.es:8318/tsa opt-in pinned 93:05:7A:88:…:64:17 insecure-http
+Authorities to enable (e.g. 1,3-4, all, none): 1,2,10
+enabled freetsa (https://freetsa.org/tsr) fingerprint A6:37:9E:7C:…:AA:BC
+enabled digicert (http://timestamp.digicert.com) fingerprint 05:63:B8:63:…:4D:43
+enabled swisssign (http://tsa.swisssign.net) fingerprint 61:A2:9F:…:3E
 ```
+
+The scope column says `default` for what `install` writes without a flag and `opt-in` for the rest;
+`select` does not preselect anything, `all` really means all. A `pinned` row is checked against the
+table when it is pinned and a mismatch is a refusal. A `tofu` row can only be reviewed by reading
+the fingerprint the command prints, which is why it is printed in full; `git time anchor pin`
+records the pinned bundle's fingerprint in `time.anchors-lock` so a later change is caught.
 
 Indices are one-based, ranges are inclusive, and an empty answer means `none`. Anything else is
 reported in one line and asked again, three times, then the command exits `2`. Each enabled
 authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned prints
-`failed <id>: <reason>` and makes the command exit `1`. `--dry-run` prints what it would do.
+`failed <id>: <reason>` and makes the command exit `1`. `--dry-run` prints what it would do and
+changes nothing.
 
 The command asks a question, so a stdin that is not a terminal is refused (`2`) rather than left to
 hang. `--interactive` says the answer is being piped. A script that needs no prompt uses

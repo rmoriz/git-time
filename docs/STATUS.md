@@ -25,7 +25,7 @@ add third
 
 X-RFC3161-Imprint: sha256:826b49a7b93ae87cf483701418fddbf95d0c43bc2dcb6571e222331288ee5a7a
 X-RFC3161-Object: 71068e2caa5a3fbf20d03ad72c55d012caed45d2
-X-RFC3161-Fail: id=ai-moda; reason=anchor-ai-moda-could-not-be-read…
+X-RFC3161-Fail: id=digicert; reason=anchor-digicert-could-not-be-read…
 X-RFC3161-Fail: id=freetsa; reason=timeout
 ```
 
@@ -82,12 +82,13 @@ unparseable ids.
 The lock is a review artifact, **not a trust store**: verification keeps judging from the pinned
 bundle, and deleting the lock changes no verdict.
 
-Presets live in `git_time_core::presets`; `install --preset public` and `tsa preset add` write
-the same keys from that one table. Only `anchor fetch` and `preset add` touch the network, and
+Presets live in `git_time_core::presets`; `install --preset public` (the curated pair),
+`--preset all` and `tsa preset add` write the same keys from that one table. Only `anchor fetch` and `preset add` touch the network, and
 both honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
 it is pinned; a mismatch is refused and leaves the previous anchor alone. The presets without one
 are trust on first use and print the fetched fingerprint, which is the only reviewable artifact of
-the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http` and warn at seal time.
+the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http`; all of them share one capped warning
+line at seal time.
 
 ## Adoption (Task 15)
 

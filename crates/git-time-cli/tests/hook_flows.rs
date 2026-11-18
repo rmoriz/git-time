@@ -707,8 +707,70 @@ fn a_plain_commit_is_sealed() {
     assert_rewrite(&repo, &head, &expected);
 }
 
-/// A plain-`http` authority warns on every seal, because the imprint travels in
-/// the clear — the token is still verified against the pinned root.
+/// A plain-`http` authority warns at seal, because the imprint travels in the
+/// clear — the token is still verified against the pinned root. One line for all
+/// of them: five are named, the rest counted, so `--preset all` does not bury
+/// the seal output.
+#[test]
+fn many_insecure_authorities_warn_on_one_capped_line() {
+    let repo = Repo::new();
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.url", "http://127.0.0.1:1/tsr"],
+    );
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.insecure-http", "true"],
+    );
+    for extra in 1..=6 {
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("time.tsa.extra{extra}.url"),
+                "http://127.0.0.1:1/tsr",
+            ],
+        );
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("time.tsa.extra{extra}.anchor"),
+                &pstr(&repo.authority.bundle()),
+            ],
+        );
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("time.tsa.extra{extra}.insecure-http"),
+                "true",
+            ],
+        );
+    }
+
+    let output = git_output(
+        repo.path(),
+        &["commit", "--allow-empty", "-m", "many insecure"],
+        b"",
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("7 authorities use plain http ("),
+        "all seven are counted: {stderr}"
+    );
+    assert!(
+        stderr.contains("and 2 more)"),
+        "only five are named: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("authorities use plain http").count(),
+        1,
+        "one line, not one per authority: {stderr}"
+    );
+}
+
 #[test]
 fn an_insecure_authority_warns_at_seal_time() {
     let repo = Repo::new();
@@ -729,11 +791,11 @@ fn an_insecure_authority_warns_at_seal_time() {
     );
     let stderr = text(&output.stderr);
     assert!(
-        stderr.contains("`stub` is configured over plain http"),
+        stderr.contains("1 authority uses plain http (stub)"),
         "the authority is named: {stderr}"
     );
     assert!(
-        stderr.contains("verified against the pinned anchor"),
+        stderr.contains("integrity is still verified, transport is not"),
         "the mitigation is named: {stderr}"
     );
     assert!(
