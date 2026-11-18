@@ -150,6 +150,8 @@ explicit parameters, still fails in `webpki` (see the known gaps).
 | `Required` keys seconds-only | also `10s`, `500ms` | ergonomics |
 | `UNSIGNED` verdict | unsigned commit stays `SEALED`, reported as `unsigned` in the `signature` field; `--require-signed` fails it | a gate is not evidence: the verdict names what the block is, and CI reads `pass` for the policy |
 | any commit may be sealed | never rewrite a commit reachable from a remote-tracking ref | `post-merge` also fires on a fast-forward `git pull`; sealing would make the next push non-fast-forward |
+| the path is held to `timeStamping` exactly | `required_if_present` on the path, the strict rule only on the signer | RFC 5280 makes a CA's EKU a restriction only when present; the DFN, Belgium and CESnet CAs carry none |
+| DER as written | three tolerated shapes: unsorted signed attributes, fractional genTime, a two-byte policy OID | Apple and Lex Persona sign the attribute order they wrote; Lex Persona sends milliseconds; Apple stamps under `1.2.3`, which `der`'s OID decoder refuses. Each reading stays inside the signature |
 
 ## Known gaps
 

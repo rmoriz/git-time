@@ -62,6 +62,28 @@
 //! legal RFC 3161; refusing them would fail whole TSA services for the shape of
 //! their signatures rather than their evidence.
 
+//! # What is tolerated on purpose
+//!
+//! Three shapes in wide use are not what DER demands, and refusing them would
+//! drop whole TSA services over formatting. None of them weakens a check: every
+//! one stays inside bytes the TSA signed or fields the record compares.
+//!
+//! - **Signed attributes out of DER order.** Apple and Lex Persona sign the
+//!   order they wrote instead of the sorted one. The attributes are re-tagged
+//!   `SET OF` in arrival order ([`as_set`]), so the signature is checked over
+//!   exactly what was signed.
+//! - **Fractional seconds in genTime.** RFC 3161 allows them and Lex Persona
+//!   sends milliseconds; `der` parses whole seconds only. The fraction is
+//!   dropped ([`generalized_time`]) and the whole second compared.
+//! - **A policy OID under three bytes.** Apple stamps under `1.2.3`, and `der`
+//!   decodes OIDs through `const_oid`, which wants at least three arcs. The OID
+//!   is read by hand ([`policy_oid`]) and compared as text with the record.
+//!
+//! A *CA* certificate without an EKU is accepted for the same reason
+//! (RFC 5280 §4.2.1.12 makes a CA's EKU a restriction only when it is present),
+//! while the signer must still carry a critical `timeStamping` EKU
+//! ([`sole_timestamping_eku`]).
+
 use std::collections::BTreeSet;
 use std::ops::Range;
 
@@ -75,7 +97,7 @@ use cms::cert::CertificateChoices;
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier};
 use der::TagNumber;
-use der::asn1::{GeneralizedTime, ObjectIdentifier, OctetStringRef, SetOfVec};
+use der::asn1::{GeneralizedTime, ObjectIdentifier, OctetStringRef};
 use der::{Decode, Encode, Reader, SliceReader, Tag};
 use jiff::Timestamp;
 use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
@@ -298,6 +320,38 @@ fn trim_zeros(bytes: &[u8]) -> &[u8] {
     &bytes[first..]
 }
 
+/// Re-tag CMS signed attributes as the `SET OF` the signature covers.
+///
+/// The elements keep the order they arrived in: `der`'s `SetOfVec` would sort
+/// them (and refuse a list that is not already sorted), but the signature is over
+/// what the TSA wrote, and more than one TSA writes the attributes unsorted.
+fn as_set(attributes: &[x509_cert::attr::Attribute]) -> Result<Vec<u8>, Invalid> {
+    let mut body = Vec::new();
+    for attribute in attributes {
+        body.extend_from_slice(&attribute.to_der().map_err(|_| Invalid::Malformed)?);
+    }
+    let mut out = vec![0x31];
+    der_length(&mut out, body.len());
+    out.extend_from_slice(&body);
+    Ok(out)
+}
+
+/// Append a DER length in the shortest form.
+fn der_length(out: &mut Vec<u8>, length: usize) {
+    if length < 0x80 {
+        out.push(u8::try_from(length).expect("short length"));
+        return;
+    }
+    let bytes = length.to_be_bytes();
+    let first = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .expect("long length");
+    let used = &bytes[first..];
+    out.push(0x80 | u8::try_from(used.len()).expect("length bytes"));
+    out.extend_from_slice(used);
+}
+
 /// The common name of a certificate's subject, when it has one.
 fn common_name(certificate: &Certificate) -> Option<String> {
     for rdn in certificate.tbs_certificate.subject.0.iter() {
@@ -381,16 +435,13 @@ impl Parsed {
             .ok_or(Invalid::Malformed)?;
 
         // RFC 5652: the attributes are stored under `[0] IMPLICIT` but the
-        // signature covers them re-tagged as `SET OF`.
-        let signed_attrs = SetOfVec::try_from(
-            signed_attributes
-                .iter()
-                .cloned()
-                .collect::<Vec<x509_cert::attr::Attribute>>(),
-        )
-        .map_err(|_| Invalid::Malformed)?
-        .to_der()
-        .map_err(|_| Invalid::Malformed)?;
+        // signature covers them re-tagged as `SET OF`. `SetOfVec::try_from`
+        // insists on the DER sort order, which several TSAs (Apple, Lex Persona)
+        // do not produce; the signature still covers the order they wrote, so the
+        // re-tagging keeps it.
+        let attributes: Vec<x509_cert::attr::Attribute> =
+            signed_attributes.iter().cloned().collect();
+        let signed_attrs = as_set(&attributes)?;
 
         Ok(Self {
             tst,
@@ -605,15 +656,17 @@ fn verify_chain(authority: &TsaAuthority, gen_time: Timestamp) -> Result<(), Inv
             &[trust_anchor],
             &intermediates,
             at,
-            webpki::KeyUsage::required(ID_KP_TIME_STAMPING),
+            // `required_if_present`, not `required`: webpki applies the usage to
+            // every certificate in the path, and CA certificates legitimately
+            // carry no EKU (DFN, Belgium, CESnet). RFC 5280 makes a CA's EKU a
+            // restriction only when present. The signer itself is held to the
+            // strict rule by `sole_timestamping_eku`.
+            webpki::KeyUsage::required_if_present(ID_KP_TIME_STAMPING),
             None,
             None,
         )
         .map(|_| ())
-        .map_err(|error| {
-            eprintln!("DBG webpki: {error:?}");
-            Invalid::Untrusted
-        })
+        .map_err(|_| Invalid::Untrusted)
 }
 
 /// Parse the outer `ContentInfo` and its `SignedData`.
@@ -727,8 +780,10 @@ fn content_type(attributes: &x509_cert::attr::Attributes) -> Result<(), Invalid>
 /// RFC 3161 §2.3: "The EKU extension must be critical ... The TSA certificate
 /// MUST have only the Time Stamping purpose". `webpki`'s
 /// `KeyUsage::required` accepts dual-purpose and non-critical certs, so the
-/// strict reading is enforced here. A missing, non-critical, duplicated,
-/// multi-purpose or `anyExtendedKeyUsage` EKU is all [`Invalid::Untrusted`].
+/// strict reading is enforced here. A non-critical, duplicated, multi-purpose or
+/// `anyExtendedKeyUsage` EKU is all [`Invalid::Untrusted`], and so is a missing
+/// one: with no EKU there is nothing that says the certificate is a TSA and
+/// nothing else.
 fn sole_timestamping_eku(certificate: &Certificate) -> bool {
     let mut seen = false;
     for extension in certificate.tbs_certificate.extensions.iter().flatten() {
@@ -784,12 +839,7 @@ impl Tst {
         // still judged field by field so the caller gets `Policy` rather than a
         // generic `Malformed` when the record names one.
         let policy = if next_tag(&mut reader)? == Some(Tag::ObjectIdentifier) {
-            Some(
-                reader
-                    .decode::<ObjectIdentifier>()
-                    .map_err(|_| Invalid::Malformed)?
-                    .to_string(),
-            )
+            Some(policy_oid(&mut reader)?)
         } else {
             None
         };
@@ -806,9 +856,7 @@ impl Tst {
         imprint_reader.finish(()).map_err(|_| Invalid::Malformed)?;
 
         let _serial = tlv(&mut reader, Tag::Integer)?;
-        let gen_time = GeneralizedTime::from_der(tlv_full(&mut reader, Tag::GeneralizedTime)?)
-            .map_err(|_| Invalid::Malformed)?;
-        let gen_time = timestamp(&gen_time)?;
+        let gen_time = generalized_time(tlv_full(&mut reader, Tag::GeneralizedTime)?)?;
 
         // Accuracy, then ordering, then the nonce.
         let mut nonce = None;
@@ -844,6 +892,80 @@ impl Tst {
             gen_time,
         })
     }
+}
+
+/// Read, as dotted decimal, the policy OID the TSTInfo declares.
+///
+/// `der` decodes OIDs through `const_oid`, which rejects any body shorter than
+/// three bytes; Apple's policy `1.2.3` encodes to two. The policy is only ever
+/// compared as text with the configured one, so it is decoded here.
+fn policy_oid(reader: &mut SliceReader<'_>) -> Result<String, Invalid> {
+    let body = tlv(reader, Tag::ObjectIdentifier)?;
+    if body.is_empty() {
+        return Err(Invalid::Malformed);
+    }
+
+    let mut arcs: Vec<String> = Vec::with_capacity(body.len() + 1);
+    let mut value: u64 = 0;
+    for byte in body {
+        value = value
+            .checked_mul(128)
+            .and_then(|value| value.checked_add(u64::from(byte & 0x7f)))
+            .ok_or(Invalid::Malformed)?;
+        if byte & 0x80 != 0 {
+            continue;
+        }
+        match arcs.len() {
+            0 => {
+                let (first, second) = match value {
+                    0..=39 => (0, value),
+                    40..=79 => (1, value - 40),
+                    _ => (2, value - 80),
+                };
+                arcs.push(first.to_string());
+                arcs.push(second.to_string());
+            }
+            _ => arcs.push(value.to_string()),
+        }
+        value = 0;
+    }
+
+    // A truncated group (continuation bit still set) is not a whole OID.
+    if arcs.is_empty() || body.last().is_some_and(|byte| byte & 0x80 != 0) {
+        return Err(Invalid::Malformed);
+    }
+    Ok(arcs.join("."))
+}
+
+/// Convert a DER `GeneralizedTime` into a [`Timestamp`].
+///
+/// RFC 3161 allows fractional seconds and TSAs use them (Lex Persona sends
+/// milliseconds), while the `der` crate accepts exactly the 15-byte whole-second
+/// form RFC 5280 writes for certificates. Verification compares what the TSTInfo
+/// declares, so the fraction is dropped before parsing; only the whole second is
+/// kept anyway.
+fn generalized_time(raw: &[u8]) -> Result<Timestamp, Invalid> {
+    if let Ok(time) = GeneralizedTime::from_der(raw) {
+        return timestamp(&time);
+    }
+    let body = raw.get(2..).ok_or(Invalid::Malformed)?;
+    let point = body
+        .iter()
+        .position(|byte| *byte == b'.')
+        .ok_or(Invalid::Malformed)?;
+    let end = body
+        .iter()
+        .position(|byte| *byte == b'Z')
+        .ok_or(Invalid::Malformed)?;
+    if point >= end {
+        return Err(Invalid::Malformed);
+    }
+    let mut trimmed = Vec::with_capacity(body.len());
+    trimmed.push(0x18);
+    trimmed.push(u8::try_from(body.len() - (end - point)).map_err(|_| Invalid::Malformed)?);
+    trimmed.extend_from_slice(&body[..point]);
+    trimmed.extend_from_slice(&body[end..]);
+    timestamp(&GeneralizedTime::from_der(&trimmed).map_err(|_| Invalid::Malformed)?)
 }
 
 /// Convert a DER time into a [`Timestamp`].
@@ -904,6 +1026,85 @@ mod tests {
         assert!(!nonce_matches(&[0x01], None));
         assert!(!nonce_matches(&[], Some(&[0x00, 0x01])));
         assert!(!nonce_matches(&[0x01], Some(&[0x02])));
+    }
+
+    #[test]
+    fn a_two_byte_policy_oid_is_read() {
+        // `der` decodes OIDs through `const_oid`, which refuses a body under
+        // three bytes; Apple's policy `1.2.3` encodes to two. The bytes are the
+        // whole `06 02 2a 03` value.
+        let value = [0x06, 0x02, 0x2a, 0x03];
+        let mut reader = SliceReader::new(&value).expect("reader");
+        assert_eq!(policy_oid(&mut reader).as_deref(), Ok("1.2.3"));
+    }
+
+    #[test]
+    fn a_long_policy_oid_is_read() {
+        let value = ObjectIdentifier::new("1.3.6.1.4.1.22542.3.2.0")
+            .expect("OID")
+            .to_der()
+            .expect("DER");
+        let mut reader = SliceReader::new(&value).expect("reader");
+        assert_eq!(
+            policy_oid(&mut reader).as_deref(),
+            Ok("1.3.6.1.4.1.22542.3.2.0")
+        );
+    }
+
+    #[test]
+    fn a_policy_oid_ending_mid_arc_is_malformed() {
+        let value = [0x06, 0x02, 0x2a, 0x86];
+        let mut reader = SliceReader::new(&value).expect("reader");
+        assert_eq!(policy_oid(&mut reader), Err(Invalid::Malformed));
+    }
+
+    #[test]
+    fn a_fractional_general_time_keeps_the_whole_second() {
+        // Lex Persona stamps milliseconds; `der` parses whole seconds only.
+        let fractional = b"\x18\x1320261118212802.307Z";
+        let whole = b"\x18\x0f20261118212802Z";
+        assert_eq!(
+            generalized_time(fractional).expect("fraction is dropped"),
+            generalized_time(whole).expect("whole second")
+        );
+    }
+
+    #[test]
+    fn a_long_length_is_written_shortest() {
+        let mut out = Vec::new();
+        der_length(&mut out, 0x7f);
+        der_length(&mut out, 0x80);
+        der_length(&mut out, 0x0102);
+        assert_eq!(out, [0x7f, 0x81, 0x80, 0x82, 0x01, 0x02]);
+    }
+
+    #[test]
+    fn signed_attributes_keep_the_order_they_arrived_in() {
+        // Apple and Lex Persona write the attributes out of DER order and sign
+        // that order; `SetOfVec` would sort (and refuse) them.
+        let attribute = |oid, value: &[u8]| x509_cert::attr::Attribute {
+            oid,
+            values: der::asn1::SetOfVec::try_from(vec![
+                der::Any::from_der(value).expect("value parses"),
+            ])
+            .expect("set"),
+        };
+        let signing_time = attribute(
+            ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.5"),
+            &[0x18, 0x01, 0x5a],
+        );
+        let content_type = attribute(OID_CONTENT_TYPE, &[0x06, 0x01, 0x2a]);
+
+        // Handed over in the sorted order's reverse.
+        let set = as_set(&[signing_time.clone(), content_type.clone()]).expect("set");
+
+        let first = signing_time.to_der().expect("DER");
+        let second = content_type.to_der().expect("DER");
+        assert_eq!(set[0], 0x31);
+        let body = &set[2..];
+        assert_eq!(body.len(), first.len() + second.len());
+        assert!(body.starts_with(&first));
+        assert!(body.ends_with(&second));
     }
 
     #[test]

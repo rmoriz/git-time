@@ -619,8 +619,30 @@ fn throwaway_tsa_token_signed_with(dir: &Path, eku: &str, digest: &str) -> (Vec<
 /// The same, with the key's curve written as `enc` (`named_curve` or the
 /// `explicit` domain parameters LibreSSL writes by default).
 fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (Vec<u8>, PathBuf) {
+    throwaway_tsa_token_under(dir, eku, digest, enc, false)
+}
+
+/// A token whose signer hangs off an intermediate CA that carries no extended
+/// key usage at all, with a critical `timeStamping` signer.
+///
+/// This is the shape of the DFN, Belgium and CESnet chains. RFC 5280 makes a
+/// CA's EKU a restriction only when it is present, so the path must verify.
+fn throwaway_chain_token(dir: &Path) -> (Vec<u8>, PathBuf) {
+    throwaway_tsa_token_under(dir, "critical,timeStamping", "sha256", "named_curve", true)
+}
+
+fn throwaway_tsa_token_under(
+    dir: &Path,
+    eku: &str,
+    digest: &str,
+    enc: &str,
+    intermediate: bool,
+) -> (Vec<u8>, PathBuf) {
     let ca_key = dir.join("tsa-ca-key.pem");
     let ca_pem = dir.join("tsa-ca.pem");
+    let int_key = dir.join("tsa-int-key.pem");
+    let int_csr = dir.join("tsa-int.csr");
+    let int_pem = dir.join("tsa-int.pem");
     let leaf_key = dir.join("tsa-leaf-key.pem");
     let leaf_csr = dir.join("tsa-leaf.csr");
     let leaf_pem = dir.join("tsa-leaf.pem");
@@ -661,6 +683,51 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
         "-extensions".as_ref(),
         "v3_ca".as_ref(),
     ]);
+
+    if intermediate {
+        openssl(&[
+            "req".as_ref(),
+            "-new".as_ref(),
+            "-newkey".as_ref(),
+            "ec".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_paramgen_curve:P-256".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_param_enc:named_curve".as_ref(),
+            "-nodes".as_ref(),
+            "-keyout".as_ref(),
+            int_key.as_os_str(),
+            "-out".as_ref(),
+            int_csr.as_os_str(),
+            "-subj".as_ref(),
+            "/CN=throwaway-tsa-intermediate".as_ref(),
+        ]);
+        let int_serial = dir.join("tsa-int.srl");
+        std::fs::write(&int_serial, "01\n").expect("write serial");
+        // `v3_ca` carries `keyCertSign` and no EKU, which is the point.
+        openssl(&[
+            "x509".as_ref(),
+            "-req".as_ref(),
+            "-sha256".as_ref(),
+            "-in".as_ref(),
+            int_csr.as_os_str(),
+            "-CA".as_ref(),
+            ca_pem.as_os_str(),
+            "-CAkey".as_ref(),
+            ca_key.as_os_str(),
+            "-CAserial".as_ref(),
+            int_serial.as_os_str(),
+            "-out".as_ref(),
+            int_pem.as_os_str(),
+            "-days".as_ref(),
+            "2".as_ref(),
+            "-extfile".as_ref(),
+            config.as_os_str(),
+            "-extensions".as_ref(),
+            "v3_ca".as_ref(),
+        ]);
+    }
+
     openssl(&[
         "req".as_ref(),
         "-new".as_ref(),
@@ -678,19 +745,24 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
         "-subj".as_ref(),
         "/CN=throwaway-tsa".as_ref(),
     ]);
-    std::fs::write(
-        &leaf_ext,
-        format!(
-            "basicConstraints=critical,CA:FALSE\n\
-             keyUsage=critical,digitalSignature\n\
-             extendedKeyUsage={eku}\n"
-        ),
-    )
-    .expect("write leaf extensions");
+    let mut extensions =
+        String::from("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n");
+    if !eku.is_empty() {
+        extensions.push_str(&format!("extendedKeyUsage={eku}\n"));
+    }
+    std::fs::write(&leaf_ext, extensions).expect("write leaf extensions");
     // LibreSSL's `-CAcreateserial` writes its serial into the shared temp
     // directory, not next to the CA, so parallel fixtures race on one file.
-    let serial_file = dir.join("tsa-ca.srl");
-    std::fs::write(&serial_file, "01\n").expect("write serial");
+    // A distinct serial: the intermediate above shares the leaf's issuer
+    // otherwise, and the parse drops the signer out of the intermediates by
+    // serial alone.
+    let serial_file = dir.join("tsa-leaf.srl");
+    std::fs::write(&serial_file, "0B\n").expect("write serial");
+    let (issuer_pem, issuer_key) = if intermediate {
+        (&int_pem, &int_key)
+    } else {
+        (&ca_pem, &ca_key)
+    };
     openssl(&[
         "x509".as_ref(),
         "-req".as_ref(),
@@ -698,9 +770,9 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
         "-in".as_ref(),
         leaf_csr.as_os_str(),
         "-CA".as_ref(),
-        ca_pem.as_os_str(),
+        issuer_pem.as_os_str(),
         "-CAkey".as_ref(),
-        ca_key.as_os_str(),
+        issuer_key.as_os_str(),
         "-CAserial".as_ref(),
         serial_file.as_os_str(),
         "-out".as_ref(),
@@ -714,7 +786,7 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
     // The fixture's TSTInfo, signed by the throwaway TSA as a CMS `SignedData`.
     // `openssl ts -reply` cannot be used: it rejects any signer whose EKU is not
     // both critical and sole, which is exactly what the negative cases vary.
-    // `openssl cms -sign` accepts them; `-certfile` puts the CA in the token.
+    // `openssl cms -sign` accepts them; `-certfile` puts the chain in the token.
     //
     // The certificates start "now", so the fixture's 05:38Z genTime would be
     // before their notBefore; the stamp is moved to now (same length) and only
@@ -737,6 +809,7 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
     let tst_path = dir.join("tst-info.der");
     std::fs::write(&tst_path, &tst).expect("write TSTInfo");
     let response = dir.join("throwaway-token.der");
+    let chain = if intermediate { &int_pem } else { &ca_pem };
     openssl(&[
         "cms".as_ref(),
         "-sign".as_ref(),
@@ -749,7 +822,7 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
         "-inkey".as_ref(),
         leaf_key.as_os_str(),
         "-certfile".as_ref(),
-        ca_pem.as_os_str(),
+        chain.as_os_str(),
         "-md".as_ref(),
         digest.as_ref(),
         "-outform".as_ref(),
@@ -789,6 +862,49 @@ fn token_cannot_supply_its_own_anchor() {
     assert!(
         verify::token(&record, &imprint(), wide_range(), &own).is_valid(),
         "throwaway token is otherwise well formed"
+    );
+}
+
+#[test]
+fn a_ca_without_eku_still_chains() {
+    // RFC 5280 §4.2.1.12: a CA's EKU restricts the path only when it is present.
+    // DFN, Belgium and CESnet issue from CAs that carry none, and `webpki`'s
+    // strict `KeyUsage::required` refuses them; `required_if_present` must not.
+    let dir = scratch();
+    let (token, ca_pem) = throwaway_chain_token(dir.path());
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    assert!(
+        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        "a CA without an EKU must not break the path"
+    );
+}
+
+#[test]
+fn a_signer_without_eku_is_untrusted() {
+    // The signer is held to the strict rule even though CAs are not: with no
+    // EKU there is nothing proving the certificate is a TSA and nothing else.
+    let dir = scratch();
+    let (token, ca_pem) = throwaway_tsa_token_under(dir.path(), "", "sha256", "named_curve", false);
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    assert_eq!(
+        verify::token(&record, &imprint(), wide_range(), &anchors),
+        TokenVerdict::Invalid(Invalid::Untrusted)
     );
 }
 
