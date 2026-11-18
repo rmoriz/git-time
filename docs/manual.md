@@ -218,7 +218,6 @@ to make, and `a` really is all 22.
    [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
    [ ] 17  ssl-com            pin B7:AB:33:08… http
    [ ] 18  belgium            pin 98:98:9F:EE… http
-   [ ] 19  cesnet             pin E7:84:74:90… 
   …
 url: http://timestamp.digicert.com
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
@@ -253,8 +252,9 @@ full below the list.
 
 The list is a window sized to the terminal: the footer, the URL line and the cursor row stay on
 screen, a cut edge is marked `…`, and the frame is re-measured from the terminal each key so a
-resize is honoured. On a terminal too short for the footer it degrades to the cursor row and the
-footer.
+resize is honoured. The last row and the last column stay free, so nothing wraps and the screen
+never scrolls under the frame. On a terminal too short for the footer it degrades to the cursor row
+and the footer.
 
 Each enabled authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned
 prints `failed <id>: <reason>` and makes the command exit `1` while the others still pin. Under

@@ -44,7 +44,6 @@ endpoint; the full URL of the cursor row is printed below the list, so no column
    [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
    [ ] 17  ssl-com            pin B7:AB:33:08… http
    [ ] 18  belgium            pin 98:98:9F:EE… http
-   [ ] 19  cesnet             pin E7:84:74:90… 
   …
 url: http://timestamp.digicert.com
 space toggle  a all  n none  j/k or arrows move  enter save  q abort

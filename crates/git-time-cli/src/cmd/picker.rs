@@ -203,9 +203,10 @@ const HELP: &str = "space toggle  a all  n none  j/k or arrows move  enter save 
 /// The endpoint of the cursor row is printed in full below the list instead of
 /// costing a column.
 ///
-/// At most `rows` lines, at most `cols` columns, lines separated by `\r\n` and
-/// the last one not terminated: a trailing newline would scroll the top row
-/// away on a screen that is exactly full.
+/// At most `rows - 1` lines, at most `cols - 1` columns, lines separated by
+/// `\r\n` and the last one not terminated. All three leave the bottom row and
+/// the last column free: a line that fills the last column wraps, a trailing
+/// newline advances a line, and either scrolls a screen that is already full.
 /// The list is a window that keeps the cursor visible and marks a cut edge with
 /// `…`; the footer (URL, help, count, prompt, error) is always there. Below the
 /// room the footer needs, it degrades to the cursor row and the footer.
@@ -217,7 +218,7 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
 
     // Footer: URL, help, count, prompt, and the error line when there is one.
     let footer = 4 + usize::from(selection.error().is_some());
-    let budget = rows.saturating_sub(footer).max(1);
+    let budget = rows.saturating_sub(footer).saturating_sub(1).max(1);
 
     let mut lines: Vec<String> = Vec::with_capacity(budget + footer);
     if len > 0 {
@@ -256,12 +257,15 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
         lines.push(error.to_owned());
     }
 
+    // One column short of the edge, or the terminal wraps the row and the next
+    // `\r\n` lands two lines down.
+    let width = cols.saturating_sub(1).max(1);
     let mut out = String::with_capacity((budget + footer) * 64);
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
             out.push_str("\r\n");
         }
-        out.push_str(&fit(line, cols));
+        out.push_str(&fit(line, width));
     }
     out
 }
@@ -628,8 +632,8 @@ mod tests {
                         "no lone CR as {cols}/{cursor}: {line:?}"
                     );
                     assert!(
-                        line.chars().count() <= cols,
-                        "{} > {cols} at cursor {cursor}: {line:?}",
+                        line.chars().count() < cols,
+                        "{} >= {cols} at cursor {cursor}: {line:?}",
                         line.chars().count()
                     );
                 }
@@ -643,16 +647,13 @@ mod tests {
             let mut selection = picked();
             press(&mut selection, Key::End);
             let rendered = frame(&selection, &presets::PRESETS, rows, 80);
+            // One line short of the bottom, or a full screen scrolls.
             assert!(
-                rendered.lines().count() <= rows,
+                rendered.lines().count() < rows,
                 "{} lines for {rows} rows",
                 rendered.lines().count()
             );
-            // No trailing newline, or the top row scrolls away on a full screen.
-            assert!(!rendered.ends_with('\n'), "no scroll at {rows} rows");
-            if rows == 24 {
-                assert_eq!(rendered.lines().count(), rows, "a full screen is full");
-            }
+            assert!(!rendered.ends_with('\n'), "no trailing line at {rows} rows");
         }
     }
 
@@ -699,7 +700,7 @@ mod tests {
 
         // A 40-character name and a 59-character fingerprint, both cut.
         let long = row_of(&[long_preset()]);
-        assert!(long.chars().count() <= 60, "{long:?}");
+        assert!(long.chars().count() < 60, "{long:?}");
         assert_eq!(
             long.matches('…').count(),
             2,
@@ -725,6 +726,22 @@ mod tests {
             "{long:?} / {short:?}"
         );
         assert_eq!(column(&long, "pin "), 11 + super::NAME_WIDTH + 1);
+    }
+
+    #[test]
+    fn a_forty_column_frame_leaves_the_last_column_free() {
+        for cursor in [0, 10, presets::PRESETS.len() - 1] {
+            let mut selection = picked();
+            for _ in 0..cursor {
+                press(&mut selection, Key::Down);
+            }
+            let rendered = frame(&selection, &presets::PRESETS, 12, 40);
+            assert!(rendered.lines().count() <= 11, "{rendered:?}");
+            for line in rendered.lines() {
+                assert_ne!(line.chars().count(), 40, "a full line wraps: {line:?}");
+                assert!(line.chars().count() < 40, "{line:?}");
+            }
+        }
     }
 
     #[test]
