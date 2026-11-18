@@ -100,7 +100,10 @@ needs a single macOS runner. That is deliberate: the account serves about two co
 runners and cancels a job that queues for more than fifteen minutes, which fails the run. A job so
 cancelled twice is what kept `v0.1.0` from publishing. `.github/workflows/release.yml` builds the
 tag, refuses to publish unless the suite is green, and attaches `SHA256SUMS`. The musl targets
-build in separate target dirs, so no host-built build script crosses a container boundary. `tests/live_tsa.rs` is the ignored
+build in separate target dirs, so no host-built build script crosses a container boundary.
+
+If the macOS leg is cancelled in the queue anyway, `gh run rerun <run-id> --failed` retries only
+that job; `v0.1.0` published on the first retry. A tag is never force-pushed to work around it. `tests/live_tsa.rs` is the ignored
 smoke test against the public authorities:
 
 ```console
