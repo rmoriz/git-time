@@ -116,10 +116,22 @@ pub fn run(
     if json_output {
         print_json(&evidence, &errors, &require, required);
     } else {
+        // One blank line between records: every record is more than one line,
+        // and without the gap the next `PASS` reads as part of the previous
+        // commit's answers.
+        let mut first = true;
         for found in &evidence {
+            if !first {
+                println!();
+            }
+            first = false;
             print_human(found, &require, required);
         }
         for (oid, error) in &errors {
+            if !first {
+                println!();
+            }
+            first = false;
             println!("FAIL {} ERROR 0/{required} TSA(s)", short(oid));
             println!("  {error}");
         }
@@ -170,7 +182,8 @@ fn print_human(evidence: &CommitEvidence, require: &Require, required: usize) {
     );
     // Printed on a pass too: "SEALED" says a quorum was reached, not by whom,
     // and an authority is only worth counting if a reader can see which one it
-    // was, when it answered and under which anchor.
+    // was and when it answered. The anchor stays in `--json`; on every pass it
+    // is the same long fingerprint and drowns the line.
     for tsa in &evidence.per_tsa {
         let mut line = format!("  {}: {}", tsa.id, tsa.verdict);
         if let Some(gen_time) = tsa.gen_time {
@@ -184,10 +197,6 @@ fn print_human(evidence: &CommitEvidence, require: &Require, required: usize) {
         if let Some(serial) = &tsa.serial {
             line.push_str("; serial ");
             line.push_str(serial);
-        }
-        if let Some(anchor) = &tsa.anchor {
-            line.push_str("; anchor ");
-            line.push_str(anchor);
         }
         println!("{line}");
     }

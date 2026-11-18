@@ -148,9 +148,12 @@ The default target is HEAD.
 Output is one line per commit: PASS or FAIL, the short object id, the verdict
 and the verified quorum, followed by one indented line per authority answer
 and per failing gate.
-An answer line carries the verdict, the genTime, the signer's serial and the
-SHA-256 of the anchor it was judged against, so a PASS shows who answered and
-under which root instead of only that a quorum was reached.
+An answer line carries the verdict, the genTime and the signer's serial, so a
+PASS shows who answered and when instead of only that a quorum was reached.
+The anchor's SHA-256 is the one field left to `--json`, where it is there to be
+compared rather than read; in the plain output the same long fingerprint on
+every pass drowns the line.
+Records are separated by a blank line.
 Warnings are printed on a PASS too.
 .PP
 Read\-only, except that the signature check may leave one loose object behind

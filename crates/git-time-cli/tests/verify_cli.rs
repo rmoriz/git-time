@@ -732,6 +732,32 @@ fn sign_here(repo: &Repo) {
 
 // --- cases --------------------------------------------------------------
 
+/// Records are separated by a blank line: each is several lines long, and
+/// without the gap the next `PASS` reads as another answer of the previous one.
+#[test]
+fn a_blank_line_separates_two_commit_records() {
+    let repo = Repo::new();
+    let second = repo.commit("second");
+    repo.commit("third");
+
+    let output = verify(&repo, &second, &["HEAD"]);
+    let all = lines(&output);
+    assert_eq!(output.status.code(), Some(0), "{all:?}");
+    let blank = all.iter().position(String::is_empty).expect("a blank line");
+    assert!(
+        blank > 0 && all[blank - 1].starts_with("  stub: valid "),
+        "{all:?}"
+    );
+    assert!(
+        all[blank + 1].starts_with("PASS "),
+        "the next record follows the gap: {all:?}"
+    );
+    assert_eq!(
+        all.last().map(String::as_str).map(str::is_empty),
+        Some(false)
+    );
+}
+
 /// A sealed commit passes, and verifying it costs no stub request.
 #[test]
 fn a_sealed_commit_passes_without_touching_the_network() {
@@ -745,14 +771,15 @@ fn a_sealed_commit_passes_without_touching_the_network() {
     let line = &all[0];
     assert_eq!(output.status.code(), Some(0), "{line}");
     assert!(line.starts_with(&format!("PASS {} SEALED 1/1 TSA(s)", &oid[..7])));
-    // The detail is on a pass too: who answered, when, and under which anchor.
+    // The detail is on a pass too: who answered and when. The anchor is long
+    // and repeats on every pass, so it stays in `--json` only.
     let detail = &all[1];
     assert!(detail.starts_with("  stub: valid "), "{detail}");
     assert!(detail.contains("; serial "), "{detail}");
-    assert!(detail.contains("; anchor "), "{detail}");
+    assert!(!detail.contains("; anchor "), "{detail}");
     assert_eq!(all.len(), 2, "{all:?}");
 
-    // The same fields in the machine form, where a reader can assert on them.
+    // The machine form carries the anchor a reader checks the root against.
     let json_out = verify(&repo, &oid, &["--json"]);
     let parsed: serde_json::Value =
         serde_json::from_slice(&json_out.stdout).expect("one JSON document");
