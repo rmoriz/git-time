@@ -93,7 +93,10 @@ the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http` and war
 
 `README.md` is the front door, `docs/manual.md` the operator manual. `.github/workflows/ci.yml`
 runs fmt, clippy and the suite on Ubuntu and macOS; `.github/workflows/release.yml` builds the two
-musl and two darwin targets on a `v*` tag, with `SHA256SUMS`. `tests/live_tsa.rs` is the ignored
+musl and two darwin targets on a `v*` tag, with `SHA256SUMS`. Each workflow builds both targets of
+an OS in one job, so a tag push occupies one macOS runner rather than four — four parallel macOS
+jobs overran the runner slots once and a queued job was cancelled before it started, publishing
+nothing. The release workflow refuses to publish unless the same suite is green. `tests/live_tsa.rs` is the ignored
 smoke test against the public authorities:
 
 ```console
