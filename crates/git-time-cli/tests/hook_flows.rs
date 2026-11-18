@@ -111,13 +111,29 @@ fn note_failure(dir: &Path, args: &[&str], output: &Output) {
         return;
     }
     eprintln!(
-        "--- {:?} -> {:?}\nstdout:\n{}\nstderr:\n{}\nevidence:\n{}",
+        "--- {:?} -> {:?}\nfixture openssl:\n{}stdout:\n{}\nstderr:\n{}\nevidence:\n{}",
         args,
         output.status,
+        openssl_identity(),
         text(&output.stdout),
         text(&output.stderr),
         evidence
     );
+}
+
+/// The `openssl` the fixtures were built with, once per run: a LibreSSL and an
+/// OpenSSL differ in the very defaults that decide whether a token verifies.
+fn openssl_identity() -> String {
+    static IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let output = Command::new("openssl").args(["version", "-a"]).output();
+            match output {
+                Ok(output) => format!("{}{}", text(&output.stdout), text(&output.stderr)),
+                Err(error) => format!("openssl unavailable: {error}\n"),
+            }
+        })
+        .clone()
 }
 
 /// The seal's own record on the current commit, without the bulky token.

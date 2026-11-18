@@ -35,6 +35,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Which openssl
+        run: |
+          which -a openssl
+          openssl version -a
+          printf '%s\n' "$PATH"
+
+      - name: Token verification
+        run: cargo test -p git-time-core --test verify_token -- --nocapture
+
       - name: Seal tests
         run: cargo test -p git-time-cli --test hook_flows -- --nocapture
 
