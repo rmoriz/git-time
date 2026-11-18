@@ -139,7 +139,37 @@ fn run_time(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.output().expect("runs the binary")
+    let output = command.output().expect("runs the binary");
+    // A seal that lost an authority is asserted on through one hook line,
+    // which says nothing about *why* it failed. The reasons are trailers on
+    // the commit, so print them where a red CI log will show them.
+    let evidence = evidence(dir);
+    if !output.status.success() || evidence.contains("X-RFC3161-Fail") {
+        eprintln!(
+            "--- {:?} -> {:?}\nstdout:\n{}\nstderr:\n{}\nevidence:\n{}",
+            args,
+            output.status,
+            text(&output.stdout),
+            text(&output.stderr),
+            evidence
+        );
+    }
+    output
+}
+
+/// The seal's own record on the current commit, without the bulky token.
+fn evidence(dir: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["log", "-1", "--format=%B"])
+        .output()
+        .expect("reads the commit");
+    text(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("X-RFC3161") && !line.starts_with("X-RFC3161-Token:"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // --- throwaway authority ------------------------------------------------
