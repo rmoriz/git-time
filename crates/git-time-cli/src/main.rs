@@ -105,10 +105,7 @@ enum Command {
     /// Two hooks are required — `post-commit` and `post-merge` — plus
     /// `pre-commit` and `pre-merge-commit` for the gate.
     Install {
-        /// Which authorities to configure.
-        #[arg(long, value_enum, default_value = "public")]
-        preset: cmd::install::Preset,
-        /// Write no authority config (same as `--preset none`).
+        /// Write no authority config; keep whatever is configured.
         #[arg(long)]
         no_tsa: bool,
     },
@@ -191,7 +188,7 @@ async fn dispatch(cli: Cli) -> Exit {
             json,
             commits,
         } => cmd::log::run(directory, range, commits, json),
-        Command::Install { preset, no_tsa } => cmd::install::run(directory, preset, no_tsa).await,
+        Command::Install { no_tsa } => cmd::install::run(directory, no_tsa).await,
         Command::Uninstall { force } => cmd::uninstall::run(directory, force),
         Command::Doctor { json } => cmd::doctor::run(directory, json),
         Command::Tsa { command } => cmd::tsa::run(directory, command).await,

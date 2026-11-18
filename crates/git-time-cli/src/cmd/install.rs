@@ -15,35 +15,24 @@
 //! or the pre-commit framework is where the shims land — not `.git/hooks`, which
 //! those tools never run.
 //!
-//! `--preset public` (the default) configures the public authorities and fetches
-//! their anchors into the user's config directory. Existing `time.tsa.<id>.*`
-//! keys are left exactly as they are, so a working configuration survives a
-//! second run. A fetch that fails only warns: the hooks are still worth wiring,
-//! and `doctor` names the missing bundle. When the failure leaves an anchor path
-//! missing under the gate, the summary says loudly that commits will be refused.
-//! A fetched bundle is parsed into certificates before it replaces the pinned
-//! one, so prose cannot masquerade as an anchor. `--preset none` or `--no-tsa`
-//! writes no authority at all.
+//! `install` wires the hooks. The authority set belongs to the repository, not
+//! to a flag: a repository that already has `time.tsa.*` keys keeps them
+//! exactly as they are, and an empty one hands over to `tsa select` on a
+//! terminal so `git time install` alone still ends in a working setup. A fetch
+//! that fails only warns: the hooks are still worth wiring, and `doctor` names
+//! the missing bundle. When the failure leaves an anchor path missing under the
+//! gate, the summary says loudly that commits will be refused. A fetched bundle
+//! is parsed into certificates before it replaces the pinned one, so prose
+//! cannot masquerade as an anchor. `--no-tsa` writes no authority at all.
 
+use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
-use clap::ValueEnum;
-use git_time_core::presets::{self, Preset as Authority};
+use git_time_core::presets::Preset as Authority;
 use git_time_core::repo::Repo;
 use git_time_core::trust::AnchorStore;
 
 use crate::cmd::{Exit, anchors, git_stdout, hooks, open};
-
-/// Which authorities `install` configures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Preset {
-    /// The curated default: the two plain public authorities.
-    Public,
-    /// Every authority in the preset table.
-    All,
-    /// No authority at all.
-    None,
-}
 
 /// What pinning one authority came to.
 pub(crate) struct Pinned {
@@ -59,7 +48,7 @@ pub(crate) struct Pinned {
 }
 
 /// Run `git time install`.
-pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: bool) -> Exit {
+pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool) -> Exit {
     let repo = match open(directory) {
         Ok(repo) => repo,
         Err(exit) => return exit,
@@ -76,7 +65,7 @@ pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: 
         ));
     }
 
-    let gated = match gate_enabled(&repo) {
+    let gated = match gate(&repo) {
         Ok(gated) => gated,
         Err(exit) => return exit,
     };
@@ -95,37 +84,12 @@ pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: 
         }
     }
 
-    let preset = if no_tsa { Preset::None } else { preset };
-    let authorities: Vec<&Authority> = match preset {
-        Preset::Public => presets::curated().collect(),
-        Preset::All => presets::PRESETS.iter().collect(),
-        Preset::None => Vec::new(),
-    };
-    let mut kept = 0_usize;
-    let mut unpinned = Vec::new();
-    let mut mismatched = 0_usize;
-    for authority in &authorities {
-        match pin(&repo, authority).await {
-            Ok(pinned) => {
-                kept += pinned.kept;
-                // A mismatch already said its loud line naming both values; the
-                // generic "no anchor" warning would only repeat the tail of it.
-                if pinned.fingerprint_mismatch {
-                    mismatched += 1;
-                } else if let Some(path) = pinned.missing_anchor {
-                    unpinned.push((pinned.id, path));
-                }
-            }
-            Err(exit) => return exit,
-        }
-    }
-
+    // The wiring is done, so say so before anything can take over the screen.
     if crate::cmd::doctor::binary_on_path().is_none() {
         eprintln!(
             "rfc3161: warning: git-time is not on PATH; the hooks will do nothing until it is"
         );
     }
-
     println!(
         "hooks dir: {}{}",
         dir.display(),
@@ -135,15 +99,65 @@ pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: 
     if !preserved.is_empty() {
         println!("preserved: {}", preserved.join(", "));
     }
-    println!(
-        "tsa: {} configured{}",
-        authorities.len(),
-        if kept > 0 {
-            format!(" ({kept} existing key(s) kept)")
-        } else {
-            String::new()
+
+    // The authority set is the repository's, not the command line's: a
+    // configured repository keeps what it has, and an empty one hands over to
+    // the selector so `git time install` alone still ends in a working setup.
+    let keep = !no_tsa && anchors::any_section(&repo).unwrap_or(false);
+    let authorities: Vec<&Authority> = if no_tsa || keep {
+        Vec::new()
+    } else if std::io::stdin().is_terminal() {
+        return crate::cmd::tsa::select(&repo, true, false).await;
+    } else {
+        return Exit::usage(
+            "git time install: no authority is configured and stdin is not a terminal; use `git \
+             time tsa select`, `git time tsa preset add <id>`, or `git time tsa add <url>`",
+        );
+    };
+    let mut kept = 0_usize;
+    let mut unpinned: Vec<(String, PathBuf)> = Vec::new();
+    let mut mismatched = 0_usize;
+    // What is already configured is not fetched again, but it is still checked:
+    // an anchor path that does not load is exactly what doctor would name.
+    if keep {
+        for anchor in anchors::configured(&repo).unwrap_or_default() {
+            if !anchor.path.exists() || !crate::cmd::tsa::pinned(&anchor.id, &anchor.path) {
+                unpinned.push((anchor.id, anchor.path));
+            }
         }
-    );
+    }
+    for authority in &authorities {
+        match pin(&repo, authority).await {
+            Ok(pinned) => {
+                kept += pinned.kept;
+                // A mismatch already said its loud line naming both values; the
+                // generic "no anchor" warning would only repeat the tail of it.
+                if pinned.fingerprint_mismatch {
+                    mismatched += 1;
+                } else if let Some(path) = pinned.missing_anchor {
+                    unpinned.push((pinned.id.to_owned(), path));
+                }
+            }
+            Err(exit) => return exit,
+        }
+    }
+
+    if no_tsa {
+        println!("tsa: none configured (--no-tsa)");
+    } else if keep {
+        let existing = anchors::configured(&repo).map_or(0, |anchors| anchors.len());
+        println!("tsa: {existing} existing authority(ies) kept");
+    } else {
+        println!(
+            "tsa: {} configured{}",
+            authorities.len(),
+            if kept > 0 {
+                format!(" ({kept} existing key(s) kept)")
+            } else {
+                String::new()
+            }
+        );
+    }
     if mismatched > 0 {
         println!(
             "tsa: {mismatched} root fingerprint(s) did not match; the bundle(s) were not pinned"
@@ -387,7 +401,7 @@ fn set(repo: &Repo, key: &str, value: &str) -> Result<bool, Exit> {
 }
 
 /// Whether `time.gate = pre-commit` is configured.
-fn gate_enabled(repo: &Repo) -> Result<bool, Exit> {
+pub(crate) fn gate(repo: &Repo) -> Result<bool, Exit> {
     Ok(repo
         .config_non_empty("time.gate")
         .map_err(Exit::config)?

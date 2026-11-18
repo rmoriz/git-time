@@ -21,7 +21,7 @@
 //! without `+x`, a dangling symlink, a missing binary, an anchor that is not a
 //! certificate and an unknown gate are each a doctor problem with exit 1; a
 //! hand-edited shim survives `uninstall` unless `--force` is passed; and neither a
-//! second `--preset public` nor an unparseable fetch destroys working config or
+//! second `install` nor an unparseable fetch destroys working config or
 //! the previous anchor.
 
 use std::io::Write as _;
@@ -444,6 +444,33 @@ impl Repo {
         self.run_time_env(args, &[])
     }
 
+    /// Run with `input` on stdin, the way a piped answer arrives.
+    fn run_time_with_stdin(&self, args: &[&str], env: &[(&str, String)], input: &str) -> Output {
+        let mut command = Command::new(BIN);
+        command
+            .arg("-C")
+            .arg(self.path())
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_TIME_SKIP")
+            .envs(insulated_env())
+            .env("XDG_CONFIG_HOME", self.xdg.path())
+            .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawns the binary");
+        child
+            .stdin
+            .take()
+            .expect("a stdin pipe")
+            .write_all(input.as_bytes())
+            .expect("writes the answer");
+        child.wait_with_output().expect("runs the binary")
+    }
+
     fn run_time_env(&self, args: &[&str], env: &[(&str, String)]) -> Output {
         let mut command = Command::new(BIN);
         command
@@ -489,9 +516,23 @@ impl Repo {
         )]
     }
 
-    /// Install with no TSA preset (the common case).
+    /// Install the hooks and leave the authorities alone.
     fn install(&self) -> Output {
-        self.run_time(&["install", "--preset", "none"])
+        self.run_time(&["install", "--no-tsa"])
+    }
+
+    /// Install the hooks, then enable `selection` through the selector's pipe
+    /// route, which is what a script does and what a terminal does interactively.
+    fn install_presets(&self, selection: &str, env: &[(&str, String)]) -> Output {
+        // The wiring run ends in exit 2 when it finds nothing configured and
+        // has no terminal; that is the hand-over being tested elsewhere.
+        let wired = self.run_time(&["install"]);
+        assert!(
+            wired.status.success() || wired.status.code() == Some(2),
+            "the hooks are wired first: {}",
+            text(&wired.stderr)
+        );
+        self.run_time_with_stdin(&["tsa", "select", "--interactive"], env, selection)
     }
 }
 
@@ -997,18 +1038,17 @@ fn doctor_names_an_anchor_that_is_not_a_certificate() {
 }
 
 #[test]
-fn a_second_public_preset_keeps_a_working_config() {
+fn a_second_selection_keeps_a_working_config() {
     let repo = Repo::blank();
-    let first = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
+    let first = repo.install_presets("1", &repo.fetch_known_root());
     assert!(first.status.success(), "{}", text(&first.stderr));
 
     repo.config("time.tsa.freetsa.url", "https://mirror.example/tsr");
-    let second = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
-    assert!(second.status.success(), "{}", text(&second.stderr));
+    let second = repo.install_presets("1", &repo.fetch_known_root());
     let url = text(&git(repo.path(), &["config", "time.tsa.freetsa.url"]));
     assert_eq!(url.trim(), "https://mirror.example/tsr", "url is kept");
     assert!(
-        text(&second.stdout).contains("existing key(s) kept"),
+        text(&second.stdout).contains("key(s) kept"),
         "the skipped keys are reported: {}",
         text(&second.stdout)
     );
@@ -1018,11 +1058,7 @@ fn a_second_public_preset_keeps_a_working_config() {
 fn a_failed_fetch_under_the_gate_warns_that_commits_are_refused() {
     let repo = Repo::blank();
     repo.config("time.gate", "pre-commit");
-    let install = repo.run_time_env(
-        &["install", "--preset", "public"],
-        &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())],
-    );
-    assert!(install.status.success(), "{}", text(&install.stderr));
+    let install = repo.install_presets("1", &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())]);
     assert!(
         text(&install.stderr).contains("will be refused"),
         "the gate consequence is named loudly: {}",
@@ -1034,7 +1070,7 @@ fn a_failed_fetch_under_the_gate_warns_that_commits_are_refused() {
 fn an_unparseable_fetch_leaves_the_previous_anchor_untouched() {
     let repo = Repo::blank();
     assert!(
-        repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root())
+        repo.install_presets("1", &repo.fetch_known_root())
             .status
             .success()
     );
@@ -1042,11 +1078,10 @@ fn an_unparseable_fetch_leaves_the_previous_anchor_untouched() {
     let pinned = std::fs::read(&anchor).expect("pinned anchor");
 
     let prose = "this is prose, not a certificate\n";
-    let second = repo.run_time_env(
-        &["install", "--preset", "public"],
+    let _ = repo.install_presets(
+        "1",
         &[("GIT_TIME_ANCHOR_FETCH_CMD", format!("printf '{prose}'"))],
     );
-    assert!(second.status.success(), "{}", text(&second.stderr));
     assert_eq!(
         std::fs::read(&anchor).expect("anchor"),
         pinned,
@@ -1056,11 +1091,10 @@ fn an_unparseable_fetch_leaves_the_previous_anchor_untouched() {
     // With nothing pinned before, the bad bytes are kept so doctor can name
     // them as unparseable instead of as never fetched.
     let fresh = Repo::blank();
-    let broken = fresh.run_time_env(
-        &["install", "--preset", "public"],
+    let _ = fresh.install_presets(
+        "1",
         &[("GIT_TIME_ANCHOR_FETCH_CMD", format!("printf '{prose}'"))],
     );
-    assert!(broken.status.success(), "{}", text(&broken.stderr));
     let doctor = fresh.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
     assert!(
@@ -1073,7 +1107,7 @@ fn an_unparseable_fetch_leaves_the_previous_anchor_untouched() {
 #[test]
 fn tsa_presets_write_the_expected_config() {
     let repo = Repo::blank();
-    let none = repo.run_time(&["install", "--preset", "none"]);
+    let none = repo.run_time(&["install", "--no-tsa"]);
     assert!(none.status.success(), "{}", text(&none.stderr));
     let after_none = text(&git(
         repo.path(),
@@ -1082,17 +1116,10 @@ fn tsa_presets_write_the_expected_config() {
     assert!(!after_none.contains("time.tsa.freetsa"), "{after_none}");
     assert!(!after_none.contains("time.tsa.digicert"), "{after_none}");
 
-    // The default preset with a fetch that fails: a warning, still exit 0, and
-    // the missing anchors are what doctor complains about.
-    let public = repo.run_time_env(
-        &["install", "--preset", "public"],
-        &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())],
-    );
-    assert!(
-        public.status.success(),
-        "a failed fetch does not fail the install: {}",
-        text(&public.stderr)
-    );
+    // The curated pair with a fetch that fails: the config is still written,
+    // the failure is named, and the missing anchors are what doctor complains
+    // about.
+    let public = repo.install_presets("1,2", &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())]);
     let stderr = text(&public.stderr);
     assert!(stderr.contains("freetsa"), "{stderr}");
     assert!(stderr.contains("digicert"), "{stderr}");
@@ -1114,7 +1141,7 @@ fn tsa_presets_write_the_expected_config() {
     let stdout = text(&doctor.stdout);
     assert!(stdout.contains("missing anchor"), "{stdout}");
 
-    // `--no-tsa` beats the default preset too.
+    // `--no-tsa` writes no authority at all.
     let bare = Repo::blank();
     let no_tsa = bare.run_time(&["install", "--no-tsa"]);
     assert!(no_tsa.status.success(), "{}", text(&no_tsa.stderr));
@@ -1215,53 +1242,68 @@ fn a_merge_after_install_is_sealed() {
 
 /// Without a flag, `install` writes the curated pair and nothing else: the
 /// default must not cost a request per preset on every commit.
+/// With nothing configured and no terminal, `install` cannot ask; it wires the
+/// hooks anyway and names the three scriptable routes.
 #[test]
-fn install_without_a_flag_writes_only_the_curated_authorities() {
+fn install_without_authorities_refuses_a_non_tty_and_names_the_selector() {
     let repo = Repo::blank();
-    let install = repo.run_time_env(&["install"], &repo.fetch_known_root());
-    assert!(install.status.success(), "{}", text(&install.stderr));
+    for key in ["url", "anchor", "timeout"] {
+        repo.unset(&format!("time.tsa.stub.{key}"));
+    }
 
+    let install = repo.run_time(&["install"]);
+    assert_eq!(install.status.code(), Some(2), "{}", text(&install.stderr));
+    let stderr = text(&install.stderr);
+    assert!(stderr.contains("tsa select"), "{stderr}");
+    assert!(stderr.contains("tsa preset add"), "{stderr}");
+    assert!(stderr.contains("tsa add"), "{stderr}");
+    // The hooks are wired regardless: only the authority choice is missing.
+    assert!(repo.hooks_dir().join("post-commit").exists());
+}
+
+/// With one authority already configured, `install` never asks and writes none.
+#[test]
+fn install_with_an_authority_configured_does_not_ask() {
+    let repo = Repo::blank();
+
+    let install = repo.run_time(&["install"]);
+    assert_eq!(install.status.code(), Some(0), "{}", text(&install.stderr));
+    assert!(
+        text(&install.stdout).contains("existing authority"),
+        "{}",
+        text(&install.stdout)
+    );
     let listing = text(&git(
         repo.path(),
         &["config", "--get-regexp", r"^time\.tsa\.[a-z-]*\.url$"],
     ));
-    // The stub this fixture serves is not a preset, so only presets are counted.
-    let mut ids: Vec<&str> = listing
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-        .filter_map(|key| key.strip_prefix("time.tsa."))
-        .filter_map(|key| key.strip_suffix(".url"))
-        .filter(|id| git_time_core::presets::find(id).is_some())
-        .collect();
-    ids.sort_unstable();
-    assert_eq!(ids, ["digicert", "freetsa"], "{listing}");
+    assert!(listing.contains("time.tsa.stub.url"), "{listing}");
+    assert!(!listing.contains("time.tsa.freetsa.url"), "{listing}");
 }
 
 #[test]
-fn install_fetches_anchors_and_prints_their_fingerprints() {
+fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     let repo = Repo::new();
-    let install = repo.run_time_env(&["install", "--preset", "all"], &repo.fetch_known_root());
-    assert!(
-        install.status.success(),
-        "install failed: {}",
-        text(&install.stderr)
-    );
+    let install = repo.install_presets("all", &repo.fetch_known_root());
+    assert_eq!(install.status.code(), Some(1), "{}", text(&install.stderr));
     let stdout = text(&install.stdout);
-    assert!(
-        stdout.contains("tsa: 22 configured"),
+    assert_eq!(
+        stdout.matches("enabled ").count() + stdout.matches("failed ").count(),
+        22,
         "every preset is written: {stdout}"
     );
     // The only matching root is FreeTSA's; the remaining two TOFU presets take
     // whatever is fetched, so four anchors pin. Every other published root is
     // measured against the throwaway CA and refused.
-    assert_eq!(stdout.matches("sha256 ").count(), 4, "{stdout}");
+    assert_eq!(stdout.matches("enabled ").count(), 4, "{stdout}");
     assert!(
         stdout.contains("freetsa: root fingerprint matches"),
         "the match is said out loud: {stdout}"
     );
-    assert!(
-        stdout.contains("18 root fingerprint(s) did not match"),
-        "the refusals are summarised: {stdout}"
+    assert_eq!(
+        stdout.matches("failed ").count(),
+        18,
+        "every mismatched root is refused: {stdout}"
     );
 
     // FreeTSA's own fixture root is the one a published fingerprint can match.
@@ -1295,12 +1337,8 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
 #[test]
 fn install_refuses_a_root_whose_fingerprint_does_not_match() {
     let repo = Repo::blank();
-    let install = repo.run_time_env(&["install", "--preset", "all"], &repo.fetch_ca());
-    assert!(
-        install.status.success(),
-        "the hooks are still worth wiring: {}",
-        text(&install.stderr)
-    );
+    let install = repo.install_presets("all", &repo.fetch_ca());
+    assert_eq!(install.status.code(), Some(1), "{}", text(&install.stderr));
 
     // The fetched root is named next to the published one, and nothing is
     // pinned at a path that would otherwise be a trust decision.
@@ -1412,8 +1450,8 @@ fn install_fetches_into_the_configured_anchor_path() {
     let anchor = repo.path().join("pinned/custom-ca.pem");
     repo.config("time.tsa.freetsa.anchor", &pstr(&anchor));
 
-    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
-    assert!(install.status.success(), "{}", text(&install.stderr));
+    let install = repo.install_presets("1", &repo.fetch_known_root());
+    assert_eq!(install.status.code(), Some(0), "{}", text(&install.stderr));
     assert_eq!(
         read(&anchor),
         read(&freetsa_root()),
@@ -1439,11 +1477,7 @@ fn install_warns_about_a_missing_configured_anchor_under_the_gate() {
     let missing = repo.path().join("pinned/never-fetched.pem");
     repo.config("time.tsa.freetsa.anchor", &pstr(&missing));
 
-    let install = repo.run_time_env(
-        &["install", "--preset", "public"],
-        &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())],
-    );
-    assert!(install.status.success(), "{}", text(&install.stderr));
+    let install = repo.install_presets("1", &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())]);
     let stderr = text(&install.stderr);
     assert!(
         stderr.contains(&pstr(&missing)),

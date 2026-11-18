@@ -8,6 +8,7 @@ pub mod hook;
 pub mod hooks;
 pub mod install;
 pub mod log;
+pub mod picker;
 pub mod seal;
 pub mod tsa;
 pub mod uninstall;

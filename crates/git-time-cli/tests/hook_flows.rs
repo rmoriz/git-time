@@ -709,7 +709,7 @@ fn a_plain_commit_is_sealed() {
 
 /// A plain-`http` authority warns at seal, because the imprint travels in the
 /// clear — the token is still verified against the pinned root. One line for all
-/// of them: five are named, the rest counted, so `--preset all` does not bury
+/// of them: five are named, the rest counted, so a wide selection does not bury
 /// the seal output.
 #[test]
 fn many_insecure_authorities_warn_on_one_capped_line() {

@@ -10,7 +10,8 @@ Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-
 before they are stored, and written into the commit object.
 
 ```console
-$ git time install --preset public      # wires the hooks, fetches anchors
+$ git time tsa select                   # tick the authorities; anchors are pinned
+$ git time install                      # wires the hooks
 $ git commit -m "add entry point"       # the only command the user types
 rfc3161: sealed e595e4c by 1/2 TSA(s)
 ```
@@ -82,9 +83,9 @@ unparseable ids.
 The lock is a review artifact, **not a trust store**: verification keeps judging from the pinned
 bundle, and deleting the lock changes no verdict.
 
-Presets live in `git_time_core::presets`; `install --preset public` (the curated pair),
-`--preset all` and `tsa preset add` write the same keys from that one table. Only `anchor fetch` and `preset add` touch the network, and
-both honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
+Presets live in `git_time_core::presets`; `tsa select` and `tsa preset add` write keys from that
+one table. Only `anchor fetch` and `preset add` (and a selection) touch the network, and they all
+honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
 it is pinned; a mismatch is refused and leaves the previous anchor alone. The presets without one
 are trust on first use and print the fetched fingerprint, which is the only reviewable artifact of
 the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http`; all of them share one capped warning
@@ -122,7 +123,7 @@ It skips when the network is gone and removes its repository and fetched anchors
 
 - Verdicts are computed per commit and never replayed across a range: a forged parent does not
   taint a child.
-- `--preset public` fetches anchors over the network; behind a firewall it warns and leaves the
+- A selection fetches anchors over the network; behind a firewall it warns and leaves the
   repo unsealed rather than broken (`doctor` names the missing anchor).
 - `seal --range` cannot rewrite descendants of a range member; those dangle until re-sealed.
 - Failure reasons are sanitised into one trailer line, so an absolute path appears truncated.

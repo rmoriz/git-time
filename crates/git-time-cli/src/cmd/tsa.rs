@@ -3,7 +3,7 @@
 //! An authority is a `time.tsa.<id>` section of the **local** repository
 //! config; `add` writes it, `list` reads it, `remove` deletes it whole. Nothing
 //! here talks to the network — `preset add` is the one exception and goes
-//! through the same fetch path `install --preset` uses.
+//! through the same fetch path `install` uses.
 //!
 //! A value is validated before the first key is written, so a refused `add`
 //! leaves no half section behind. The policy OID is checked by
@@ -15,11 +15,10 @@
 //! `[a-z0-9-]`: it ends up in a config key, a trailer value and a file name, so
 //! anything else would need quoting somewhere.
 //!
-//! `select` is the interactive middle ground between `install --preset public`,
-//! which enables every preset, and `preset add <id>`, which enables one: it
-//! shows the table, takes a selection and only then pins. It asks a question, so
-//! it needs a terminal unless `--interactive` says an answer is being piped; a
-//! script otherwise uses `install --preset` or `preset add` instead.
+//! `select` is the cursor UI over the preset table: tick what this repository
+//! should use, save, and only then are anchors pinned and unchosen preset
+//! sections removed. It needs a terminal unless `--interactive` says an answer
+//! is being piped; a script otherwise uses `preset add` or `add`.
 
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
@@ -32,7 +31,7 @@ use git_time_core::trust::AnchorStore;
 use git_time_core::tsa::StampRequest;
 use serde_json::{Value, json};
 
-use crate::cmd::{Exit, anchors, git_stdout, install, open};
+use crate::cmd::{Exit, anchors, git_stdout, install, open, picker};
 
 /// The subcommands of `git time tsa`.
 #[derive(Debug, Subcommand)]
@@ -78,9 +77,6 @@ pub enum Command {
     },
     /// Choose interactively which preset authorities to enable here.
     Select {
-        /// Do not prompt: enable every preset, or remove the configured ones.
-        #[arg(long, value_name = "PRESET")]
-        preset: Option<SelectPreset>,
         /// Prompt even when stdin is not a terminal, so an answer can be piped.
         #[arg(long)]
         interactive: bool,
@@ -88,15 +84,6 @@ pub enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-}
-
-/// The non-interactive form of `tsa select`.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
-pub enum SelectPreset {
-    /// Enable every preset authority.
-    Public,
-    /// Remove every authority a preset configured.
-    None,
 }
 
 /// The subcommands of `git time tsa preset`.
@@ -163,10 +150,9 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
             PresetCommand::Add { name } => preset_add(&repo, &name).await,
         },
         Command::Select {
-            preset,
             interactive,
             dry_run,
-        } => select(&repo, preset, interactive, dry_run).await,
+        } => select(&repo, interactive, dry_run).await,
     }
 }
 
@@ -439,29 +425,37 @@ const SELECT_ATTEMPTS: usize = 3;
 /// The selection decides what is enabled *and* what is not: a preset section
 /// that is not chosen is removed, so the command can narrow a configuration as
 /// well as widen it. Sections whose id is not a preset are never touched.
-async fn select(
-    repo: &Repo,
-    preset: Option<SelectPreset>,
-    interactive: bool,
-    dry_run: bool,
-) -> Exit {
-    let chosen = match preset {
-        Some(SelectPreset::Public) => (0..presets::PRESETS.len()).collect(),
-        Some(SelectPreset::None) => Vec::new(),
-        None => {
-            // A prompt nobody answers hangs a script; say so instead.
-            if !interactive && !std::io::stdin().is_terminal() {
-                return Exit::usage(
-                    "git time tsa select: stdin is not a terminal; use `git time tsa select \
-                     --preset public|none`, `git time tsa preset add <id>` or `git time tsa \
-                     add <url>`",
-                );
+pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exit {
+    let chosen = if std::io::stdin().is_terminal() {
+        let mut selection = picker::Selection::default();
+        if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS) {
+            match outcome {
+                picker::Outcome::Save(chosen) => chosen,
+                picker::Outcome::Abort => {
+                    println!("nothing changed");
+                    return Exit::ok();
+                }
+                picker::Outcome::Stay => Vec::new(),
             }
+        } else {
+            // A terminal, but no raw mode to be had: the line prompt still asks.
             match ask() {
                 Ok(chosen) => chosen,
                 Err(exit) => return exit,
             }
         }
+    } else if interactive {
+        // A piped answer: the line prompt reads it, one line.
+        match ask() {
+            Ok(chosen) => chosen,
+            Err(exit) => return exit,
+        }
+    } else {
+        // A prompt nobody answers hangs a script; say so instead.
+        return Exit::usage(
+            "git time tsa select: stdin is not a terminal; use `git time tsa preset add <id>`, \
+             `git time tsa add <url>`, or `--interactive` with a piped answer",
+        );
     };
     apply(repo, &chosen, dry_run).await
 }
@@ -514,7 +508,7 @@ fn ask() -> Result<Vec<usize>, Exit> {
 ///
 /// The result keeps the order of the input and never repeats an index, so a
 /// doubled `1,1` still enables one authority once.
-fn parse_choice(input: &str, count: usize) -> Result<Vec<usize>, String> {
+pub(crate) fn parse_choice(input: &str, count: usize) -> Result<Vec<usize>, String> {
     let answer = input.trim().to_ascii_lowercase();
     if answer.is_empty() || answer == "none" {
         return Ok(Vec::new());
@@ -599,12 +593,22 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
             Ok(pinned) => {
                 if pinned.fingerprint_mismatch || pinned.missing_anchor.is_some() {
                     failed = true;
-                    let reason = if pinned.fingerprint_mismatch {
-                        "the published root fingerprint did not match"
+                    if let Some(path) = &pinned.missing_anchor {
+                        if install::gate(repo).unwrap_or(false) {
+                            eprintln!(
+                                "rfc3161: warning: no anchor for `{}` at {}; with time.gate = \
+                                 pre-commit every commit will be refused until it is pinned",
+                                preset.name,
+                                path.display()
+                            );
+                        }
+                        println!("failed {}: no anchor could be pinned", preset.name);
                     } else {
-                        "no anchor could be pinned"
-                    };
-                    println!("failed {}: {reason}", preset.name);
+                        println!(
+                            "failed {}: the published root fingerprint did not match",
+                            preset.name
+                        );
+                    }
                     continue;
                 }
                 let anchor = anchors::configured(repo)
@@ -622,11 +626,23 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
                     "enabled {} ({}) fingerprint {fingerprint}",
                     preset.name, preset.url
                 );
+                if pinned.kept > 0 {
+                    println!(
+                        "enabled {} ({}): {} existing key(s) kept",
+                        preset.name, preset.url, pinned.kept
+                    );
+                }
             }
             Err(exit) => return exit,
         }
     }
     if failed {
+        if install::gate(repo).unwrap_or(false) {
+            eprintln!(
+                "rfc3161: warning: with time.gate = pre-commit every commit will be refused until \
+                 the failed anchor(s) are pinned"
+            );
+        }
         Exit::seal(String::new())
     } else {
         Exit::ok()
@@ -649,7 +665,7 @@ fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
 }
 
 /// Whether `id`'s anchor at `path` loads.
-fn pinned(id: &str, path: &std::path::Path) -> bool {
+pub(crate) fn pinned(id: &str, path: &std::path::Path) -> bool {
     AnchorStore::load(&[(id.to_owned(), path.to_path_buf())]).is_ok()
 }
 

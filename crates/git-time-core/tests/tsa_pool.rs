@@ -276,7 +276,7 @@ async fn deadline_cuts_off_a_slow_source_and_keeps_the_fast_ones() {
 
 /// Many authorities, the quorum long since met, one straggler: the run must end
 /// at the deadline, not when the straggler does. That is what keeps
-/// `install --preset all` usable.
+/// twenty configured authorities usable.
 #[tokio::test]
 async fn a_met_quorum_does_not_wait_for_a_straggler() {
     let fast = Stub::spawn(vec![Step::ok(GRANTED)]).await;

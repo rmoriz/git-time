@@ -162,7 +162,7 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
     let ids = anchors::tsa_ids(repo)?;
     report.say(format!("tsa: {} configured", ids.len()));
     if ids.is_empty() {
-        report.problem("no TSA configured (run: git time install --preset public)".to_owned());
+        report.problem("no TSA configured (run: git time tsa select)".to_owned());
     }
 
     let configured = anchors::configured(repo)?;

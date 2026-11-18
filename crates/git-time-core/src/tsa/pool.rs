@@ -87,7 +87,7 @@ pub async fn run(
 /// The run ends as soon as it can: once the quorum is in hand and every other
 /// source has answered, and once the deadline is up while the quorum is already
 /// in hand, the stragglers are not worth the wait and become `timeout` records.
-/// That is what keeps `--preset all` near `deadline` instead of near the slowest
+/// That is what keeps a wide selection near `deadline` instead of near the slowest
 /// authority.
 ///
 /// The function has no error return: the outcome is always a value. A length

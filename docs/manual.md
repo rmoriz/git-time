@@ -82,20 +82,21 @@ The same evidence as one line per commit: short oid, TSA ids, genTimes, verdict.
 not a judgement: it exits `0` whenever it could read everything, and `1` only for a commit it could
 not read. `--json` carries no `pass`, `gates` or `required`.
 
-### `git time install [--preset public|none] [--no-tsa]`
+### `git time install [--no-tsa]`
 
-Wire the hooks and configure authorities. `post-commit` and `post-merge` are always wired;
-`pre-commit` and `pre-merge-commit` only under `time.gate = pre-commit`. A foreign hook is
-preserved as `<name>.pre-time` (then `.pre-time.<n>`) and chained, never overwritten. `--preset
-public` (the default) writes every entry of the built-in authority table and fetches their anchors;
-`--preset none` or `--no-tsa` writes no authority. A failed anchor fetch is a warning, not a
-failure; `doctor` names the gap. Exits `0` or `2`.
+Wire the hooks. `post-commit` and `post-merge` are always wired; `pre-commit` and
+`pre-merge-commit` only under `time.gate = pre-commit`. A foreign hook is preserved as
+`<name>.pre-time` (then `.pre-time.<n>`) and chained, never overwritten.
 
-A preset with a published root fingerprint is checked before it is pinned: a bundle whose root
-hashes to anything else is refused with both values named, any existing pin is left untouched, and
-the install still exits `0` (the hooks are worth wiring; `doctor` names the missing anchor). A
-preset without one is trust on first use and prints the fetched root fingerprint, which is the
-value to compare against the authority's publication.
+The authority set is chosen by configuration, not by a flag. `time.tsa.*` sections that already
+exist are left exactly as they are, so a second run, or a hand-made setup, survives. When none
+exist, `install` hands over to `git time tsa select` inline on a terminal. A stdin that is not a
+terminal is refused with exit `2` and one line naming the three scriptable routes — `git time tsa
+select`, `git time tsa preset add <id>`, `git time tsa add <url>` — because a prompt nobody answers
+would hang a script. `--no-tsa` writes no authority at all.
+
+A fetch that fails is a warning, not a failure; `doctor` names the gap, and under `time.gate =
+pre-commit` the summary says commits will be refused. Exits `0` or `2`.
 
 ### `git time uninstall [--force]`
 
@@ -131,12 +132,13 @@ Print the built-in presets, or configure one, anchor included, through the insta
 for an unknown name. A root fingerprint that does not match is a refusal, so a pinned preset never
 takes a substituted root.
 
-`install --preset public`, the default, writes the two `default` rows: `freetsa` and `digicert`,
-both pinned against a measured root. `--preset all` writes every row. Two is the default because
-every configured authority costs a request on every commit and every plain-http one costs a warning;
-`digicert` is the second because it is pinned and the most available of the rest, and two rather
-than one so `required = 1` still has a fallback. `sectigo` is not a default: its endpoint refuses
-the TLS handshake on some stacks. Everything else is opt-in.
+The `default` scope marks the curated pair — `freetsa` and `digicert`, both pinned against a
+measured root. It is what the selector recommends, not a preselection; `install` writes it only
+through the selector. Two is the recommendation because every configured authority costs a request
+on every commit and every plain-http one costs a warning; `digicert` is the second because it is
+pinned and the most available of the rest, and two rather than one so `required = 1` still has a
+fallback. `sectigo` is not recommended: its endpoint refuses the TLS handshake on some stacks.
+Everything else is opt-in.
 
 The table is ordered the `default` rows first. For a TOFU row no value can be checked, so
 `preset add` prints the fetched root fingerprint in full — that line is what makes the first pin
@@ -188,41 +190,60 @@ were wrong for their endpoint and are replaced by the measured ones — `sectigo
 carry the fingerprint of the root their endpoint actually chains to. Without that, a pinned preset
 would refuse its own authority forever.
 
-### `git time tsa select [--preset public|none] [--interactive] [--dry-run]`
+### `git time tsa select [--interactive] [--dry-run]`
 
-Choose interactively which preset authorities this repository uses, then pin the chosen anchors and
-remove the preset sections that were not chosen. A section whose id is not a preset is untouched.
+Choose which preset authorities this repository uses, then pin the chosen anchors and remove the
+preset sections that were not chosen. A section whose id is not a preset is untouched, and saving
+with nothing selected is therefore the removal path.
+
+The list is a cursor UI on the alternate screen. Nothing is preselected: the selection is the user's
+to make, and `a` really is all 22.
 
 ```
-1) freetsa https://freetsa.org/tsr default pinned A6:37:9E:7C:…:AA:BC
-2) digicert http://timestamp.digicert.com default pinned 05:63:B8:63:…:4D:43 insecure-http
-3) sectigo https://timestamp.sectigo.com/qualified opt-in pinned CB:73:94:4C:…:43:07
-4) certum http://time.certum.pl opt-in pinned 07:E0:32:E0:…:06:9E insecure-http
-…
-10) swisssign http://tsa.swisssign.net opt-in tofu insecure-http
-…
-22) accv http://tss.accv.es:8318/tsa opt-in pinned 93:05:7A:88:…:64:17 insecure-http
-Authorities to enable (e.g. 1,3-4, all, none): 1,2,10
-enabled freetsa (https://freetsa.org/tsr) fingerprint A6:37:9E:7C:…:AA:BC
-enabled digicert (http://timestamp.digicert.com) fingerprint 05:63:B8:63:…:4D:43
-enabled swisssign (http://tsa.swisssign.net) fingerprint 61:A2:9F:…:3E
+  [ ]  1  freetsa              https://freetsa.org/tsr                       pinned A6:37:9E:…:AA:BC 
+> [x]  2  digicert             http://timestamp.digicert.com                 pinned 05:63:B8:…:4D:43 insecure-http
+  [ ]  3  sectigo              https://timestamp.sectigo.com/qualified       pinned CB:73:94:…:43:07 
+  [ ]  4  certum               http://time.certum.pl                         pinned 07:E0:32:…:06:9E insecure-http
+   …
+  [ ]  9  cartaodecidadao      http://ts.cartaodecidadao.pt/tsa/server       tofu                    insecure-http
+space toggle  a all  n none  j/k or arrows move  enter save  q abort
+1 selected
+> _
 ```
 
-The scope column says `default` for what `install` writes without a flag and `opt-in` for the rest;
-`select` does not preselect anything, `all` really means all. A `pinned` row is checked against the
-table when it is pinned and a mismatch is a refusal. A `tofu` row can only be reviewed by reading
-the fingerprint the command prints, which is why it is printed in full; `git time anchor pin`
-records the pinned bundle's fingerprint in `time.anchors-lock` so a later change is caught.
+| Key | Effect |
+|---|---|
+| `j`, `k`, `l`, `h`, down, up | Move the cursor; it wraps at both ends |
+| `Home`, `End`, `[H`, `[F` | Jump to the first, the last row |
+| `space` | Tick or untick the row under the cursor |
+| `a` | Tick every row |
+| `n` | Untick every row |
+| `enter` | Save and pin the ticks |
+| `q`, `esc`, `ctrl-c` | Leave without writing |
+| `0`–`9`, `,`, `-` | Append to the prompt line |
+| `backspace` | Delete the last typed character |
+| `esc` (with typed text) | Clear the prompt line, do not leave |
 
-Indices are one-based, ranges are inclusive, and an empty answer means `none`. Anything else is
-reported in one line and asked again, three times, then the command exits `2`. Each enabled
-authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned prints
-`failed <id>: <reason>` and makes the command exit `1`. `--dry-run` prints what it would do and
-changes nothing.
+Typed input is the previous line prompt, kept for muscle memory and for piping: a non-empty buffer
+is applied by `enter` through the same parser (`1,3-4`, `all`, `none`), so `printf '1,3\n' | git
+time tsa select --interactive` still works. A buffer that does not parse shows one error line and
+keeps the frame. A terminal that cannot be put into raw mode at all falls back to the line prompt of
+the early versions, saying so in one line.
+
+The right-hand column is the trust tier. `pinned` is checked against the table when it is pinned and
+a mismatch is a refusal. `tofu` can only be reviewed by reading the fingerprint the command prints —
+`git time anchor pin` records the pinned bundle's fingerprint in `time.anchors-lock` so a later
+change is caught. `insecure-http` marks a plain-`http` endpoint.
+
+Each enabled authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned
+prints `failed <id>: <reason>` and makes the command exit `1` while the others still pin. Under
+`time.gate = pre-commit` a missing anchor also warns that commits will be refused. `--dry-run`
+prints the outcome and changes nothing.
 
 The command asks a question, so a stdin that is not a terminal is refused (`2`) rather than left to
-hang. `--interactive` says the answer is being piped. A script that needs no prompt uses
-`--preset public|none`, `git time tsa preset add <id>`, or `git time tsa add <url>`.
+hang. `--interactive` says the answer is being piped. There are three routes that never ask:
+`git time tsa select` on a terminal, `git time tsa preset add <id>` for one preset, and `git time
+tsa add <url>` for an endpoint of your own.
 
 ### `git time anchor fetch <url> --id ID [--insecure-http]`
 

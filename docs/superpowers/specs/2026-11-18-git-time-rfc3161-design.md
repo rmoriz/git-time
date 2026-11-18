@@ -282,10 +282,12 @@ it. `git time log` prints the audit view.
 for ordinary commits and `post-merge` for merges, because git does not run
 `post-commit` for a merge (measured on 2.56: `pre-merge-commit` and `post-merge`
 fire, `post-commit` does not). It also configures TSAs:
-`--preset public` (default: freetsa + ai.moda, fingerprints printed) or
-`--preset none`; if anchors cannot be fetched the install still succeeds with
-a loud warning and `doctor` flags "no TSA configured" — the first commit after
-install is never silently unsealed without a notice.
+The authority set is the repository's: an existing `time.tsa.*` config is kept,
+an empty one hands over to the `tsa select` cursor UI (freshest curated pair:
+freetsa + digicert, `--preset` was dropped later); if anchors cannot be fetched
+the install still succeeds with a loud warning and `doctor` flags "no TSA
+configured" — the first commit after install is never silently unsealed without
+a notice.
 
 Shim: `command -v git-time >/dev/null && exec git time hook post-commit; exit 0`.
 

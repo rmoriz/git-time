@@ -1,7 +1,7 @@
 //! Anchor bundles: where they live, how they are fetched, and how doctor names
 //! them.
 //!
-//! An anchor is only useful once it is pinned locally, so `install --preset
+//! An anchor is only useful once it is pinned locally, so a preset
 //! public` writes one bundle per authority and prints its SHA-256 fingerprint for
 //! a reader to compare against the authority's published value. A failed fetch is
 //! a warning, not an install failure: hooks are still worth wiring and `doctor`
@@ -294,6 +294,13 @@ pub fn target(repo: &Repo, id: &str) -> Result<PathBuf, Exit> {
         .into_iter()
         .find(|anchor| anchor.id == id)
         .map_or_else(|| dir().join(format!("{id}.pem")), |anchor| anchor.path))
+}
+
+/// Whether the repository has any `time.tsa.*` key, whatever the id.
+pub fn any_section(repo: &Repo) -> Result<bool, Exit> {
+    Ok(listing(repo)?
+        .iter()
+        .any(|(key, _)| key.starts_with("time.tsa.")))
 }
 
 /// Whether `time.tsa.<id>` has any key at all in the local config.

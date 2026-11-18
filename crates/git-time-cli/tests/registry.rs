@@ -1269,9 +1269,10 @@ fn select_enables_exactly_the_chosen_authorities() {
 fn select_none_removes_preset_sections_but_not_hand_added_ones() {
     let repo = Repo::new();
     repo.init();
-    let enabled = repo.run_time_env(
-        &["tsa", "select", "--preset", "public"],
+    let enabled = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
+        "all\n",
     );
     assert!(
         repo.config("time.tsa.freetsa.url").is_some(),
@@ -1280,7 +1281,7 @@ fn select_none_removes_preset_sections_but_not_hand_added_ones() {
     );
     repo.add_tsa("acme", "http://tsa.example/tsr");
 
-    let cleared = repo.run_time(&["tsa", "select", "--preset", "none"]);
+    let cleared = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "none\n");
     assert_eq!(cleared.status.code(), Some(0), "{}", text(&cleared.stderr));
     for id in git_time_core::presets::names() {
         assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
@@ -1293,6 +1294,47 @@ fn select_none_removes_preset_sections_but_not_hand_added_ones() {
     let stdout = text(&cleared.stdout);
     assert!(stdout.contains("disabled freetsa"), "{stdout}");
     assert!(!stdout.contains("disabled acme"), "{stdout}");
+}
+
+/// A typed buffer is the same selector over the same parser: exactly the named
+/// rows are enabled once it is entered.
+#[test]
+fn select_typed_indices_enable_exactly_those() {
+    let repo = Repo::new();
+    repo.init();
+
+    // `1` and `9` are freetsa and cartaodecidadao; the first is pinned against
+    // the fixture, the second is TOFU and takes the throwaway CA.
+    let chosen = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
+        &repo.fetch_known_root(),
+        "1,9\n",
+    );
+    assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
+    assert!(repo.config("time.tsa.freetsa.url").is_some());
+    assert!(repo.config("time.tsa.cartaodecidadao.url").is_some());
+    let listing = text(&git(
+        repo.path(),
+        &["config", "--get-regexp", "^time\\.tsa\\.[a-z-]*\\.url$"],
+    ));
+    assert_eq!(listing.lines().count(), 2, "{listing}");
+}
+
+/// Enter with nothing selected still saves: that is the removal path.
+#[test]
+fn select_enter_on_nothing_removes_the_preset_sections() {
+    let repo = Repo::new();
+    repo.init();
+    let enabled = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
+        &repo.fetch_known_root(),
+        "1\n",
+    );
+    assert!(enabled.status.success(), "{}", text(&enabled.stderr));
+
+    let cleared = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "\n");
+    assert_eq!(cleared.status.code(), Some(0), "{}", text(&cleared.stderr));
+    assert_eq!(repo.config("time.tsa.freetsa.url"), None);
 }
 
 #[test]
@@ -1354,15 +1396,20 @@ fn select_dry_run_prints_the_plan_and_writes_nothing() {
 
     // A dry run of `none` says what it would remove and removes nothing.
     assert!(
-        repo.run_time_env(
-            &["tsa", "select", "--preset", "public"],
-            &repo.fetch_known_root()
+        repo.run_time_with_stdin(
+            &["tsa", "select", "--interactive"],
+            &repo.fetch_known_root(),
+            "1\n"
         )
         .status
         .code()
         .is_some()
     );
-    let dry = repo.run_time(&["tsa", "select", "--preset", "none", "--dry-run"]);
+    let dry = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive", "--dry-run"],
+        &[],
+        "none\n",
+    );
     assert_eq!(dry.status.code(), Some(0), "{}", text(&dry.stderr));
     assert!(text(&dry.stdout).contains("would disable freetsa"));
     assert!(
@@ -1461,7 +1508,7 @@ fn every_registry_command_refuses_outside_a_repository() {
         &["anchor", "fetch", "https://a.example/ca.pem", "--id", "a"],
         &["anchor", "pin"],
         &["anchor", "pin", "--check"],
-        &["tsa", "select", "--preset", "public"],
+        &["tsa", "select"],
     ];
     for args in cases {
         let output = run_time_at(dir.path(), xdg.path(), args, &[]);

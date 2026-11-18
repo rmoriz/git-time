@@ -314,7 +314,7 @@ impl Policy {
                     .insert(tsa.id.clone(), error.to_string());
             }
         }
-        // One line, not one per authority: with `--preset all` a per-authority
+        // One line, not one per authority: with many authorities a per-authority
         // warning would bury the seal output. Said here, where the backends are
         // built — that is, at seal time. Five ids are named, the rest counted.
         if !insecure.is_empty() {

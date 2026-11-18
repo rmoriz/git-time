@@ -10,7 +10,8 @@ before or after a commit, and no prompt on the normal path.
 
 ```console
 $ cargo install --path crates/git-time-cli    # or: cargo build --release
-$ git time install --preset public            # wires the hooks, fetches anchors
+$ git time tsa select                         # tick the authorities, anchors are pinned
+$ git time install                            # wires the hooks
 $ git commit -m "add entry point"             # the only command the user types
 $ git time verify                             # judges the evidence, gates CI
 ```
@@ -18,32 +19,31 @@ $ git time verify                             # judges the evidence, gates CI
 `cargo install` without `--path` needs the crates published, which they are not yet; use the
 `--path` form above, or build and put `target/release/git-time` on `PATH`.
 
-`--preset public`, the default, writes the curated pair — `freetsa` and `digicert`, both pinned
-against a measured root — so a commit costs two requests and one plain-http warning. `--preset all`
-writes all 22. To choose yourself, `git time tsa select` shows the table with each row's scope and
-trust tier and takes a selection:
+`tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
+everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`). The
+right-hand column is the trust tier: `pinned` is checked against the table and a mismatch is a
+refusal, `tofu` can only be reviewed by reading the fingerprint the command prints.
 
 ```console
-$ git time tsa select
-1) freetsa https://freetsa.org/tsr default pinned A6:37:9E:7C:…:AA:BC
-2) digicert http://timestamp.digicert.com default pinned 05:63:B8:63:…:4D:43 insecure-http
-3) sectigo https://timestamp.sectigo.com/qualified opt-in pinned CB:73:94:4C:…:43:07
-…
-8) cartaodecidadao http://ts.cartaodecidadao.pt/tsa/server opt-in tofu insecure-http
-Authorities to enable (e.g. 1,3-4, all, none): 1,2,8
-enabled freetsa (https://freetsa.org/tsr) fingerprint A6:37:9E:7C:…:AA:BC
-enabled digicert (http://timestamp.digicert.com) fingerprint 05:63:B8:63:…:4D:43
-enabled cartaodecidadao (http://ts.cartaodecidadao.pt/tsa/server) fingerprint 61:A2:9F:…:3E
+  [ ]  1  freetsa              https://freetsa.org/tsr                       pinned A6:37:9E:…:AA:BC 
+> [x]  2  digicert             http://timestamp.digicert.com                 pinned 05:63:B8:…:4D:43 insecure-http
+  [ ]  3  sectigo              https://timestamp.sectigo.com/qualified       pinned CB:73:94:…:43:07 
+  [ ]  4  certum               http://time.certum.pl                         pinned 07:E0:32:…:06:9E insecure-http
+   …
+  [ ]  9  cartaodecidadao      http://ts.cartaodecidadao.pt/tsa/server       tofu                    insecure-http
+space toggle  a all  n none  j/k or arrows move  enter save  q abort
+1 selected
+> _
 ```
 
-`pinned` means the fetched root is checked against the table and a mismatch is a refusal. `tofu`
-means nothing can be checked: the fingerprint printed at pin time is the only reviewable artifact,
-and `git time anchor pin` writes it to `time.anchors-lock` afterwards so a later change shows up.
+`enter` saves and pins; `q`, `esc` or `ctrl-c` leave without writing. Nothing is preselected, so a
+fresh selection is yours to make. `git time install` on a repository with no authority hands over
+to the same UI, so installing and choosing can be one step.
 
-No prompt is needed in a script: `git time tsa select --preset public|none`,
-`git time tsa preset add <id>` and `git time tsa add <url>` never ask. A stdin that is not a
-terminal is refused with exit `2` rather than left to hang; `--interactive` says an answer is being
-piped.
+In a script, no prompt happens: `git time tsa preset add <id>` enables one preset and `git time
+tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without a terminal exits
+`2` with those routes named rather than hanging; `--interactive` says an answer is being piped.
+`--dry-run` prints the outcome and writes nothing.
 
 ## Install from a release binary
 
@@ -71,7 +71,7 @@ $ install -m 0755 $NAME/git-time ~/.local/bin/git-time   # ensure ~/.local/bin i
 $ git time --version
 
 $ cd /path/to/a/repo
-$ git time install --preset public
+$ git time install
 $ git commit -m "add entry point"
 ```
 
@@ -110,9 +110,9 @@ authority failed and why. A dead TSA costs evidence, never a commit.
 
 ## Built-in authorities
 
-`git time install --preset public` writes the two `default` rows and fetches their anchors;
-`--preset all` writes every row. The table lives in `git_time_core::presets`, and
-`git time tsa preset add <name>` writes the same keys from it. The `default` rows come first.
+`git time tsa select` is how any of these get configured; `git time tsa preset add <name>` writes
+one by name. The table lives in `git_time_core::presets`. The `default` rows are the curated pair
+the docs recommend, nothing more — the selector preselects none of them.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|

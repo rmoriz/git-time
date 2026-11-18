@@ -300,7 +300,7 @@ fn a_public_authority_seals_a_commit_and_verify_passes() {
     let authority = Authority::selected();
 
     // The hooks are local; only the authority below needs the network.
-    let installed = live.time(&["install", "--preset", "none"]);
+    let installed = live.time(&["install", "--no-tsa"]);
     assert!(
         installed.status.success(),
         "install failed: {}",

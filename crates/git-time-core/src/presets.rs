@@ -1,6 +1,6 @@
 //! The built-in public authority presets.
 //!
-//! One static table, read by `install --preset public` and by
+//! One static table, read by `install`, `tsa select` and by
 //! `git time tsa preset add <name>`; both write exactly the same keys from it,
 //! so the two surfaces cannot drift apart.
 //!
@@ -93,13 +93,12 @@ pub struct Preset {
     pub fingerprint: Option<&'static str>,
     /// Whether the endpoint is plain `http://` and is accepted as such.
     pub insecure_http: bool,
-    /// Whether `install --preset public` writes it.
+    /// Whether the curated default writes it.
     ///
     /// [`curated`] is a prefix of the table. A default that queries every
     /// endpoint and warns about every plain-http transport on every commit is not
     /// a default, it is a denial of service against the user's own latency
-    /// budget; the rest is opt-in through `--preset all`, `tsa preset add` or
-    /// `tsa select`.
+    /// budget; the rest is opt-in through the selector or `tsa preset add`.
     pub curated: bool,
 }
 
@@ -355,7 +354,7 @@ pub fn names() -> impl Iterator<Item = &'static str> {
     PRESETS.iter().map(|preset| preset.name)
 }
 
-/// The presets `install --preset public` writes: the curated default.
+/// The presets the selector ticks on a fresh repository: the curated default.
 ///
 /// They are a prefix of [`PRESETS`], so the order `install` writes is always the
 /// table order.
@@ -392,7 +391,7 @@ mod tests {
     }
 
     /// One endpoint must not appear twice: two ids for one authority would both
-    /// be written by `install --preset public` and both pinned.
+    /// be written by a fresh selection and both pinned.
     #[test]
     fn no_endpoint_and_no_id_repeats() {
         for (index, preset) in PRESETS.iter().enumerate() {
