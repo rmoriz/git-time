@@ -157,6 +157,7 @@ fn genuine_token_with_pinned_root_is_valid() {
         TokenVerdict::Valid {
             gen_time: gen_time(),
             tsa: "www.freetsa.org".to_owned(),
+            serial: "00c2e986160da8e9cd".to_owned(),
         }
     );
 }

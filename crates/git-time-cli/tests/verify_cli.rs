@@ -741,10 +741,32 @@ fn a_sealed_commit_passes_without_touching_the_network() {
     assert_eq!(hits, 1, "only the base commit was stamped");
 
     let output = verify(&repo, &oid, &[]);
-    let line = first_line(&output);
+    let all = lines(&output);
+    let line = &all[0];
     assert_eq!(output.status.code(), Some(0), "{line}");
     assert!(line.starts_with(&format!("PASS {} SEALED 1/1 TSA(s)", &oid[..7])));
-    assert!(text(&output.stdout).lines().count() == 1, "{line}");
+    // The detail is on a pass too: who answered, when, and under which anchor.
+    let detail = &all[1];
+    assert!(detail.starts_with("  stub: valid "), "{detail}");
+    assert!(detail.contains("; serial "), "{detail}");
+    assert!(detail.contains("; anchor "), "{detail}");
+    assert_eq!(all.len(), 2, "{all:?}");
+
+    // The same fields in the machine form, where a reader can assert on them.
+    let json_out = verify(&repo, &oid, &["--json"]);
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&json_out.stdout).expect("one JSON document");
+    let tsa = &parsed["commits"][0]["per_tsa"][0];
+    assert_eq!(tsa["verdict"], "valid");
+    assert!(
+        tsa["serial"].as_str().is_some_and(|s| !s.is_empty()),
+        "{tsa}"
+    );
+    assert!(
+        tsa["anchor"].as_str().is_some_and(|s| s.contains(':')),
+        "{tsa}"
+    );
+
     assert_eq!(repo.hits(), hits, "verify never calls a TSA");
     assert_eq!(repo.head(), oid, "the ref is untouched");
     assert_eq!(repo.status(), "");

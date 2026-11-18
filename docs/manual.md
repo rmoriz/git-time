@@ -74,7 +74,9 @@ shell; `verify` reports `UNSEALED (dropped)`. Exits `0` or `2`.
 ### `git time verify [--range RANGE] [--require-sealed] [--require-signed] [--json] [<commit>…]`
 
 Judge each commit once, without calling a TSA. `PASS`/`FAIL`, the short oid, the verdict and the
-verified quorum, then one indented line per TSA answer and per failing gate. `--require-sealed`
+verified quorum, then one indented line per TSA answer — its verdict, genTime, signer serial and
+the SHA-256 of the anchor it was judged against, on a pass as much as on a failure — and one per
+failing gate. `--require-sealed`
 fails an unsealed commit and `--require-signed` fails an unsigned one; both are gates, not
 verdicts. `--json` prints one document. Exits `0` only when every commit passes, `1` on any
 evidence or gate failure, `2` on usage or config.

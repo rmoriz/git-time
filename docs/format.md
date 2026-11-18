@@ -291,6 +291,11 @@ A verifier MUST, in this order, and fail closed on any step:
 | `bad-sig` | The commit signature is broken or uncheckable. |
 | `unsigned` | Unsigned while a signature was required. |
 
+A verifier SHOULD report, for every token and not only the failing ones, the id,
+the verdict, the `genTime`, the signer's certificate serial and the fingerprint
+of the anchor it was judged against: `sealed` alone does not say who answered or
+under which root.
+
 A token is judged on its **own** imprint algorithm and its own id, never on the
 block's good name. `Object` is reported, not trusted. A committer time later
 than `genTime` is a warning, not a failure: it says clock skew or backdating,

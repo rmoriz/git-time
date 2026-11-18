@@ -149,6 +149,15 @@ pub struct TsaEvidence {
     /// A human reason: the recorded failure, the signer's label, or why the
     /// anchor is missing.
     pub detail: Option<String>,
+    /// The signing certificate's serial in lowercase hex, for a token that
+    /// verified.
+    pub serial: Option<String>,
+    /// SHA-256 of the pinned anchor's first certificate, when one is pinned.
+    ///
+    /// Written out so a reader can compare it against the authority's own
+    /// publication without trusting this output: a verdict says a token is
+    /// good, this says under which root.
+    pub anchor: Option<String>,
 }
 
 /// Everything verification found about one commit.
@@ -290,14 +299,23 @@ fn judge_tokens(
             alg: record.alg,
             bytes: digest(record.alg, pre_image),
         };
+        let anchor = anchors
+            .anchor(&record.id)
+            .map(|anchor| crate::trust::fingerprint(anchor.root.as_bytes()));
         match judge(record, &imprint, window.clone(), anchors) {
-            TokenVerdict::Valid { gen_time, tsa } => {
+            TokenVerdict::Valid {
+                gen_time,
+                tsa,
+                serial,
+            } => {
                 valid.insert(record.id.as_str());
                 evidence.per_tsa.push(TsaEvidence {
                     id: record.id.clone(),
                     gen_time: Some(gen_time),
                     verdict: VALID,
                     detail: Some(tsa),
+                    serial: Some(serial),
+                    anchor,
                 });
                 if gen_time < committer {
                     evidence.warnings.push(format!(
@@ -321,6 +339,8 @@ fn judge_tokens(
                     gen_time: None,
                     verdict: invalid.as_str(),
                     detail,
+                    serial: None,
+                    anchor,
                 });
             }
         }
@@ -334,6 +354,8 @@ fn judge_tokens(
             gen_time: None,
             verdict: FAIL,
             detail: Some(failure.reason.clone()),
+            serial: None,
+            anchor: None,
         });
     }
 

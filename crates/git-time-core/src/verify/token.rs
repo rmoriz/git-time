@@ -148,6 +148,10 @@ pub enum TokenVerdict {
         gen_time: Timestamp,
         /// The signing certificate's common name, for logs.
         tsa: String,
+        /// The signing certificate's serial, lowercase hex, so a reader can
+        /// name the exact certificate that signed rather than its subject
+        /// alone.
+        serial: String,
     },
     /// The token is noise, for the given reason.
     Invalid(Invalid),
@@ -257,6 +261,7 @@ pub fn token(
         gen_time: parsed.tst.gen_time,
         tsa: common_name(&parsed.signer)
             .unwrap_or_else(|| parsed.signer.tbs_certificate.subject.to_string()),
+        serial: hex(parsed.signer.tbs_certificate.serial_number.as_bytes()),
     }
 }
 
@@ -805,6 +810,11 @@ fn sole_timestamping_eku(certificate: &Certificate) -> bool {
         }
     }
     seen
+}
+
+/// Lowercase hex, as the serial is rendered.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Hash `bytes` with the digest the token declares, or `Malformed` for an

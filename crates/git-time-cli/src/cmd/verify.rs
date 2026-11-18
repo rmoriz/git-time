@@ -168,13 +168,30 @@ fn print_human(evidence: &CommitEvidence, require: &Require, required: usize) {
         evidence.valid,
         required,
     );
-    if !pass {
-        for tsa in &evidence.per_tsa {
-            match &tsa.detail {
-                Some(reason) => println!("  {}: {}: {}", tsa.id, tsa.verdict, reason),
-                None => println!("  {}: {}", tsa.id, tsa.verdict),
-            }
+    // Printed on a pass too: "SEALED" says a quorum was reached, not by whom,
+    // and an authority is only worth counting if a reader can see which one it
+    // was, when it answered and under which anchor.
+    for tsa in &evidence.per_tsa {
+        let mut line = format!("  {}: {}", tsa.id, tsa.verdict);
+        if let Some(gen_time) = tsa.gen_time {
+            line.push(' ');
+            line.push_str(&gen_time.to_string());
         }
+        if let Some(detail) = &tsa.detail {
+            line.push_str(": ");
+            line.push_str(detail);
+        }
+        if let Some(serial) = &tsa.serial {
+            line.push_str("; serial ");
+            line.push_str(serial);
+        }
+        if let Some(anchor) = &tsa.anchor {
+            line.push_str("; anchor ");
+            line.push_str(anchor);
+        }
+        println!("{line}");
+    }
+    if !pass {
         for gate in require.failing(evidence) {
             println!("  gate {gate}: {}", gate_reason(gate));
         }
@@ -245,6 +262,8 @@ fn commit_json(
                 "gen_time": tsa.gen_time.map(|gen_time| gen_time.to_string()),
                 "verdict": tsa.verdict,
                 "detail": tsa.detail,
+                "serial": tsa.serial,
+                "anchor": tsa.anchor,
             }))
             .collect::<Vec<_>>(),
         "warnings": evidence.warnings,

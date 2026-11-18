@@ -116,6 +116,8 @@ fn entry_json(evidence: &CommitEvidence) -> Value {
                 "gen_time": tsa.gen_time.map(|gen_time| gen_time.to_string()),
                 "verdict": tsa.verdict,
                 "detail": tsa.detail,
+                "serial": tsa.serial,
+                "anchor": tsa.anchor,
             }))
             .collect::<Vec<_>>(),
         "warnings": evidence.warnings,
