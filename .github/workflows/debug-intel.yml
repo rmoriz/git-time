@@ -1,7 +1,10 @@
 name: Debug (Intel macOS)
 
-# One-shot probe: the seal tests fail only on the Intel macOS runner, so this
-# runs just that file there with the failure diagnostics turned on.
+# Probe for the Intel macOS runner: the suite meets a different `openssl` there
+# (Homebrew 1.1.1, ahead of /usr/bin), so this runs the token and seal tests with
+# the failure diagnostics turned on and names the binary it found. Kept because
+# the macOS binaries job is `continue-on-error` off tags and a dispatch like this
+# is how a red macOS leg gets a readable answer.
 on:
   workflow_dispatch:
 
@@ -16,7 +19,7 @@ jobs:
   hook-flows:
     name: hook flows on macos-15-intel
     runs-on: macos-15-intel
-    timeout-minutes: 12
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 

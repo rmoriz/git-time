@@ -94,8 +94,10 @@ jobs:
     runs-on: macos-15-intel
     continue-on-error: ${{ inputs.tolerant }}
     # The macOS pool is short enough to queue a job past the queue wall (fifteen
-    # minutes, then cancellation). Fail at twelve so a retry starts sooner.
-    timeout-minutes: 12
+    # minutes, then cancellation), and the suite alone takes ~9 minutes on the
+    # three-core Intel runner with the two-target build trailing it: twelve
+    # minutes cut the build off, thirty is the measured time plus room.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
