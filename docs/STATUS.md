@@ -96,9 +96,11 @@ line at seal time.
 `README.md` is the front door, `docs/manual.md` the operator manual. `.github/workflows/ci.yml`
 runs fmt, clippy and the suite on Ubuntu and macOS; `.github/workflows/release.yml` builds the two
 musl and two darwin targets on a `v*` tag, with `SHA256SUMS`. Each workflow builds both targets of
-an OS in one job, so a tag push occupies one macOS runner rather than four — four parallel macOS
-jobs overran the runner slots once and a queued job was cancelled before it started, publishing
-nothing. The release workflow refuses to publish unless the same suite is green. `tests/live_tsa.rs` is the ignored
+an OS in one job, and a tag push occupies one macOS runner rather than three: the account serves
+about two concurrent macOS jobs and cancels one that waits more than fifteen minutes, so a tag
+pushed at the same moment as `main` starved its own macOS job twice and published nothing. The
+release workflow refuses to publish unless the same suite is green, and musl targets build in
+separate target dirs so no host-built build script crosses a container boundary. `tests/live_tsa.rs` is the ignored
 smoke test against the public authorities:
 
 ```console

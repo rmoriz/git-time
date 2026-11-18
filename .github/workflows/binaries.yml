@@ -53,9 +53,12 @@ jobs:
       - name: Build and package
         run: |
           set -eu
+          # A target dir per target: both invocations share this job, and cargo
+          # would otherwise reuse host build scripts that the first container
+          # linked against a newer glibc than the second container has.
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-            cross build --release --locked --target "$target" -p git-time-cli
-            sh scripts/package.sh "$target" "target/$target/release/git-time"
+            cross build --release --locked --target "$target" --target-dir "target/$target" -p git-time-cli
+            sh scripts/package.sh "$target" "target/$target/$target/release/git-time"
           done
 
       - name: Smoke test the native binary

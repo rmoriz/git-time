@@ -19,13 +19,9 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    steps:
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps: &test-steps
       - uses: actions/checkout@v5
 
       - name: Install the pinned toolchain
@@ -55,6 +51,18 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+  # macOS is scarce — about two concurrent runners behind a fifteen-minute queue
+  # wall — and a tag push runs the same suite again inside Release. On a tag the
+  # Linux job above still tests, so the release's own macOS build gets a runner.
+  #
+  # A job-level `if` cannot read `matrix`, hence a separate job rather than a
+  # matrix leg.
+  test-macos:
+    name: test (macos-latest)
+    runs-on: macos-latest
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    steps: *test-steps
 
   binaries:
     name: binaries
