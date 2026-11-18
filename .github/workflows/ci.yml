@@ -60,6 +60,10 @@ jobs:
     name: binaries
     # Deliberately not gated on `test`: the artifacts are useful on their own,
     # and waiting for a scarce macOS runner would delay every Linux build.
+    #
+    # Skipped on tags: the Release workflow builds the same four targets and
+    # publishes them, so building them twice only spends macOS runner slots.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
     uses: ./.github/workflows/binaries.yml
     with:
       retention-days: 14

@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# Re-pointing a tag supersedes its run: the stale one would otherwise hold
+# macOS runner slots and publish assets from a commit nobody points at.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   binaries:
     uses: ./.github/workflows/binaries.yml
