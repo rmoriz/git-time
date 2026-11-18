@@ -1,0 +1,806 @@
+.TH GIT-TIME 1 "2026-11-19" "git-time 0.1.0" "Git Manual"
+.SH NAME
+git\-time \- RFC 3161 timestamp evidence for commits
+.SH SYNOPSIS
+.B git time [ \-C \fIDIR\fR ] \fIcommand\fR [ \fIarguments\fR ]
+.PP
+.B git time hook \fIevent\fR [ \fIrest\fR ... ]
+.PP
+.B git time seal [ \-\-range \fIRANGE\fR ] [ \-\-force ]
+.PP
+.B git time drop
+.PP
+.B git time verify [ \-\-range \fIRANGE\fR ] [ \-\-require\-sealed ] [ \-\-require\-signed ] [ \-\-json ] [ \fIcommit\fR ... ]
+.PP
+.B git time log [ \-\-range \fIRANGE\fR ] [ \-\-json ] [ \fIcommit\fR ... ]
+.PP
+.B git time install [ \-\-no\-tsa ]
+.PP
+.B git time uninstall [ \-\-force ]
+.PP
+.B git time doctor [ \-\-json ]
+.PP
+.B git time tsa \fIsubcommand\fR [ \fIarguments\fR ]
+.PP
+.B git time anchor \fIsubcommand\fR [ \fIarguments\fR ]
+.SH DESCRIPTION
+.B git time
+seals commits with RFC 3161 timestamp tokens from one or more timestamp
+authorities and stores the tokens inside the commit object as
+.B X\-RFC3161\-*
+trailers.
+Sealing happens from git hooks, in the background, so an ordinary
+.B git commit
+needs no extra command.
+.PP
+A seal hashes a pre\-image of the commit, asks every configured authority for
+a token over that hash, verifies each answer against the anchor pinned for its
+authority, and rewrites the commit with the surviving tokens.
+A signed commit is re\-signed over the new bytes.
+A commit that cannot be sealed for any reason is left exactly as it was.
+.PP
+.B git time verify
+judges the evidence and fails closed: a missing block, a bad imprint, a token
+that does not chain to its pinned anchor, or a broken commit signature is a
+failure with exit status 1.
+.PP
+The commit is only rewritten when it is not yet reachable from a
+remote\-tracking ref.
+A fast\-forwarded commit is left alone, because rewriting it would put the
+branch ahead of its remote and force the next push.
+.B git time seal \-\-force
+rewrites such a commit when that is wanted.
+.PP
+An evidence block records what was hashed and which authorities answered.
+It is evidence, not trust: whether the tokens are worth anything is decided at
+verification time against the pinned anchors.
+The format is specified in
+.BR docs/format.md .
+.SH COMMANDS
+.SS hook
+.B git time hook \fIevent\fR [ \fIrest\fR ... ]
+.PP
+The entrypoint the installed shims call.
+.I event
+is one of
+.BR post\-commit ,
+.BR post\-merge ,
+.B pre\-commit
+or
+.BR pre\-merge\-commit .
+Trailing arguments are passed through unchanged; git passes
+.B 1
+to
+.B post\-merge
+for a squash merge.
+.PP
+A merge never runs
+.BR post\-commit ,
+which is why both post hooks exist.
+The two pre hooks do work only under
+.BR "time.gate = pre\-commit" ;
+they probe every configured authority over a dummy digest and refuse the
+commit before any object is written when fewer than
+.B time.required
+answers arrive.
+A pending drop short\-circuits the probe.
+.PP
+Shim failures are silent to git, which ignores a
+.B post\-commit
+status.
+Under
+.BR "time.on\-failure = fail"
+the hook exits 3 instead.
+.PP
+Exits 0 on success and on every skip, 1 from a refusing gate, 3 on failure
+under
+.BR "time.on\-failure = fail" ,
+and 2 for an unknown event.
+.SS seal
+.B git time seal [ \-\-range \fIRANGE\fR ] [ \-\-force ]
+.PP
+Seal HEAD, or every commit of
+.I RANGE
+oldest first.
+Without arguments this is what the hook does, with the outcome printed.
+A commit dropped with
+.B git time drop
+prints
+.B "skipped (dropped)"
+and is left alone.
+.PP
+The range form parks HEAD on each commit without moving the index or the
+worktree, seals the commits that carry no matching evidence, and restores
+HEAD.
+Only a range that ends at the branch tip is sealed through the branch; other
+members are sealed detached, and the printed object id is where the new
+evidence lives.
+Descendants of a rewritten member are not repointed.
+.TP
+.B \-\-range \fIRANGE\fR
+A git rev\-range. Every commit in it is sealed, oldest first, in topological
+order.
+.TP
+.B \-\-force
+Re\-seal commits that already carry matching evidence, and seal commits that
+were dropped on purpose.
+.PP
+Exits 0 on success and on a skip, 1 if a commit could not be sealed or no
+authority answered, and 2 for a bad range or an unreadable configuration.
+.SS drop
+.B git time drop
+.PP
+Leave the next commit unsealed on purpose.
+The marker survives the shell, so no environment variable has to be
+remembered, and
+.B verify
+reports
+.B "UNSEALED (dropped)"
+instead of a plain unsealed commit.
+Only a hook run that ends in a seal consumes the marker.
+.PP
+Exits 0, or 2 when the marker cannot be written.
+.SS verify
+.B git time verify [ \-\-range \fIRANGE\fR ] [ \-\-require\-sealed ] [ \-\-require\-signed ] [ \-\-json ] [ \fIcommit\fR ... ]
+.PP
+Judge the evidence of each commit once, without calling an authority.
+The default target is HEAD.
+Output is one line per commit: PASS or FAIL, the short object id, the verdict
+and the verified quorum, followed by one indented line per authority answer
+and per failing gate.
+Warnings are printed on a PASS too.
+.PP
+Read\-only, except that the signature check may leave one loose object behind
+with
+.BR "hash\-object \-w" .
+No ref, index or worktree is touched.
+.TP
+.B \-\-range \fIRANGE\fR
+A git rev\-range. Every commit in it is judged, newest first.
+.TP
+.B \-\-require\-sealed
+Fail an unsealed commit.
+This is a gate, not a verdict: the verdict stays
+.BR unsealed .
+.TP
+.B \-\-require\-signed
+Fail an unsigned commit.
+This is a gate, not a verdict.
+.TP
+.B \-\-json
+Print the findings as one JSON document.
+.TP
+.B \fIcommit\fR ...
+Additional commits to judge, on top of any range.
+An argument that does not name a commit is a usage error.
+.PP
+Exits 0 only when every commit passes, 1 on any evidence or gate failure, and
+2 for a usage or configuration problem.
+.SS log
+.B git time log [ \-\-range \fIRANGE\fR ] [ \-\-json ] [ \fIcommit\fR ... ]
+.PP
+List the evidence of each commit, newest first, as one positional line: short
+object id, authority ids, the genTime of every valid token, and the verdict.
+An empty column is
+.BR \- .
+.PP
+.B log
+is a record, not a judgement: it exits 0 whenever it could read everything
+and 1 only for a commit it could not read.
+Use
+.B verify
+to gate CI.
+The JSON form carries no
+.BR pass ,
+.B gates
+or
+.BR required .
+.TP
+.B \-\-range \fIRANGE\fR
+A git rev\-range. Every commit in it is listed, newest first.
+.TP
+.B \-\-json
+Print the evidence as one JSON document.
+.TP
+.B \fIcommit\fR ...
+Additional commits to list.
+.PP
+Exits 0, 1 for a commit that could not be read, and 2 for a usage or
+configuration problem.
+.SS install
+.B git time install [ \-\-no\-tsa ]
+.PP
+Wire the hooks into the current repository.
+.B post\-commit
+and
+.B post\-merge
+are always wired;
+.B pre\-commit
+and
+.B pre\-merge\-commit
+are wired only under
+.BR "time.gate = pre\-commit" .
+The hooks directory is the one git reports, so a
+.B core.hooksPath
+set by husky or the pre\-commit framework is honoured.
+.PP
+A foreign hook at any of those names is preserved as
+.I name\fB.pre\-time\fR
+(then
+.B name.pre\-time.n)
+and chained, never overwritten.
+The shims run a preserved hook first and propagate its failure.
+.PP
+The authority set belongs to the repository, not to a flag: an existing
+.B time.tsa.*
+configuration is kept unchanged, and an empty one hands over to
+.B git time tsa select
+when stdin is a terminal.
+A failed anchor fetch is a warning, not a failure; the authority stays
+configured so
+.B doctor
+can name the gap.
+.PP
+The hooks resolve
+.B git\-time
+as a bare command through
+.BR PATH .
+The binary must be on
+.B PATH
+for any sealing to happen; otherwise the shims exit 0 and every commit stays
+unsealed and silent.
+.B install
+warns when the binary is not found, and
+.B doctor
+reports it as a problem.
+.TP
+.B \-\-no\-tsa
+Write no authority configuration; keep whatever is configured.
+.PP
+Exits 0, 1 when a chosen authority cannot be pinned, or 2 when no authority
+is configured and stdin is not a terminal, or on a configuration error.
+.SS uninstall
+.B git time uninstall [ \-\-force ]
+.PP
+Remove every shim this tool owns, all four names included, and restore each
+preserved hook by rename, so its bytes and mode come back exactly.
+A hook that is not ours is left alone.
+Running it twice succeeds.
+.PP
+A shim edited by hand is named and left in place.
+.TP
+.B \-\-force
+Also replace a hand\-edited shim, keeping the edit under the next preserved
+name next to the restored original.
+When nothing was ever preserved, the edited shim stays where it is.
+.PP
+Exits 0, or 2 on a configuration problem.
+.SS doctor
+.B git time doctor [ \-\-json ]
+.PP
+Report, one fact per line, where the binary is, which hooks directory git
+uses, the state of each of the four hooks
+.B ( ours ,
+.BR chained ,
+.BR foreign ,
+.BR absent ,
+.BR not\-executable ,
+.BR dangling ),
+whether
+.B time.gate
+agrees with the installed pre hooks, how many authorities are configured, and
+each anchor path with its SHA\-256 fingerprint.
+Each problem is repeated as a
+.B problem:
+line.
+.PP
+A missing binary, no authority, a missing, unreadable or unparseable anchor,
+a gate mismatch, an unknown gate value, a shim or preserved hook without its
+execute bit, and a dangling symlink all exit 1.
+A foreign or absent hook alone does not.
+.TP
+.B \-\-json
+Print the report as one JSON object. Its
+.B problems
+array decides the exit status.
+.PP
+Exits 0 when healthy, 1 on any problem, and 2 on a usage or configuration
+error.
+.SS tsa
+.B git time tsa \fIsubcommand\fR [ \fIarguments\fR ]
+.PP
+The authority registry.
+An authority is a
+.B time.tsa.\fIid\fR
+section of the local repository configuration.
+An id is restricted to
+.BR a\-z ,
+.B 0\-9
+and
+.BR \- ;
+when
+.B \-\-id
+is absent it is derived from the URL host, so
+.B https://tsa.example.net/tsr
+becomes
+.BR tsa\-example\-net .
+.SS "tsa add"
+.B git time tsa add \fIurl\fR [ \-\-id \fIID\fR ] [ \-\-anchor \fIPATH\fR ] [ \-\-alg \fIsha256\fR|\fIsha512\fR ] [ \-\-policy \fIOID\fR ] [ \-\-timeout \fIDURATION\fR ] [ \-\-insecure\-http ]
+.PP
+Register an authority.
+Every value is validated before the first key is written, so a refused add
+leaves no half section behind.
+An already configured id is refused.
+A
+.B http://
+URL needs
+.BR \-\-insecure\-http .
+.TP
+.B \-\-id \fIID\fR
+The config id.
+.TP
+.B \-\-anchor \fIPATH\fR
+The PEM bundle pinned for this id.
+Defaults to
+.B \fIanchors\-dir\fR/\fIid\fR.pem.
+.TP
+.B \-\-alg \fIsha256\fR|\fIsha512\fR
+The imprint algorithm and the algorithm requested from the authority.
+Default
+.BR sha256 .
+.TP
+.B \-\-policy \fIOID\fR
+A TSA policy OID to request.
+.TP
+.B \-\-timeout \fIDURATION\fR
+Per\-attempt timeout. Default
+.BR 6s .
+.TP
+.B \-\-insecure\-http
+Accept a plain
+.B http://
+endpoint and warn that the transport is unprotected.
+.PP
+Exits 0, 1 for an existing id, and 2 for a bad URL, id, duration or policy.
+.SS "tsa list"
+.B git time tsa list [ \-\-json ]
+.PP
+List each configured authority with its URL, algorithm, anchor path,
+fingerprint, anchor state and whether it is plain http.
+.TP
+.B \-\-json
+Print the listing as one JSON array.
+.PP
+Exits 0, or 2 on a configuration error.
+.SS "tsa remove"
+.B git time tsa remove \fIid\fR
+.PP
+Delete the whole
+.B time.tsa.\fIid\fR
+section. The anchor file is not removed.
+.PP
+Exits 0, 1 for an unknown id, and 2 for a bad id or configuration error.
+.SS "tsa preset"
+.B git time tsa preset list
+.PP
+Print the built\-in presets with their scope
+.B ( default
+or
+.BR "opt\-in" ),
+their
+.B pinned
+fingerprint or
+.BR tofu ,
+and whether the anchor is present.
+Exits 0.
+.PP
+.B git time tsa preset add \fIname\fR
+.PP
+Configure one preset, anchor included, through the same fetch path
+.B install
+uses.
+A root fingerprint that does not match the published value is a refusal, so a
+pinned preset never accepts a substituted root.
+A trust\-on\-first\-use preset prints the fetched fingerprint in full for
+review.
+.PP
+Exits 0, 1 when no anchor could be pinned, and 2 for an unknown name or
+configuration error.
+.SS "tsa select"
+.B git time tsa select [ \-\-interactive ] [ \-\-dry\-run ]
+.PP
+Choose interactively which preset authorities this repository uses, pin the
+chosen anchors, and remove preset sections that were not chosen.
+A section whose id is not a preset is untouched, so saving with nothing
+selected narrows the configuration.
+.PP
+The list is a cursor interface:
+.B space
+ticks a row,
+.B a
+and
+.B n
+take or clear all,
+.B j
+and
+.B k
+or the arrow keys move,
+.B enter
+saves,
+.B q
+aborts.
+Typed input
+.B ( 1,3\-4 ,
+.BR all ,
+.BR none )
+still applies.
+.PP
+Without a terminal the command refuses rather than hanging.
+.TP
+.B \-\-interactive
+Prompt even when stdin is not a terminal, so a piped answer works.
+.TP
+.B \-\-dry\-run
+Print what would be enabled and disabled, change nothing.
+.PP
+Exits 0, 1 when a chosen anchor cannot be pinned, and 2 without a terminal,
+after three unparseable answers, or on a configuration error.
+.SS anchor
+.B git time anchor \fIsubcommand\fR [ \fIarguments\fR ]
+.PP
+Work with pinned anchor certificates.
+The first certificate of a bundle is the trust anchor for its authority.
+.SS "anchor fetch"
+.B git time anchor fetch \fIurl\fR \-\-id \fIid\fR [ \-\-insecure\-http ]
+.PP
+Fetch a PEM, DER or PKCS#7 bundle and pin it for
+.BR id .
+For a preset, its issuer chain is appended behind the root.
+The bundle is parsed before it replaces anything, so a garbled fetch leaves a
+working anchor intact.
+The target is the configured
+.B time.tsa.\fIid\fR.anchor
+when set, else the anchors directory.
+.TP
+.B \-\-id \fIid\fR
+The authority the bundle belongs to. Required.
+.TP
+.B \-\-insecure\-http
+Accept a plain
+.B http://
+URL.
+.PP
+Exits 0, 1 for an unusable bundle, and 2 for a bad id, URL or configuration
+error.
+A bundle for an id without a section is written and warned about as an
+orphan.
+.SS "anchor list"
+.B git time anchor list [ \-\-json ]
+.PP
+Name each configured anchor with its SHA\-256 fingerprint and
+.BR notAfter .
+A past
+.B notAfter
+is a cheap stale signal.
+.TP
+.B \-\-json
+Print the listing as one JSON array.
+.PP
+Exits 0, or 2 on a configuration error.
+.SS "anchor pin"
+.B git time anchor pin [ \-\-check ]
+.PP
+Write
+.B time.anchors\-lock
+in the repository root, one
+.I id fingerprint
+line per configured authority, or compare the anchors against it.
+.TP
+.B \-\-check
+Compare instead of writing, naming every missing, unparseable, changed and
+unrecorded id.
+.PP
+Exits 0, 1 on a mismatch, an unreadable lock or an unusable anchor, and 2 on a
+configuration error.
+.SH OPTIONS
+.TP
+.B \-C \fIDIR\fR
+Run in the repository at
+.I DIR
+instead of the current directory.
+Accepted by every command.
+.TP
+.BR \-h ", " \-\-help
+Print help and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version with the copyright line, the licence and the source URL, then
+exit.
+.SH "X\-RFC3161 EVIDENCE"
+A sealed commit carries a trailing message paragraph of
+.B X\-RFC3161\-
+lines:
+.B Imprint
+(what was hashed),
+.B Object
+(provenance),
+.B Token
+(one per authority that answered) and
+.B Fail
+(one per authority that was asked and did not deliver).
+Tokens are zstd\-compressed and base64url\-encoded.
+The block travels inside the object and is covered by the commit signature.
+.PP
+The block is evidence, not trust.
+Verification recomputes the pre\-image, compares the imprint in constant time,
+and judges every token on its own imprint algorithm and id against the anchor
+pinned for that id.
+.PP
+The format, the pre\-image rules, the budget and the mandatory verifier checks
+are specified in
+.BR docs/format.md .
+.SH CONFIGURATION
+All keys are git configuration, normally repository\-local.
+An unknown value for a key with a fixed vocabulary is an error with exit 2,
+never a silent fallback to the default.
+Durations accept
+.BR 500ms ,
+.B 10s ,
+.B 3m
+and bare seconds.
+A relative anchor path is resolved against the repository;
+.B ~/
+is resolved against
+.BR HOME .
+.PP
+An authority whose anchor bundle does not load is left out of the seal and
+recorded as a
+.B Fail
+for its id, unless failures are not recorded.
+Only when no configured authority has a usable anchor does the seal refuse.
+.TP
+.B time.required
+Default
+.BR 1 .
+Distinct authorities that must answer for a seal to count as sealed.
+.B 0
+makes the seal best effort.
+.TP
+.B time.deadline
+Default
+.BR 10s .
+Hard bound on the whole fan\-out, not on one authority.
+.TP
+.B time.on\-failure
+Default
+.BR warn .
+.B warn
+prints and exits 0;
+.B fail
+prints and exits 3.
+.TP
+.B time.gate
+Default
+.BR post\-commit .
+.B post\-commit
+seals after the object exists;
+.B pre\-commit
+probes the authorities first and refuses the commit on a short quorum.
+.TP
+.B time.store
+Default
+.BR trailer .
+Where evidence goes:
+.B trailer
+(inside the object),
+.B note
+.B ( refs/notes/rfc3161 )
+or
+.BR both .
+.TP
+.B time.seal\-during\-rebase
+Default
+.BR all .
+Which rewritten commits a rebase seals:
+.BR all ,
+only the
+.B tip
+with the exact command for the rest printed once, or
+.B off
+with the
+.B seal \-\-range
+hint.
+.TP
+.B time.record\-failures
+Default
+.BR true .
+Whether a failed authority leaves an
+.B X\-RFC3161\-Fail
+line.
+.TP
+.B time.enabled
+Default
+.BR true .
+Whether the hook seals at all.
+.TP
+.B time.max\-trailer\-bytes
+Default
+.BR 65536 .
+Budget for the trailer block.
+A breach drops the largest token and records
+.BR oversized .
+.TP
+.B time.tsa.\fIid\fR.url
+The endpoint requests are posted to.
+Required for every authority.
+.TP
+.B time.tsa.\fIid\fR.anchor
+The pinned PEM bundle tokens are judged against.
+Required for every authority.
+.TP
+.B time.tsa.\fIid\fR.alg
+Default
+.BR sha256 .
+Imprint and request algorithm:
+.B sha256
+or
+.BR sha512 .
+.TP
+.B time.tsa.\fIid\fR.policy
+Unset by default.
+A policy OID to request, validated before it is written.
+.TP
+.B time.tsa.\fIid\fR.timeout
+Default
+.BR 6s .
+Per\-attempt timeout.
+.TP
+.B time.tsa.\fIid\fR.insecure\-http
+Default
+.BR false .
+Records that a plain
+.B http://
+endpoint was accepted on purpose.
+All such authorities share one warning line at seal time.
+.PP
+.B time.anchors\-lock
+is a file, not a key.
+It records reviewed fingerprints but is not a trust store: verification keeps
+judging against the pinned bundles, so deleting the lock changes no verdict.
+.SH FILES
+.TP
+.I anchors\-dir
+The pinned bundles, by default
+.B $XDG_CONFIG_HOME/git\-time/anchors
+or
+.BR ~/.config/git\-time/anchors .
+The first certificate of a bundle is the anchor.
+.TP
+.B time.anchors\-lock
+In the repository root, written by
+.BR "anchor pin" .
+One
+.I id fingerprint
+line per configured authority.
+.TP
+.I gitdir\fB/time\-skip
+The marker written by
+.BR drop .
+It is removed by the next hook run that seals.
+.TP
+.I gitdir\fB/time\-dropped
+One dropped object id per line, so
+.B seal
+can report a deliberate drop.
+Capped at 200 entries and pruned as commits disappear.
+.TP
+.B hooks\-dir/{post\-commit,post\-merge,pre\-commit,pre\-merge\-commit}
+The shims.
+Each runs a preserved hook first, then
+.BR "git\-time hook" .
+.TP
+.I hooks\-dir\fB/\fIname\fB.pre\-time
+The foreign hooks displaced by
+.BR install ,
+restored by
+.BR uninstall .
+Further displacements take
+.B name.pre\-time.n\&.
+.TP
+.I rebase\-dir\fB/time\-hinted
+Set once per rebase when
+.B time.seal\-during\-rebase = off
+so the hint is printed once.
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success.
+A skip is a success.
+.TP
+.B 1
+Evidence or seal failure, and the verdict of a refusing gate.
+.TP
+.B 2
+Usage or configuration problem.
+.TP
+.B 3
+Only from
+.BR hook ,
+and only under
+.BR "time.on\-failure = fail" .
+git ignores a
+.B post\-commit
+status; a wrapper does not.
+.SH EXAMPLES
+Set a repository up:
+.PP
+.B git time tsa select
+.PP
+.B git time install
+.PP
+.B git commit \-m \&"add entry point\&"
+.PP
+Judge the history in CI:
+.PP
+.B git time verify \-\-range origin/main..HEAD \-\-require\-sealed
+.PP
+Seal a range after the fact, and keep the printed ids:
+.PP
+.B git time seal \-\-range HEAD~5..HEAD
+.PP
+Review anchors, then catch later changes:
+.PP
+.B git time anchor pin
+.PP
+.B git time anchor pin \-\-check
+.PP
+Skip one commit on purpose:
+.PP
+.B git time drop
+.PP
+.B git commit \-m \&"wip\&"
+.SH "SECURITY CONSIDERATIONS"
+The pinned anchors are the trust store.
+A token is only as good as the bundle pinned under its id, so pin deliberately
+and review a changed fingerprint out of band against the authority's own
+publication.
+The lock is a review artifact, not a trust store.
+.PP
+Plain
+.B http://
+presets keep full token integrity, because the CMS signature is checked
+against the pinned root.
+Transport only exposes the imprint and lets an attacker block the authority.
+That is why every insecure authority warns at seal time.
+.PP
+Published history is never rewritten by the hook.
+Rewriting a commit a remote already has moves the branch ahead of it and can
+force the next push.
+Sealing it is an explicit
+.B seal \-\-force
+decision.
+.PP
+The hooks resolve
+.B git\-time
+through
+.BR PATH ,
+with git's environment and no shell aliases.
+Whichever binary comes first on
+.B PATH
+is what runs at commit time.
+.PP
+Verification fails closed, and
+.B verify
+exits 0 only when every commit passes.
+A token must chain to its anchor at
+.BR genTime ,
+must carry a critical extended key usage of exactly
+.B id\-kp\-timeStamping
+and nothing else (RFC 3161, section 2.3), and must lie in the accepted
+genTime window.
+.SH "SEE ALSO"
+.BR git\-commit (1),
+.BR git\-hooks (5),
+RFC 3161,
+RFC 3161 section 2.3,
+RFC 5280.

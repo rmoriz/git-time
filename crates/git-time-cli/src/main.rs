@@ -25,12 +25,47 @@ use clap::{Parser, Subcommand};
 
 use cmd::Exit;
 
+/// What `-V` and `--version` print.
+///
+/// A timestamp tool is asked to be auditable, so its version line says who
+/// wrote it, under which licence, and where the source is — the answers a
+/// reader would otherwise have to hunt for.
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    "\nCopyright (C) 2026 Roland Moriz\n",
+    "License GPL-2.0-only: GNU GPL version 2 \
+     <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>\n",
+    "No warranty, not even for merchantability or fitness for a particular purpose.\n",
+    "https://github.com/rmoriz/git-time",
+);
+
+/// The quick start printed under both `-h` and `--help`.
+///
+/// Kept to the two things a first-time reader needs: the three commands that
+/// set the repository up, and where the evidence goes. Everything deeper is in
+/// the manual, which the last line names.
+const QUICK_START: &str = "\
+Quick start:
+  git time tsa select    pick authorities; each chosen anchor is pinned
+  git time install       wire the hooks (git-time must be on PATH)
+  git commit -m \"...\"    the only command you type from then on
+  git time verify        judge the evidence; run it in CI
+
+Evidence is written into the commit as X-RFC3161-* trailers before the
+commit lands, covered by its signature, and a commit already on a remote is
+left alone. A dead authority costs evidence, never the commit.
+
+`git time doctor` names why nothing is sealing, `git time tsa select` is the
+repair path, and docs/manual.md has the configuration and the failure modes.";
+
 /// Command line surface of git-time.
 #[derive(Debug, Parser)]
 #[command(
     name = "git time",
-    version,
+    version = VERSION,
+    long_version = VERSION,
     about = "RFC 3161 timestamp evidence for commits",
+    after_help = QUICK_START,
     disable_help_subcommand = true
 )]
 struct Cli {

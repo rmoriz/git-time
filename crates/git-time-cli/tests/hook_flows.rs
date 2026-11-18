@@ -2544,6 +2544,46 @@ fn an_authority_subcommand_shows_its_help() {
     );
 }
 
+/// The quick start is the whole onboarding: a first-time reader needs the two
+/// setup commands, the commit, and the judge. It has to show on the short help
+/// too, because that is the one people actually type.
+#[test]
+fn both_help_forms_carry_the_quick_start() {
+    for flag in ["-h", "--help"] {
+        let output = Command::new(BIN).arg(flag).output().expect("runs");
+        assert!(output.status.success(), "{flag}");
+        let stdout = text(&output.stdout);
+        for line in [
+            "Quick start:",
+            "git time tsa select",
+            "git time install",
+            "git time verify",
+            "docs/manual.md",
+        ] {
+            assert!(stdout.contains(line), "{flag} lacks {line}: {stdout}");
+        }
+    }
+}
+
+/// A tool asked to be auditable must be able to name itself: version, author,
+/// licence, source. `-V` is the flag people actually use.
+#[test]
+fn the_version_line_names_the_provenance() {
+    for flag in ["-V", "--version"] {
+        let output = Command::new(BIN).arg(flag).output().expect("runs");
+        assert!(output.status.success(), "{flag}");
+        let stdout = text(&output.stdout);
+        for part in [
+            "git time ",
+            "Copyright (C) 2026 Roland Moriz",
+            "GPL-2.0-only",
+            "https://github.com/rmoriz/git-time",
+        ] {
+            assert!(stdout.contains(part), "{flag} lacks {part}: {stdout}");
+        }
+    }
+}
+
 /// The stub is a TSA, not a rubber stamp: what it issued answers exactly the
 /// imprint of the pre-image, and the seal records it under the `stub` id.
 #[test]

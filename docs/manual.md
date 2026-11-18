@@ -8,6 +8,9 @@ because it describes the shipped code.
 
 Every command takes the global `-C DIR` option to run in another repository.
 
+The evidence the tool writes is specified in [format.md](format.md), for tools that read or produce
+it without this one.
+
 ## Configuration
 
 All keys are read from git configuration (`git config time.…`), normally in the repository-local

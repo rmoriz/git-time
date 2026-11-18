@@ -26,6 +26,9 @@ copy it to something like `/usr/local/bin`. Without it on `PATH` the shims exit 
 is made **unsealed** and silently so — `git time doctor` names a missing binary, and `git time
 verify` reports `UNSEALED`.
 
+The same four commands print under `git time -h` and `git time --help`, so the binary carries its
+own onboarding.
+
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
 everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`). The
 `pin` column is the trust tier: the root is checked against the table and a mismatch is a refusal.
@@ -220,6 +223,8 @@ X-RFC3161-Token: ver=1; id=freetsa; …
 ## Documentation
 
 - [Operator manual](docs/manual.md) — every config key, command, exit code and failure mode.
+- [Trailer format](docs/format.md) — the wire format, so another tool can read or write a seal.
+- [Man page](docs/git-time.1) — the commands on one page, in roff.
 - [Design](docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md) — the contract and the
   measured probes behind it.
 - [Implementation status](docs/STATUS.md) — what ships, what deviates from the design, and why.
