@@ -599,6 +599,7 @@ mod tests {
             name: "a-name-that-is-exactly-forty-chars-long!!",
             url: "http://an-endpoint.example/that/is/long/enough/to/need/room/tsr",
             anchor_url: "http://an-endpoint.example/ca.pem",
+            chain: &[],
             alg: "sha256",
             policy: None,
             fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),

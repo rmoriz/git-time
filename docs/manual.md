@@ -151,16 +151,16 @@ change is visible.
 | `digicert` | `http://timestamp.digicert.com` | default | pinned SHA-1 fingerprint, plain http |
 | `sectigo` | `https://timestamp.sectigo.com/qualified` | opt-in | pinned SHA-1 fingerprint |
 | `certum` | `http://time.certum.pl` | opt-in | pinned SHA-1 fingerprint, plain http |
-| `izenpe` | `http://tsa.izenpe.com` | opt-in | pinned SHA-256 fingerprint, unverified, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | opt-in | pinned SHA-256 fingerprint, plain http |
 | `acs-microsoft` | `http://timestamp.acs.microsoft.com` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `aped` | `https://timestamp.aped.gov.gr/qtss` | opt-in | pinned SHA-1 fingerprint |
-| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | TOFU, plain http |
-| `swisssign` | `http://tsa.swisssign.net` | opt-in | TOFU, plain http |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | pinned SHA-1 fingerprint, plain http, anchor at the state PKI |
+| `swisssign` | `http://tsa.swisssign.net` | opt-in | TOFU, plain http, answers `400` since 11/2026 |
 | `apple` | `http://timestamp.apple.com/ts01` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `dfn` | `http://zeitstempel.dfn.de` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | opt-in | pinned SHA-1 fingerprint, plain http |
-| `comodoca` | `http://timestamp.comodoca.com` | opt-in | TOFU, plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `identrust` | `http://timestamp.identrust.com` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `ssl-com` | `http://ts.ssl.com` | opt-in | pinned SHA-1 fingerprint, plain http |
@@ -175,11 +175,14 @@ policy is loaded, all of them share **one** warning line: five ids are named, th
 (`… and 2 more`). The token integrity comes from the signature against the pinned root, not from
 the transport; only the imprint and availability are exposed.
 
-An anchor URL is fetched with a GET; a body carrying a PEM certificate is the bundle. Everything
-else — a timestamp endpoint answers a GET with prose or with `405`/`403` because it wants a POST —
-falls through to asking the URL for a token and taking the self-signed root of the reply. `freetsa`
-and `dfn` publish a PEM; every other preset keeps its endpoint, and `belgium` must, because it
-publishes its root only as DER.
+An anchor URL is fetched with a GET; a body carrying a certificate — PEM, DER or a PKCS#7
+collection — is the bundle. Everything else — a timestamp endpoint answers a GET with prose or with
+`405`/`403` because it wants a POST — falls through to asking the URL for a token and taking the
+self-signed root of the reply, walking the top certificate's AIA `caIssuers` where the reply stops
+short of the root. `freetsa` and `dfn` publish a PEM; `cartaodecidadao` publishes its root at the Portuguese state PKI
+and its two issuers beside it, which the preset names as a chain because its own reply carries the
+signing leaf alone and no `caIssuers`; every other preset keeps its endpoint. A chain member is
+appended behind the root and is only a path — trust still comes from the pinned root.
 
 Each endpoint appears once. An authority that answers on several URLs keeps one row: `cesnet` is
 carried on its TLS port only, and `http://time.certum.pl` is the `certum` row, so no `certum-legacy`
@@ -188,7 +191,9 @@ row exists. A query string belongs to the endpoint and is stored and posted verb
 
 The pinned values were measured by querying the endpoint and walking the chain (the reply's
 certificates, plus the AIA `caIssuers` pointer where the root was not embedded). `izenpe` is the
-exception: fetching its root failed, so its value is supplied and **unverified**. Two earlier values
+one exception: its value is supplied, and the walk now reaches the same root, so a live run
+compares against it. `swisssign` is the only TOFU row left: every query is answered with a `400`.
+Two earlier values
 were wrong for their endpoint and are replaced by the measured ones — `sectigo` and `certum` now
 carry the fingerprint of the root their endpoint actually chains to. Without that, a pinned preset
 would refuse its own authority forever.
@@ -211,12 +216,12 @@ to make, and `a` really is all 22.
    [ ]  6  acs-microsoft      pin F4:00:42:E2… http
    [ ]  7  globalsign-r6      pin 13:9B:1C:71… http
    [ ]  8  aped               pin 44:4D:AE:31… 
-   [ ]  9  cartaodecidadao    tofu             http
+   [ ]  9  cartaodecidadao    pin E8:9D:08:31… http
    [ ] 10  swisssign          tofu             http
    [ ] 11  apple              pin 61:1E:5B:66… http
    [ ] 12  dfn                pin 58:81:54:65… http
    [ ] 13  globalsign-advanc… pin 13:9B:1C:71… http
-   [ ] 14  comodoca           tofu             http
+   [ ] 14  comodoca           pin 52:42:1A:EA… http
    [ ] 15  identrust          pin BA:29:41:60… http
    [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
    [ ] 17  ssl-com            pin B7:AB:33:08… http

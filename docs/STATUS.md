@@ -151,6 +151,9 @@ explicit parameters, still fails in `webpki` (see the known gaps).
 | `UNSIGNED` verdict | unsigned commit stays `SEALED`, reported as `unsigned` in the `signature` field; `--require-signed` fails it | a gate is not evidence: the verdict names what the block is, and CI reads `pass` for the policy |
 | any commit may be sealed | never rewrite a commit reachable from a remote-tracking ref | `post-merge` also fires on a fast-forward `git pull`; sealing would make the next push non-fast-forward |
 | the path is held to `timeStamping` exactly | `required_if_present` on the path, the strict rule only on the signer | RFC 5280 makes a CA's EKU a restriction only when present; the DFN, Belgium and CESnet CAs carry none |
+| the GET body is the bundle only if PEM | a PEM, DER or PKCS#7 certificate body is the bundle | Belgian and Portuguese roots are served as DER; the bundle format is PEM, so the body is re-encoded |
+| the anchor is the reply's root | the root the top certificate's AIA `caIssuers` leads to when the reply stops short | ten authorities embed no root; the measured fingerprints were read from that pointer, and every fetched certificate still has to pass the pin |
+| the bundle is one URL | a preset may carry a chain of issuer URLs, appended behind the root | `cartaodecidadao` embeds the signing leaf alone and publishes no `caIssuers`; without its two issuers the chain cannot be built, and pinning only the root would make every token `untrusted` |
 | DER as written | three tolerated shapes: unsorted signed attributes, fractional genTime, a two-byte policy OID | Apple and Lex Persona sign the attribute order they wrote; Lex Persona sends milliseconds; Apple stamps under `1.2.3`, which `der`'s OID decoder refuses. Each reading stays inside the signature |
 
 ## Known gaps
@@ -159,6 +162,8 @@ explicit parameters, still fails in `webpki` (see the known gaps).
   taint a child.
 - A selection fetches anchors over the network; behind a firewall it warns and leaves the
   repo unsealed rather than broken (`doctor` names the missing anchor).
+- `swisssign` answers every query with a `303` to a `400` page (11/2026), so it pins nothing and
+  seals nothing; it stays in the table as a TOFU row and reports the two failed attempts.
 - `seal --range` cannot rewrite descendants of a range member; those dangle until re-sealed.
 - Failure reasons are sanitised into one trailer line, so an absolute path appears truncated.
 - `webpki` has no SHA-1 and no explicit-parameter support for *certificate* signatures: a TSA whose

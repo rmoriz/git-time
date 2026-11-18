@@ -29,6 +29,9 @@ use der::{Decode, Encode};
 use git_time_core::imprint::{Alg, Digest};
 use git_time_core::repo::Repo;
 use git_time_core::tsa::{StampRequest, encode, parse_response};
+use x509_cert::Certificate;
+use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
+use x509_cert::ext::pkix::name::GeneralName;
 
 use crate::cmd::Exit;
 
@@ -61,7 +64,8 @@ pub fn fingerprint(bytes: &[u8]) -> String {
 
 /// Fetch the bundle at `url`.
 ///
-/// A GET is tried first: when it answers 2xx with a PEM certificate, that body is
+/// A GET is tried first: when it answers 2xx with a certificate — PEM, DER or a
+/// PKCS#7 collection, which is what a CA's download path serves — that body is
 /// the bundle and no token is requested. Every other outcome — a non-2xx status,
 /// a body that holds no certificate (a timestamp endpoint answers a GET with
 /// prose), or a transport error — falls through to [`root_from_endpoint`], and if
@@ -85,11 +89,13 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     match client.get(url).send().await {
         Ok(response) if response.status().is_success() => {
             match response.bytes().await {
-                // A certificate download: a plain `.pem` is the whole bundle.
-                Ok(body) if holds_certificate(&body) => return Ok(body.to_vec()),
-                // Something else that says 200 is still worth a token request: the
-                // endpoint may be serving its own landing page.
-                Ok(_) => {}
+                // A certificate download: whatever the encoding, the body is the
+                // whole bundle.
+                Ok(body) => {
+                    if let Some(bundle) = bundle_from(&body) {
+                        return Ok(bundle);
+                    }
+                }
                 Err(error) => get_error = Some(format!("reading {url} failed: {error}")),
             }
         }
@@ -102,6 +108,27 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
             Some(get_error) => format!("{get_error}; {error}"),
             None => error,
         })
+}
+
+/// Fetch the bundle of `url`, then append the certificates of `chain`.
+///
+/// A handful of replies stop below the root and name no `caIssuers` to walk
+/// (the Portuguese state PKI embeds the signing leaf alone), so the preset names
+/// the issuer publication as well. The appended certificates are only the path:
+/// what is trusted is still the root the pin is checked against.
+///
+/// # Errors
+///
+/// [`fetch`]'s reason for the bundle, or the failing URL for a chain member.
+pub async fn fetch_chain(url: &str, chain: &[&str]) -> Result<Vec<u8>, String> {
+    let mut bundle = fetch(url).await?;
+    for extra in chain {
+        let more = fetch(extra)
+            .await
+            .map_err(|error| format!("fetching the chain member {extra}: {error}"))?;
+        bundle.extend(more);
+    }
+    Ok(bundle)
 }
 
 /// Run the `GIT_TIME_ANCHOR_FETCH_CMD` stub for `url`.
@@ -127,12 +154,27 @@ fn run_stub(command: &std::ffi::OsStr, url: &str) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
-fn holds_certificate(bytes: &[u8]) -> bool {
-    String::from_utf8_lossy(bytes).contains("BEGIN CERTIFICATE")
+/// `bytes` as a PEM bundle, when they hold certificates at all.
+///
+/// A download is often DER — Belgium publishes its root that way, the Portuguese
+/// state PKI its whole hierarchy — and the bundle format is PEM, so the body is
+/// re-encoded rather than handed on verbatim.
+fn bundle_from(bytes: &[u8]) -> Option<Vec<u8>> {
+    let certificates = parse_certificates(bytes);
+    if certificates.is_empty() {
+        return None;
+    }
+    let mut pem = Vec::new();
+    for certificate in certificates {
+        pem.extend(pem_block(&certificate.to_der().ok()?));
+    }
+    Some(pem)
 }
 
-/// POST a timestamp query to `url` and return the self-signed root of the chain
-/// the reply carries, PEM-encoded.
+/// POST a timestamp query to `url` and return the anchor its reply names.
+///
+/// A reply is a token, not a bundle: the anchor is the self-signed root of the
+/// chain it carries, or the root the top certificate's `caIssuers` leads to.
 async fn root_from_endpoint(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
     let mut rng = rand::rng();
     let digest = Digest {
@@ -165,12 +207,23 @@ async fn root_from_endpoint(client: &reqwest::Client, url: &str) -> Result<Vec<u
         }
         Err(error) => return Err(format!("{url} answered no timestamp: {error}")),
     };
-    root_pem(&token)
+    root_pem(client, &token).await
 }
 
-/// The PEM of the self-signed certificate in the CMS token `token`, then the
-/// other certificates of its chain.
-fn root_pem(token: &[u8]) -> Result<Vec<u8>, String> {
+/// The PEM of `token`'s root, then the other certificates of its chain.
+async fn root_pem(client: &reqwest::Client, token: &[u8]) -> Result<Vec<u8>, String> {
+    let (root, others) = resolve_root(client, token_certificates(token)?).await?;
+    let mut pem = pem_block(&root.to_der().map_err(|error| error.to_string())?);
+    for other in others {
+        pem.extend(pem_block(
+            &other.to_der().map_err(|error| error.to_string())?,
+        ));
+    }
+    Ok(pem)
+}
+
+/// Every certificate the CMS token `token` carries.
+fn token_certificates(token: &[u8]) -> Result<Vec<Certificate>, String> {
     const OID_SIGNED_DATA: der::asn1::ObjectIdentifier =
         der::asn1::ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
     let content =
@@ -188,29 +241,210 @@ fn root_pem(token: &[u8]) -> Result<Vec<u8>, String> {
         return Err("the reply carries no certificate".to_owned());
     };
 
-    let mut root = None;
-    let mut others = Vec::new();
-    for choice in certificates.0.iter() {
-        let CertificateChoices::Certificate(certificate) = choice else {
-            continue;
-        };
-        if certificate.tbs_certificate.subject == certificate.tbs_certificate.issuer {
-            if root.is_none() {
-                root = Some(certificate.clone());
+    let certificates: Vec<Certificate> = certificates
+        .0
+        .iter()
+        .filter_map(|choice| match choice {
+            CertificateChoices::Certificate(certificate) => Some(certificate.clone()),
+            _ => None,
+        })
+        .collect();
+    if certificates.is_empty() {
+        return Err("the reply carries no certificate".to_owned());
+    }
+    Ok(certificates)
+}
+
+/// The self-signed certificate in `pool`, walking `caIssuers` to find it.
+///
+/// Many authorities put only leaf and intermediates in the token: their root is
+/// published at the AIA URL the top certificate names, and that is where the
+/// fingerprint this project pins was read from. Walking stays bounded — a few
+/// hops, and only certificates that are not already in the pool count — and
+/// every fetched certificate still only becomes the anchor if the preset's
+/// fingerprint check accepts it (see `install_anchor`).
+async fn resolve_root(
+    client: &reqwest::Client,
+    mut pool: Vec<Certificate>,
+) -> Result<(Certificate, Vec<Certificate>), String> {
+    /// How many `caIssuers` hops one reply may take.
+    const MAX_HOPS: usize = 4;
+
+    let mut errors: Vec<String> = Vec::new();
+    for _ in 0..MAX_HOPS {
+        if let Some(index) = pool.iter().position(|certificate| {
+            certificate.tbs_certificate.subject == certificate.tbs_certificate.issuer
+        }) {
+            let root = pool.remove(index);
+            return Ok((root, pool));
+        }
+        // Prefer the certificates nobody in the pool claims to have issued, but
+        // take `caIssuers` from anywhere: several authorities publish the
+        // pointer on the leaf alone, and it still names the way up.
+        let mut ordered: Vec<&Certificate> = pool
+            .iter()
+            .filter(|candidate| !issued_in(&pool, candidate))
+            .collect();
+        ordered.extend(pool.iter().filter(|candidate| issued_in(&pool, candidate)));
+
+        let mut urls: Vec<String> = Vec::new();
+        for candidate in ordered {
+            for url in ca_issuers(candidate) {
+                if !urls.contains(&url) {
+                    urls.push(url);
+                }
             }
-        } else {
-            others.push(certificate.clone());
+        }
+        if urls.is_empty() {
+            break;
+        }
+
+        let mut fetched = Vec::new();
+        for url in urls {
+            match certificates_at(client, &url).await {
+                Ok(certificates) => {
+                    fetched = certificates;
+                    break;
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        if fetched.is_empty() {
+            break;
+        }
+        for certificate in fetched {
+            let known = pool.iter().any(|other| {
+                other.tbs_certificate.subject == certificate.tbs_certificate.subject
+                    && other.tbs_certificate.serial_number
+                        == certificate.tbs_certificate.serial_number
+            });
+            if !known {
+                pool.push(certificate);
+            }
         }
     }
-    let root = root.ok_or_else(|| "the reply carries no self-signed root".to_owned())?;
 
-    let mut pem = pem_block(&root.to_der().map_err(|error| error.to_string())?);
-    for other in others {
-        pem.extend(pem_block(
-            &other.to_der().map_err(|error| error.to_string())?,
-        ));
+    Err(if errors.is_empty() {
+        "the reply carries no self-signed root and names no caIssuers to walk".to_owned()
+    } else {
+        format!(
+            "the reply carries no self-signed root and its caIssuers could not be read: {}",
+            errors.join("; ")
+        )
+    })
+}
+
+/// Whether any certificate in `pool` names `candidate`'s issuer as its subject.
+fn issued_in(pool: &[Certificate], candidate: &Certificate) -> bool {
+    pool.iter()
+        .any(|other| other.tbs_certificate.subject == candidate.tbs_certificate.issuer)
+}
+
+/// The `caIssuers` URLs `certificate` publishes, in the order it lists them.
+fn ca_issuers(certificate: &Certificate) -> Vec<String> {
+    const OID_AIA: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.1.1");
+    const OID_CA_ISSUERS: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.2");
+
+    certificate
+        .tbs_certificate
+        .extensions
+        .iter()
+        .flatten()
+        .find(|extension| extension.extn_id == OID_AIA)
+        .and_then(|extension| {
+            AuthorityInfoAccessSyntax::from_der(extension.extn_value.as_bytes()).ok()
+        })
+        .map(|access| {
+            access
+                .0
+                .into_iter()
+                .filter(|description| description.access_method == OID_CA_ISSUERS)
+                .filter_map(|description| match description.access_location {
+                    GeneralName::UniformResourceIdentifier(uri) => Some(uri.to_string()),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch one AIA target and parse it as a certificate collection.
+async fn certificates_at(client: &reqwest::Client, url: &str) -> Result<Vec<Certificate>, String> {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err(format!("{url} is not an http URL"));
     }
-    Ok(pem)
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("GET {url} failed: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("GET {url} answered {}", response.status()));
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("reading {url} failed: {error}"))?;
+
+    let certificates = parse_certificates(&bytes);
+    if certificates.is_empty() {
+        return Err(format!("{url} carried no certificate"));
+    }
+    Ok(certificates)
+}
+
+/// The certificates in `bytes`: a single DER certificate, a PKCS#7 collection,
+/// or any number of PEM blocks.
+fn parse_certificates(bytes: &[u8]) -> Vec<Certificate> {
+    if let Ok(certificate) = Certificate::from_der(bytes) {
+        return vec![certificate];
+    }
+    if let Ok(content) = ContentInfo::from_der(bytes)
+        && let Ok(content_der) = content.content.to_der()
+        && let Ok(signed) = SignedData::from_der(&content_der)
+        && let Some(certificates) = signed.certificates
+    {
+        let found: Vec<Certificate> = certificates
+            .0
+            .iter()
+            .filter_map(|choice| match choice {
+                CertificateChoices::Certificate(certificate) => Some(certificate.clone()),
+                _ => None,
+            })
+            .collect();
+        if !found.is_empty() {
+            return found;
+        }
+    }
+
+    let text = String::from_utf8_lossy(bytes);
+    let mut found = Vec::new();
+    let mut body = String::new();
+    let mut inside = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line == "-----BEGIN CERTIFICATE-----" {
+            inside = true;
+            body.clear();
+            continue;
+        }
+        if line == "-----END CERTIFICATE-----" {
+            if inside
+                && let Ok(der) = BASE64.decode(body.as_bytes())
+                && let Ok(certificate) = Certificate::from_der(&der)
+            {
+                found.push(certificate);
+            }
+            inside = false;
+            continue;
+        }
+        if inside {
+            body.push_str(line);
+        }
+    }
+    found
 }
 
 fn pem_block(der: &[u8]) -> Vec<u8> {
@@ -368,7 +602,12 @@ mod tests {
         else {
             panic!("the fixture is not granted");
         };
-        let pem = String::from_utf8(root_pem(&token).expect("a root")).expect("PEM is text");
+        let pem = String::from_utf8(
+            runtime()
+                .block_on(root_pem(&client(), &token))
+                .expect("a root"),
+        )
+        .expect("PEM is text");
         assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"));
 
         let first = pem
@@ -384,6 +623,255 @@ mod tests {
         );
     }
 
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            .expect("client")
+    }
+
+    /// Run `openssl` with `args`, or panic.
+    fn openssl(args: &[&std::ffi::OsStr]) {
+        let status = std::process::Command::new("openssl")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("openssl is available");
+        assert!(status.success(), "openssl {args:?} failed");
+    }
+
+    fn os(value: &std::path::Path) -> &std::ffi::OsStr {
+        value.as_os_str()
+    }
+
+    /// A self-signed P-256 CA, returned as DER.
+    fn build_root(dir: &Path) -> Vec<u8> {
+        let config = dir.join("ca.cnf");
+        std::fs::write(
+            &config,
+            "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\ncommonName=Common Name\n\
+             [v3_ca]\nbasicConstraints=critical,CA:TRUE\n\
+             keyUsage=critical,keyCertSign,cRLSign\n",
+        )
+        .expect("write config");
+        let key = dir.join("root.key");
+        let pem = dir.join("root.pem");
+        openssl(&[
+            "req".as_ref(),
+            "-x509".as_ref(),
+            "-sha256".as_ref(),
+            "-newkey".as_ref(),
+            "ec".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_paramgen_curve:P-256".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_param_enc:named_curve".as_ref(),
+            "-nodes".as_ref(),
+            "-keyout".as_ref(),
+            os(&key),
+            "-out".as_ref(),
+            os(&pem),
+            "-days".as_ref(),
+            "2".as_ref(),
+            "-subj".as_ref(),
+            "/CN=walk-root".as_ref(),
+            "-config".as_ref(),
+            os(&config),
+            "-extensions".as_ref(),
+            "v3_ca".as_ref(),
+        ]);
+        let text = std::fs::read(&pem).expect("read root");
+        crate::cmd::anchor::first_certificate(&text).expect("root PEM")
+    }
+
+    /// A token signed by a leaf below an intermediate, carrying both; `aia`
+    /// becomes the intermediate's `caIssuers` URL. The root is not in the token.
+    fn build_token(dir: &Path, aia: Option<&str>) -> Vec<u8> {
+        let root_key = dir.join("root.key");
+        let root_pem = dir.join("root.pem");
+        let int_key = dir.join("int.key");
+        let int_csr = dir.join("int.csr");
+        let int_pem = dir.join("int.pem");
+        let int_ext = dir.join("int.ext");
+        let leaf_key = dir.join("leaf.key");
+        let leaf_csr = dir.join("leaf.csr");
+        let leaf_pem = dir.join("leaf.pem");
+        let leaf_ext = dir.join("leaf.ext");
+        let tst = dir.join("tst.der");
+        let token = dir.join("token.der");
+
+        openssl(&[
+            "req".as_ref(),
+            "-new".as_ref(),
+            "-newkey".as_ref(),
+            "ec".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_paramgen_curve:P-256".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_param_enc:named_curve".as_ref(),
+            "-nodes".as_ref(),
+            "-keyout".as_ref(),
+            os(&int_key),
+            "-out".as_ref(),
+            os(&int_csr),
+            "-subj".as_ref(),
+            "/CN=walk-intermediate".as_ref(),
+        ]);
+        let mut intermediate = String::from(
+            "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n",
+        );
+        if let Some(aia) = aia {
+            intermediate.push_str(&format!("authorityInfoAccess=caIssuers;URI:{aia}\n"));
+        }
+        std::fs::write(&int_ext, intermediate).expect("write intermediate extensions");
+        let int_serial = dir.join("int.srl");
+        std::fs::write(&int_serial, "01\n").expect("write serial");
+        openssl(&[
+            "x509".as_ref(),
+            "-req".as_ref(),
+            "-sha256".as_ref(),
+            "-in".as_ref(),
+            os(&int_csr),
+            "-CA".as_ref(),
+            os(&root_pem),
+            "-CAkey".as_ref(),
+            os(&root_key),
+            "-CAserial".as_ref(),
+            os(&int_serial),
+            "-out".as_ref(),
+            os(&int_pem),
+            "-days".as_ref(),
+            "2".as_ref(),
+            "-extfile".as_ref(),
+            os(&int_ext),
+        ]);
+
+        openssl(&[
+            "req".as_ref(),
+            "-new".as_ref(),
+            "-newkey".as_ref(),
+            "ec".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_paramgen_curve:P-256".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_param_enc:named_curve".as_ref(),
+            "-nodes".as_ref(),
+            "-keyout".as_ref(),
+            os(&leaf_key),
+            "-out".as_ref(),
+            os(&leaf_csr),
+            "-subj".as_ref(),
+            "/CN=walk-leaf".as_ref(),
+        ]);
+        std::fs::write(
+            &leaf_ext,
+            "basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\n\
+             extendedKeyUsage=critical,timeStamping\n",
+        )
+        .expect("write leaf extensions");
+        let leaf_serial = dir.join("leaf.srl");
+        std::fs::write(&leaf_serial, "02\n").expect("write serial");
+        openssl(&[
+            "x509".as_ref(),
+            "-req".as_ref(),
+            "-sha256".as_ref(),
+            "-in".as_ref(),
+            os(&leaf_csr),
+            "-CA".as_ref(),
+            os(&int_pem),
+            "-CAkey".as_ref(),
+            os(&int_key),
+            "-CAserial".as_ref(),
+            os(&leaf_serial),
+            "-out".as_ref(),
+            os(&leaf_pem),
+            "-days".as_ref(),
+            "2".as_ref(),
+            "-extfile".as_ref(),
+            os(&leaf_ext),
+        ]);
+
+        std::fs::write(&tst, b"imprint").expect("write TSTInfo");
+        openssl(&[
+            "cms".as_ref(),
+            "-sign".as_ref(),
+            "-binary".as_ref(),
+            "-nodetach".as_ref(),
+            "-in".as_ref(),
+            os(&tst),
+            "-signer".as_ref(),
+            os(&leaf_pem),
+            "-inkey".as_ref(),
+            os(&leaf_key),
+            "-certfile".as_ref(),
+            os(&int_pem),
+            "-md".as_ref(),
+            "sha256".as_ref(),
+            "-outform".as_ref(),
+            "DER".as_ref(),
+            "-out".as_ref(),
+            os(&token),
+        ]);
+        std::fs::read(&token).expect("read token")
+    }
+
+    #[test]
+    fn the_root_is_walked_from_the_top_certificates_ca_issuers() {
+        unset_stub();
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = build_root(dir.path());
+        // The server answers with the root, which is what a CA's AIA target
+        // serves; the intermediate in the token names its URL.
+        let (base, server) = serve(vec![(200, root.clone())]);
+        let token = build_token(dir.path(), Some(&format!("{base}root.der")));
+
+        let pem = runtime()
+            .block_on(root_pem(&client(), &token))
+            .expect("the walk finds the root");
+
+        let first = parse_certificates(&pem).remove(0);
+        assert_eq!(
+            first.tbs_certificate.subject, first.tbs_certificate.issuer,
+            "the bundle starts with the self-signed root"
+        );
+        assert!(
+            parse_certificates(&pem)
+                .iter()
+                .any(|certificate| certificate.tbs_certificate.subject
+                    != certificate.tbs_certificate.issuer),
+            "the intermediate stays in the bundle"
+        );
+        let seen = server.join().expect("server");
+        assert!(
+            seen.iter().any(|head| head.contains("root.der")),
+            "the caIssuers URL was requested: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn an_aia_that_cannot_be_read_is_named() {
+        unset_stub();
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let _root = build_root(dir.path());
+        let (base, server) = serve(vec![(404, b"gone".to_vec())]);
+        let token = build_token(dir.path(), Some(&format!("{base}missing.der")));
+
+        let error = runtime()
+            .block_on(root_pem(&client(), &token))
+            .expect_err("no root to be found");
+        assert!(error.contains("missing.der"), "{error}");
+        assert!(error.contains("404"), "{error}");
+        server.join().expect("server");
+    }
+
     /// The granted fixture's bundle, as the GET branch would receive it.
     fn bundle() -> String {
         let response =
@@ -393,7 +881,12 @@ mod tests {
         else {
             panic!("the fixture is not granted");
         };
-        String::from_utf8(root_pem(&token).expect("a root")).expect("PEM is text")
+        String::from_utf8(
+            runtime()
+                .block_on(root_pem(&client(), &token))
+                .expect("a root"),
+        )
+        .expect("PEM is text")
     }
 
     /// A loopback server that answers the queued `(status, body)` pairs in order
@@ -508,6 +1001,58 @@ mod tests {
             pem
         );
         assert_eq!(server.join().expect("server").len(), 1, "one request only");
+    }
+
+    /// A DER download is the bundle too: several CAs publish roots that way and
+    /// would otherwise be talked to as timestamp endpoints.
+    #[test]
+    fn a_der_certificate_answer_is_used_without_a_token_request() {
+        unset_stub();
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let der = build_root(dir.path());
+        let (url, server) = serve(vec![(200, der.clone())]);
+
+        let pem =
+            String::from_utf8(block_on(fetch(&url)).expect("the bundle")).expect("PEM is text");
+        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"), "{pem}");
+        assert_eq!(
+            parse_certificates(pem.as_bytes())
+                .remove(0)
+                .to_der()
+                .expect("re-encode"),
+            der,
+            "the body survives the re-encoding"
+        );
+        assert_eq!(server.join().expect("server").len(), 1, "one request only");
+    }
+
+    /// A chain member is appended behind the root, as the bundle order the
+    /// anchor reader expects.
+    #[test]
+    fn a_chain_member_is_appended_behind_the_anchor() {
+        unset_stub();
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = build_root(dir.path());
+        let issuer = root.clone();
+        let (base, server) = serve(vec![(200, root.clone()), (200, issuer)]);
+
+        let issuer_url = format!("{base}issuer.pem");
+        let pem = String::from_utf8(
+            block_on(fetch_chain(&base, &[issuer_url.as_str()])).expect("the bundle"),
+        )
+        .expect("PEM is text");
+        let certificates = parse_certificates(pem.as_bytes());
+        assert_eq!(certificates.len(), 2, "{pem}");
+        for certificate in &certificates {
+            assert_eq!(
+                certificate.to_der().expect("re-encode"),
+                root,
+                "the anchor first, then the chain member"
+            );
+        }
+        let requests = server.join().expect("server");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[1].starts_with("GET "), "{}", requests[1]);
     }
 
     /// When both attempts fail, the reader has to see both, or a 403 that merely

@@ -233,7 +233,7 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
 
     let mut fingerprint_mismatch = false;
     let mut missing_anchor = None;
-    match anchors::fetch(authority.anchor_url).await {
+    match anchors::fetch_chain(authority.anchor_url, authority.chain).await {
         Ok(bytes) => match install_anchor(authority, &path, &bytes) {
             Ok(fingerprint) => {
                 // A pinned root is only worth something when the match is

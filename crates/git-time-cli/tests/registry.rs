@@ -1157,9 +1157,9 @@ fn preset_add_of_a_tofu_preset_prints_the_fetched_fingerprint() {
         "GIT_TIME_ANCHOR_FETCH_CMD",
         format!("cat {}", pstr(&freetsa_root())),
     )];
-    let added = repo.run_time_env(&["tsa", "preset", "add", "comodoca"], &fetch);
+    let added = repo.run_time_env(&["tsa", "preset", "add", "swisssign"], &fetch);
     assert!(added.status.success(), "{}", text(&added.stderr));
-    assert!(repo.anchors().join("comodoca.pem").exists(), "the anchor");
+    assert!(repo.anchors().join("swisssign.pem").exists(), "the anchor");
 
     let stdout = text(&added.stdout);
     assert!(stdout.contains("trust on first use"), "{stdout}");
@@ -1271,8 +1271,8 @@ fn tsa_add_writes_the_insecure_transport_when_accepted() {
 /// The prompt `tsa select` prints, so the count of re-asks can be counted.
 const SELECT_PROMPT: &str = "Authorities to enable (e.g. 1,3-4, all, none): ";
 
-/// Enable exactly the selected three, with their keys and a printed
-/// fingerprint each.
+/// Enable exactly the two selected, with their keys and a printed fingerprint
+/// each.
 #[test]
 fn select_enables_exactly_the_chosen_authorities() {
     let repo = Repo::new();
@@ -1281,15 +1281,14 @@ fn select_enables_exactly_the_chosen_authorities() {
     let chosen = repo.run_time_with_stdin(
         &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
-        "1,9,14\n",
+        "1,10\n",
     );
     assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
 
     let stdout = text(&chosen.stdout);
     for (id, url) in [
         ("freetsa", "https://freetsa.org/tsr"),
-        ("cartaodecidadao", "http://ts.cartaodecidadao.pt/tsa/server"),
-        ("comodoca", "http://timestamp.comodoca.com"),
+        ("swisssign", "http://tsa.swisssign.net"),
     ] {
         assert_eq!(
             repo.config(&format!("time.tsa.{id}.url")).as_deref(),
@@ -1316,7 +1315,7 @@ fn select_enables_exactly_the_chosen_authorities() {
         };
         let der = first_der(&String::from_utf8_lossy(&bundle));
         // The digest length follows the expectation: freetsa is SHA-256, the
-        // two TOFU rows are SHA-1.
+        // TOFU row is SHA-1.
         if id == "freetsa" {
             assert_eq!(printed.len(), 95, "{line}");
             assert_eq!(printed, fingerprint_colon(&der), "the served root: {line}");
@@ -1404,16 +1403,16 @@ fn select_typed_indices_enable_exactly_those() {
     let repo = Repo::new();
     repo.init();
 
-    // `1` and `9` are freetsa and cartaodecidadao; the first is pinned against
-    // the fixture, the second is TOFU and takes the throwaway CA.
+    // `1` and `10` are freetsa and swisssign; the first is pinned against the
+    // fixture, the second is TOFU and takes the throwaway CA.
     let chosen = repo.run_time_with_stdin(
         &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
-        "1,9\n",
+        "1,10\n",
     );
     assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
     assert!(repo.config("time.tsa.freetsa.url").is_some());
-    assert!(repo.config("time.tsa.cartaodecidadao.url").is_some());
+    assert!(repo.config("time.tsa.swisssign.url").is_some());
     let listing = text(&git(
         repo.path(),
         &["config", "--get-regexp", "^time\\.tsa\\.[a-z-]*\\.url$"],

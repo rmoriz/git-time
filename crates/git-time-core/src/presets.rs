@@ -10,13 +10,15 @@
 //! fingerprint that root must have.
 //!
 //! The order is deliberate: the curated default first, then the rest of the
-//! measured roots, then the ones that are trust on first use. FreeTSA and DFN
+//! measured roots, then the one that is trust on first use. FreeTSA and DFN
 //! publish a plain PEM; for every other preset the anchor URL *is* the endpoint,
 //! because no certificate download is served there. The fetch asks the endpoint
-//! for a token and takes the self-signed root of the chain it replies with. No
-//! certificate URL is invented: where one is listed it was fetched and its
-//! fingerprint checked against the measured pin. Belgium publishes only DER for
-//! its root, which the anchor reader does not parse, so it keeps the endpoint.
+//! for a token and takes the self-signed root of the chain it replies with (and
+//! walks the top certificate's AIA `caIssuers` where the root is not embedded).
+//! No certificate URL is invented: where one is listed it was fetched and its
+//! fingerprint checked against the measured pin — that is the Portuguese state
+//! PKI's publication of `ECRaizEstado 002` for `cartaodecidadao`, whose own reply
+//! stops at the signing leaf. A download is read in PEM, DER or PKCS#7.
 //!
 //! # Why an expected fingerprint
 //!
@@ -50,10 +52,9 @@
 //! compared, chosen by the length of the expectation — see [`matching_digest`]
 //! in the CLI.
 //!
-//! **Supplied but unverified** — `izenpe`. Retrieving its root failed (its AIA
-//! URL answers something that is not a certificate), so the value is the
-//! repository owner's — in SHA-256 — and has never been compared against a live
-//! chain.
+//! **Supplied, then confirmed** — `izenpe`. The value is the repository owner's
+//! and in SHA-256, because retrieving its root failed at the time; the AIA walk
+//! now reaches the same root and the live run compares against it.
 //!
 //! Two earlier values were wrong for their endpoint and were replaced by the
 //! measured ones: `sectigo` had the fingerprint of a different Sectigo root than
@@ -80,6 +81,12 @@ pub struct Preset {
     pub url: &'static str,
     /// Where the anchor bundle is fetched from.
     pub anchor_url: &'static str,
+    /// Certificates to append to the bundle, between the root and the signer.
+    ///
+    /// Empty for every authority whose reply or `caIssuers` already reaches the
+    /// root. `cartaodecidadao` embeds the signing leaf alone and publishes no
+    /// `caIssuers` at all, so its whole path has to be named.
+    pub chain: &'static [&'static str],
     /// The imprint algorithm and the algorithm requests ask for.
     pub alg: &'static str,
     /// The TSA policy requests ask for, when the authority has a published one.
@@ -106,6 +113,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "freetsa",
         url: "https://freetsa.org/tsr",
         anchor_url: "https://freetsa.org/files/cacert.pem",
+        chain: &[],
         alg: "sha256",
         policy: Some("1.2.3.4.1"),
         fingerprint: Some(
@@ -118,6 +126,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "digicert",
         url: "http://timestamp.digicert.com",
         anchor_url: "http://timestamp.digicert.com",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),
@@ -130,6 +139,7 @@ pub const PRESETS: [Preset; 22] = [
         // A plain GET is not served; the fetch asks for a token and takes the
         // root of the chain it replies with.
         anchor_url: "https://timestamp.sectigo.com/qualified",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("CB:73:94:4C:04:2E:53:BF:C4:57:9D:2F:71:2F:3E:EA:99:FE:43:07"),
@@ -140,6 +150,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "certum",
         url: "http://time.certum.pl",
         anchor_url: "http://time.certum.pl",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("07:E0:32:E0:20:B7:2C:3F:19:2F:06:28:A2:59:3A:19:A7:0F:06:9E"),
@@ -150,6 +161,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "izenpe",
         url: "http://tsa.izenpe.com",
         anchor_url: "http://tsa.izenpe.com",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some(
@@ -158,13 +170,14 @@ pub const PRESETS: [Preset; 22] = [
         insecure_http: true,
         curated: false,
     },
-    // Three endpoints keep no fingerprint: for comodoca, cartaodecidadao and
-    // swisssign no root could be measured here. Their fetched fingerprint is
+    // One endpoint keeps no fingerprint: `swisssign` answered every query with a
+    // 400, so no chain could be measured here. Its fetched fingerprint is
     // printed and has to be compared by a reader.
     Preset {
         name: "acs-microsoft",
         url: "http://timestamp.acs.microsoft.com",
         anchor_url: "http://timestamp.acs.microsoft.com",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("F4:00:42:E2:E5:F7:E8:EF:81:89:FE:D1:55:19:AE:CE:42:C3:BF:A2"),
@@ -175,6 +188,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "globalsign-r6",
         url: "http://timestamp.globalsign.com/tsa/r6advanced1",
         anchor_url: "http://timestamp.globalsign.com/tsa/r6advanced1",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"),
@@ -185,6 +199,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "aped",
         url: "https://timestamp.aped.gov.gr/qtss",
         anchor_url: "https://timestamp.aped.gov.gr/qtss",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("44:4D:AE:31:5D:00:21:9C:6A:15:2F:0C:C0:2A:AE:32:3B:F9:C6:AC"),
@@ -194,10 +209,14 @@ pub const PRESETS: [Preset; 22] = [
     Preset {
         name: "cartaodecidadao",
         url: "http://ts.cartaodecidadao.pt/tsa/server",
-        anchor_url: "http://ts.cartaodecidadao.pt/tsa/server",
+        anchor_url: "https://www.ecce.gov.pt/media/5085/ecraizestado002.crt",
+        chain: &[
+            "https://pki.cartaodecidadao.pt/publico/certificado/cc_ec_cidadao_assinatura/EC%20de%20Assinatura%20Digital%20Qualificada%20do%20Cartao%20de%20Cidadao%200018.cer",
+            "https://pki.cartaodecidadao.pt/publico/certificado/cc_ec_cidadao/Cartao%20de%20Cidadao%20006.cer",
+        ],
         alg: "sha256",
         policy: None,
-        fingerprint: None,
+        fingerprint: Some("E8:9D:08:31:6C:29:D1:15:74:9A:27:ED:58:13:32:CB:0A:B4:D7:9F"),
         insecure_http: true,
         curated: false,
     },
@@ -205,6 +224,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "swisssign",
         url: "http://tsa.swisssign.net",
         anchor_url: "http://tsa.swisssign.net",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: None,
@@ -215,6 +235,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "apple",
         url: "http://timestamp.apple.com/ts01",
         anchor_url: "http://timestamp.apple.com/ts01",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("61:1E:5B:66:2C:59:3A:08:FF:58:D1:4A:E2:24:52:D1:98:DF:6C:60"),
@@ -228,6 +249,7 @@ pub const PRESETS: [Preset; 22] = [
         // endpoint: the pin comes from the authority's published root rather than
         // from a token fetched over the same plain-http channel.
         anchor_url: "http://cdp1.pca.dfn.de/dfn-verein-community-root-ca/pub/cacert/cacert.pem",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"),
@@ -241,6 +263,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "globalsign-advanced",
         url: "http://rfc3161timestamp.globalsign.com/advanced",
         anchor_url: "http://rfc3161timestamp.globalsign.com/advanced",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"),
@@ -251,9 +274,10 @@ pub const PRESETS: [Preset; 22] = [
         name: "comodoca",
         url: "http://timestamp.comodoca.com",
         anchor_url: "http://timestamp.comodoca.com",
+        chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: None,
+        fingerprint: Some("52:42:1A:EA:C4:24:C2:43:5E:7F:53:55:A3:04:37:A3:B1:74:58:79"),
         insecure_http: true,
         curated: false,
     },
@@ -261,6 +285,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "identrust",
         url: "http://timestamp.identrust.com",
         anchor_url: "http://timestamp.identrust.com",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("BA:29:41:60:77:98:3F:F4:F3:EF:F2:31:05:3B:2E:EA:6D:4D:45:FD"),
@@ -271,6 +296,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "quovadis-eu",
         url: "http://ts.quovadisglobal.com/eu",
         anchor_url: "http://ts.quovadisglobal.com/eu",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("1B:8E:EA:57:96:29:1A:C9:39:EA:B8:0A:81:1A:73:73:C0:93:79:67"),
@@ -281,6 +307,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "ssl-com",
         url: "http://ts.ssl.com",
         anchor_url: "http://ts.ssl.com",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("B7:AB:33:08:D1:EA:44:77:BA:14:80:12:5A:6F:BD:A9:36:49:0C:BB"),
@@ -291,6 +318,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "belgium",
         url: "http://tsa.belgium.be/connect",
         anchor_url: "http://tsa.belgium.be/connect",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("98:98:9F:EE:C1:6A:D7:74:61:54:15:E9:3A:96:3E:A3:EE:F5:FE:4F"),
@@ -303,6 +331,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "cesnet",
         url: "https://tsa.cesnet.cz:3162/tsa",
         anchor_url: "https://tsa.cesnet.cz:3162/tsa",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("E7:84:74:90:F7:11:43:FC:CE:F6:F6:5A:30:DA:1F:23:9E:0F:D7:BA"),
@@ -315,6 +344,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "cra-ge",
         url: "http://tsa.cra.ge/signserver/tsa?workerName=qtsa",
         anchor_url: "http://tsa.cra.ge/signserver/tsa?workerName=qtsa",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("9E:79:CD:4E:A8:C2:79:08:11:D6:DA:43:ED:23:90:A6:CE:FF:35:3C"),
@@ -325,6 +355,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "lex-persona",
         url: "http://tsa.lex-persona.com/tsa",
         anchor_url: "http://tsa.lex-persona.com/tsa",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("88:21:9A:14:A6:A1:FF:5B:62:25:17:F7:00:1E:C3:02:C3:11:01:D7"),
@@ -335,6 +366,7 @@ pub const PRESETS: [Preset; 22] = [
         name: "accv",
         url: "http://tss.accv.es:8318/tsa",
         anchor_url: "http://tss.accv.es:8318/tsa",
+        chain: &[],
         alg: "sha256",
         policy: None,
         fingerprint: Some("93:05:7A:88:15:C6:4F:CE:88:2F:FA:91:16:52:28:78:BC:53:64:17"),
@@ -376,18 +408,39 @@ mod tests {
                 "{} is named once",
                 preset.name
             );
-            // Only an accepted plain-http preset may carry an `http://` URL, and
-            // both of its URLs then have to.
+            // Only an accepted plain-http preset may carry an `http://` URL.
+            // The anchor URL is not bound to that: `insecure_http` is about the
+            // endpoint the tokens come from, and a download may still be served
+            // over TLS (`cartaodecidadao`).
             if preset.insecure_http {
                 assert!(preset.url.starts_with("http://"), "{}", preset.name);
-                assert!(preset.anchor_url.starts_with("http://"), "{}", preset.name);
             } else {
                 assert!(preset.url.starts_with("https://"), "{}", preset.name);
-                assert!(preset.anchor_url.starts_with("https://"), "{}", preset.name);
             }
+            assert!(
+                preset.anchor_url.starts_with("https://")
+                    || preset.anchor_url.starts_with("http://"),
+                "{}",
+                preset.name
+            );
             assert_eq!(preset.alg, "sha256");
         }
         assert_eq!(find("nope"), None);
+    }
+
+    /// Only `cartaodecidadao` names a chain, because only its reply neither
+    /// embeds the path nor publishes `caIssuers`; every other preset must fetch
+    /// without one.
+    #[test]
+    fn only_cartaodecidadao_names_a_chain() {
+        for preset in &PRESETS {
+            let expected = if preset.name == "cartaodecidadao" {
+                2
+            } else {
+                0
+            };
+            assert_eq!(preset.chain.len(), expected, "{}", preset.name);
+        }
     }
 
     /// One endpoint must not appear twice: two ids for one authority would both
@@ -436,8 +489,8 @@ mod tests {
         }
     }
 
-    /// Exactly three endpoints keep no fingerprint, and they are the ones whose
-    /// root could not be measured.
+    /// Exactly one endpoint keeps no fingerprint: the one that could not be
+    /// measured because it answers no query.
     #[test]
     fn only_the_unmeasurable_endpoints_are_tofu() {
         let tofu: Vec<&str> = PRESETS
@@ -445,7 +498,7 @@ mod tests {
             .filter(|preset| preset.fingerprint.is_none())
             .map(|preset| preset.name)
             .collect();
-        assert_eq!(tofu, ["cartaodecidadao", "swisssign", "comodoca"]);
+        assert_eq!(tofu, ["swisssign"]);
 
         let pinned: Vec<&str> = PRESETS
             .iter()

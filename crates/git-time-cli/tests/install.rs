@@ -1336,17 +1336,17 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
         22,
         "every preset is written: {stdout}"
     );
-    // The only matching root is FreeTSA's; the remaining two TOFU presets take
-    // whatever is fetched, so four anchors pin. Every other published root is
-    // measured against the throwaway CA and refused.
-    assert_eq!(stdout.matches("enabled ").count(), 4, "{stdout}");
+    // The only matching root is FreeTSA's; the one TOFU preset takes whatever is
+    // fetched, so two anchors pin. Every other published root is measured
+    // against the throwaway CA and refused.
+    assert_eq!(stdout.matches("enabled ").count(), 2, "{stdout}");
     assert!(
         stdout.contains("freetsa: root fingerprint matches"),
         "the match is said out loud: {stdout}"
     );
     assert_eq!(
         stdout.matches("failed ").count(),
-        18,
+        20,
         "every mismatched root is refused: {stdout}"
     );
 
@@ -1354,7 +1354,7 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     assert!(stdout.contains("trust on first use"), "{stdout}");
     for (id, source) in [
         ("freetsa", freetsa_root()),
-        ("comodoca", repo.authority.ca.clone()),
+        ("swisssign", repo.authority.ca.clone()),
     ] {
         let anchor = repo.anchors().join(format!("{id}.pem"));
         assert_eq!(
@@ -1363,7 +1363,7 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
             "the fetched anchor is stored: {id}"
         );
     }
-    for id in ["freetsa", "comodoca"] {
+    for id in ["freetsa", "swisssign"] {
         let anchor = repo.anchors().join(format!("{id}.pem"));
         let configured = text(&git(
             repo.path(),
