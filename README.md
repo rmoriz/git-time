@@ -21,16 +21,32 @@ $ git time verify                             # judges the evidence, gates CI
 
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
 everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`). The
-right-hand column is the trust tier: `pinned` is checked against the table and a mismatch is a
-refusal, `tofu` can only be reviewed by reading the fingerprint the command prints.
+`pin` column is the trust tier: the root is checked against the table and a mismatch is a refusal.
+`tofu` can only be reviewed by reading the fingerprint the command prints. `http` marks a plain-http
+endpoint; the full URL of the cursor row is printed below the list, so no column has to carry it.
 
 ```console
-  [ ]  1  freetsa              https://freetsa.org/tsr                       pinned A6:37:9E:…:AA:BC 
-> [x]  2  digicert             http://timestamp.digicert.com                 pinned 05:63:B8:…:4D:43 insecure-http
-  [ ]  3  sectigo              https://timestamp.sectigo.com/qualified       pinned CB:73:94:…:43:07 
-  [ ]  4  certum               http://time.certum.pl                         pinned 07:E0:32:…:06:9E insecure-http
-   …
-  [ ]  9  cartaodecidadao      http://ts.cartaodecidadao.pt/tsa/server       tofu                    insecure-http
+   [ ]  1  freetsa            pin A6:37:9E:7C… 
+ > [x]  2  digicert           pin 05:63:B8:63… http
+   [ ]  3  sectigo            pin CB:73:94:4C… 
+   [ ]  4  certum             pin 07:E0:32:E0… http
+   [ ]  5  izenpe             pin 8E:5B:8B:AE… http
+   [ ]  6  acs-microsoft      pin F4:00:42:E2… http
+   [ ]  7  globalsign-r6      pin 13:9B:1C:71… http
+   [ ]  8  aped               pin 44:4D:AE:31… 
+   [ ]  9  cartaodecidadao    tofu             http
+   [ ] 10  swisssign          tofu             http
+   [ ] 11  apple              pin 61:1E:5B:66… http
+   [ ] 12  dfn                pin 58:81:54:65… http
+   [ ] 13  globalsign-advanc… pin 13:9B:1C:71… http
+   [ ] 14  comodoca           tofu             http
+   [ ] 15  identrust          pin BA:29:41:60… http
+   [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
+   [ ] 17  ssl-com            pin B7:AB:33:08… http
+   [ ] 18  belgium            pin 98:98:9F:EE… http
+   [ ] 19  cesnet             pin E7:84:74:90… 
+  …
+url: http://timestamp.digicert.com
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
 1 selected
 > _

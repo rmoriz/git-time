@@ -112,6 +112,21 @@ impl Selection {
     /// clears a stale error line: it belongs to the previous `enter`.
     pub fn apply_key(&mut self, key: Key, count: usize) -> Outcome {
         self.error = None;
+        // An empty table still has to answer every key without underflowing.
+        if count == 0 {
+            return match key {
+                Key::Quit | Key::Escape => Outcome::Abort,
+                Key::Enter if self.typed.is_empty() => Outcome::Save(self.chosen.clone()),
+                Key::Enter => match parse_choice(&self.typed, 0) {
+                    Ok(chosen) => Outcome::Save(chosen),
+                    Err(message) => {
+                        self.error = Some(message);
+                        Outcome::Stay
+                    }
+                },
+                _ => Outcome::Stay,
+            };
+        }
         match key {
             Key::Up => {
                 self.cursor = if self.cursor == 0 {
@@ -176,53 +191,111 @@ pub fn parse_key(bytes: &[u8]) -> Option<Key> {
     }
 }
 
-/// One full frame: the rows, the help line, the count and the prompt.
+const NAME_WIDTH: usize = 18;
+const TRUST_WIDTH: usize = 16;
+const HELP: &str = "space toggle  a all  n none  j/k or arrows move  enter save  q abort";
+
+/// One screen frame for a `rows` x `cols` terminal.
 ///
-/// Fixed-width columns keep the markers aligned; a terminal narrower than 100
-/// columns wraps, which is ugly but readable.
+/// Narrow and windowed on purpose. The row itself carries only what a choice
+/// needs — cursor, tick, index, name, trust tier, transport — at fixed widths,
+/// so a wrapped line cannot push the table off the top of a default terminal.
+/// The endpoint of the cursor row is printed in full below the list instead of
+/// costing a column.
+///
+/// At most `rows` lines, at most `cols` columns, every line `\r\n` terminated.
+/// The list is a window that keeps the cursor visible and marks a cut edge with
+/// `…`; the footer (URL, help, count, prompt, error) is always there. Below the
+/// room the footer needs, it degrades to the cursor row and the footer.
 #[must_use]
-pub fn frame(selection: &Selection, presets: &[Preset]) -> String {
-    let mut out = String::with_capacity(1024 + presets.len() * 96);
-    for (index, preset) in presets.iter().enumerate() {
-        let cursor = if index == selection.cursor() {
-            '>'
-        } else {
-            ' '
-        };
-        let tick = if selection.is_chosen(index) { 'x' } else { ' ' };
-        let trust = match preset.fingerprint {
-            Some(fingerprint) => format!("pinned {}", abbreviate(fingerprint)),
-            None => "tofu".to_owned(),
-        };
-        out.push_str(&format!(
-            "{cursor} [{tick}] {:>2}  {:<20} {:<45} {trust:<24}{}\n",
-            index + 1,
-            preset.name,
-            preset.url,
-            if preset.insecure_http {
-                "insecure-http"
-            } else {
-                ""
-            },
-        ));
+pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize) -> String {
+    let len = presets.len();
+    let cursor = selection.cursor().min(len.saturating_sub(1));
+    let url = presets.get(cursor).map_or("", |preset| preset.url);
+
+    // Footer: URL, help, count, prompt, and the error line when there is one.
+    let footer = 4 + usize::from(selection.error().is_some());
+    let budget = rows.saturating_sub(footer).max(1);
+
+    let mut lines: Vec<String> = Vec::with_capacity(budget + footer);
+    if len > 0 {
+        let capacity = budget.min(len);
+        let mut start = cursor.saturating_sub(capacity.saturating_sub(1));
+        start = start.min(len - capacity);
+        let mut end = start + capacity;
+        // A marker eats a row; make room without losing the cursor.
+        let mut real = capacity;
+        if start > 0 {
+            real = real.saturating_sub(1);
+        }
+        if end < len {
+            real = real.saturating_sub(1);
+        }
+        real = real.max(1).min(len);
+        start = cursor.saturating_sub(real - 1).min(len - real);
+        end = (start + real).min(len);
+
+        if start > 0 {
+            lines.push("  …".to_owned());
+        }
+        for (index, preset) in presets.iter().enumerate().take(end).skip(start) {
+            lines.push(row(selection, index, preset));
+        }
+        if end < len {
+            lines.push("  …".to_owned());
+        }
     }
-    out.push_str("space toggle  a all  n none  j/k or arrows move  enter save  q abort\n");
-    out.push_str(&format!("{} selected\n", selection.chosen().len()));
-    out.push_str(&format!("> {}_", selection.typed()));
+
+    lines.push(format!("url: {url}"));
+    lines.push(HELP.to_owned());
+    lines.push(format!("{} selected", selection.chosen().len()));
+    lines.push(format!("> {}_", selection.typed()));
     if let Some(error) = selection.error() {
-        out.push_str(&format!("\n{error}"));
+        lines.push(error.to_owned());
     }
-    out.push('\n');
+
+    let mut out = String::with_capacity((budget + footer) * 64);
+    for line in &lines {
+        out.push_str(&fit(line, cols));
+        out.push_str("\r\n");
+    }
     out
 }
 
-/// A fingerprint abbreviated for a row: the head, an ellipsis, the tail.
-fn abbreviate(fingerprint: &str) -> String {
-    if fingerprint.len() <= 20 {
-        return fingerprint.to_owned();
+/// One row, at the fixed widths, with the long fields fitted.
+fn row(selection: &Selection, index: usize, preset: &Preset) -> String {
+    let cursor = if index == selection.cursor() {
+        '>'
+    } else {
+        ' '
+    };
+    let tick = if selection.is_chosen(index) { 'x' } else { ' ' };
+    let trust = match preset.fingerprint {
+        Some(fingerprint) => format!("pin {fingerprint}"),
+        None => "tofu".to_owned(),
+    };
+    format!(
+        " {cursor} [{tick}] {:>2}  {:<NAME_WIDTH$} {:<TRUST_WIDTH$} {}",
+        index + 1,
+        fit(preset.name, NAME_WIDTH),
+        fit(&trust, TRUST_WIDTH),
+        if preset.insecure_http { "http" } else { "" },
+    )
+}
+
+/// `text` cut to `width` characters, with `…` when it had to be cut.
+///
+/// Character-wise, so a multi-byte name cannot split a code point.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
     }
-    let cut = fingerprint.len() - 6;
-    format!("{}…{}", &fingerprint[..9], &fingerprint[cut..])
+    let Some(room) = width.checked_sub(1) else {
+        return String::new();
+    };
+    let mut out: String = text.chars().take(room).collect();
+    out.push('…');
+    out
 }
 
 /// A terminal in raw mode, restored on drop.
@@ -238,7 +311,9 @@ impl Raw {
     #[must_use]
     pub fn open() -> Option<Self> {
         let saved = stty(&["-g"])?;
-        stty(&["raw", "-echo", "min", "0", "time", "1"])?;
+        // `raw` clears `opost`, so the output flags have to be re-set after it;
+        // otherwise every `\n` would walk to the right margin.
+        stty(&["raw", "-echo", "min", "0", "time", "1", "opost", "onlcr"])?;
         print!("\x1b[?1049h\x1b[?25l");
         let _ = std::io::stdout().flush();
         Some(Self { saved })
@@ -280,6 +355,20 @@ impl Drop for Raw {
     }
 }
 
+/// The terminal's `(rows, cols)`, re-read every frame so a resize is caught.
+///
+/// `(24, 80)` when there is no answer: a sane frame beats none.
+fn size() -> (usize, usize) {
+    stty(&["size"])
+        .and_then(|output| {
+            let mut parts = output.split_whitespace();
+            let rows: usize = parts.next()?.parse().ok()?;
+            let cols: usize = parts.next()?.parse().ok()?;
+            (rows > 0 && cols > 0).then_some((rows, cols))
+        })
+        .unwrap_or((24, 80))
+}
+
 /// Run `stty` with `args`, returning its stdout when it succeeded.
 fn stty(args: &[&str]) -> Option<String> {
     let output = Command::new("stty")
@@ -304,7 +393,8 @@ pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
         None
     })?;
     loop {
-        terminal.paint(&frame(selection, presets));
+        let (rows, cols) = size();
+        terminal.paint(&frame(selection, presets, rows, cols));
         let bytes = terminal.read_key();
         let Some(key) = parse_key(&bytes) else {
             continue;
@@ -447,10 +537,10 @@ mod tests {
         let mut selection = picked();
         press(&mut selection, Key::Down);
         press(&mut selection, Key::Toggle);
-        let rendered = frame(&selection, &presets::PRESETS);
+        let rendered = frame(&selection, &presets::PRESETS, 40, 80);
         let marked: Vec<&str> = rendered
             .lines()
-            .filter(|line| line.starts_with("> ["))
+            .filter(|line| line.trim_start().starts_with("> ["))
             .collect();
         assert_eq!(marked.len(), 1, "{rendered}");
         assert!(marked[0].contains("digicert"), "{rendered}");
@@ -465,36 +555,170 @@ mod tests {
         let mut selection = picked();
         press(&mut selection, Key::Down);
         press(&mut selection, Key::Toggle);
-        let mut text = frame(&selection, &presets::PRESETS);
-        // Keep the first four rows and the tofu row.
-        let mut out = String::new();
-        for (index, line) in text.lines().enumerate() {
-            if index < 4 || index == 8 || index >= presets::PRESETS.len() {
-                out.push_str(line);
-                out.push('\n');
-                if index == 3 {
-                    out.push_str("   …\n");
-                }
-            }
-        }
-        text.clear();
-        eprint!("{out}");
+        eprint!("{}", frame(&selection, &presets::PRESETS, 24, 80));
     }
 
     #[test]
     fn the_frame_shows_the_trust_tier_and_the_help() {
-        let rendered = frame(&picked(), &presets::PRESETS);
-        assert!(rendered.contains("pinned "), "{rendered}");
+        let rendered = frame(&picked(), &presets::PRESETS, 24, 80);
+        assert!(rendered.contains("pin "), "{rendered}");
         assert!(rendered.contains("tofu"), "{rendered}");
-        assert!(rendered.contains("insecure-http"), "{rendered}");
+        assert!(rendered.contains(" http"), "{rendered}");
         assert!(rendered.contains("0 selected"), "{rendered}");
         assert!(rendered.contains("enter save"), "{rendered}");
         assert!(rendered.contains("> _"), "{rendered}");
     }
 
+    /// Frame lines without the `\r`, so a test can compare and measure them.
+    fn shards(rendered: &str) -> Vec<&str> {
+        rendered
+            .split("\r\n")
+            .filter(|line| !line.is_empty())
+            .collect()
+    }
+
+    fn long_preset() -> presets::Preset {
+        presets::Preset {
+            name: "a-name-that-is-exactly-forty-chars-long!!",
+            url: "http://an-endpoint.example/that/is/long/enough/to/need/room/tsr",
+            anchor_url: "http://an-endpoint.example/ca.pem",
+            alg: "sha256",
+            policy: None,
+            fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),
+            insecure_http: true,
+            curated: false,
+        }
+    }
+
+    #[test]
+    fn every_line_is_crlf_and_fits_the_width() {
+        for cols in [40, 60, 80] {
+            for cursor in 0..presets::PRESETS.len() {
+                let mut selection = picked();
+                selection.apply_key(Key::Down, presets::PRESETS.len());
+                for _ in 0..cursor {
+                    press(&mut selection, Key::Down);
+                }
+                let rendered = frame(&selection, &presets::PRESETS, 24, cols);
+                assert!(rendered.ends_with("\r\n"), "every line ends CRLF");
+                for line in rendered.split_inclusive("\r\n") {
+                    let body = line.strip_suffix("\r\n").expect("CRLF at {cols}/{cursor}");
+                    assert!(
+                        body.chars().count() <= cols,
+                        "{} > {cols} at cursor {cursor}: {body:?}",
+                        body.chars().count()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_frame_never_exceeds_the_terminal_rows() {
+        for rows in [8, 24, 40] {
+            let mut selection = picked();
+            press(&mut selection, Key::End);
+            let rendered = frame(&selection, &presets::PRESETS, rows, 80);
+            assert!(
+                rendered.lines().count() <= rows,
+                "{} lines for {rows} rows",
+                rendered.lines().count()
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_row_and_the_footer_are_always_rendered() {
+        // At the top nothing is cut above.
+        let rendered = frame(&picked(), &presets::PRESETS, 8, 80);
+        let lines = shards(&rendered);
+        assert!(lines[0].contains("freetsa"), "{rendered}");
+        // The fingerprint itself is abbreviated; the *row* is not cut off.
+        assert!(lines[0].trim_start().starts_with("> ["), "{rendered}");
+
+        // At the last row the cursor row is there and a `…` marks the top cut.
+        let mut selection = picked();
+        press(&mut selection, Key::End);
+        let rendered = frame(&selection, &presets::PRESETS, 8, 80);
+        let lines = shards(&rendered);
+        assert_eq!(lines[0].trim(), "…", "the top cut is marked: {rendered}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.trim_start().starts_with("> [") && line.contains("accv")),
+            "{rendered}"
+        );
+
+        // The footer is in both, the prompt unconditionally.
+        for rendered in [frame(&picked(), &presets::PRESETS, 8, 80), rendered] {
+            assert!(rendered.contains("selected"), "{rendered}");
+            assert!(rendered.contains("> _"), "{rendered}");
+            assert!(rendered.contains("url: "), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn long_fields_are_cut_with_an_ellipsis_and_keep_the_columns_aligned() {
+        let row_of = |presets: &[presets::Preset]| {
+            let rendered = frame(&picked(), presets, 24, 60);
+            shards(&rendered)
+                .into_iter()
+                .find(|line| line.trim_start().starts_with("> ["))
+                .expect("the cursor row")
+                .to_owned()
+        };
+
+        // A 40-character name and a 59-character fingerprint, both cut.
+        let long = row_of(&[long_preset()]);
+        assert!(long.chars().count() <= 60, "{long:?}");
+        assert_eq!(
+            long.matches('…').count(),
+            2,
+            "name and trust are cut: {long:?}"
+        );
+
+        // The trust column starts at the same place whether the name was cut or not.
+        let column = |line: &str, marker: &str| {
+            let at = line
+                .find(marker)
+                .unwrap_or_else(|| panic!("`{marker}` in {line:?}"));
+            line[..at].chars().count()
+        };
+        let short = row_of(&presets::PRESETS[1..2]); // digicert: pinned and `http`
+        assert_eq!(
+            column(&long, "pin "),
+            column(&short, "pin "),
+            "{long:?} / {short:?}"
+        );
+        assert_eq!(
+            column(&long, "http"),
+            column(&short, "http"),
+            "{long:?} / {short:?}"
+        );
+        assert_eq!(column(&long, "pin "), 11 + super::NAME_WIDTH + 1);
+    }
+
+    #[test]
+    fn an_empty_table_answers_every_key() {
+        let mut selection = picked();
+        for key in [
+            Key::Up,
+            Key::Down,
+            Key::Home,
+            Key::End,
+            Key::Toggle,
+            Key::Enter,
+        ] {
+            let _ = selection.apply_key(key, 0);
+        }
+        let expected = selection.chosen().to_vec();
+        assert_eq!(selection.apply_key(Key::Enter, 0), Outcome::Save(expected));
+        assert!(frame(&selection, &[], 24, 80).contains("url: "));
+    }
+
     #[test]
     fn a_short_fingerprint_is_not_abbreviated() {
-        assert_eq!(super::abbreviate("AB:CD"), "AB:CD");
-        assert!(super::abbreviate(&"A".repeat(40)).contains('…'));
+        assert_eq!(super::fit("AB:CD", 16), "AB:CD");
+        assert!(super::fit(&"A".repeat(40), 16).ends_with('…'));
     }
 }

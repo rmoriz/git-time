@@ -200,12 +200,27 @@ The list is a cursor UI on the alternate screen. Nothing is preselected: the sel
 to make, and `a` really is all 22.
 
 ```
-  [ ]  1  freetsa              https://freetsa.org/tsr                       pinned A6:37:9E:…:AA:BC 
-> [x]  2  digicert             http://timestamp.digicert.com                 pinned 05:63:B8:…:4D:43 insecure-http
-  [ ]  3  sectigo              https://timestamp.sectigo.com/qualified       pinned CB:73:94:…:43:07 
-  [ ]  4  certum               http://time.certum.pl                         pinned 07:E0:32:…:06:9E insecure-http
-   …
-  [ ]  9  cartaodecidadao      http://ts.cartaodecidadao.pt/tsa/server       tofu                    insecure-http
+   [ ]  1  freetsa            pin A6:37:9E:7C… 
+ > [x]  2  digicert           pin 05:63:B8:63… http
+   [ ]  3  sectigo            pin CB:73:94:4C… 
+   [ ]  4  certum             pin 07:E0:32:E0… http
+   [ ]  5  izenpe             pin 8E:5B:8B:AE… http
+   [ ]  6  acs-microsoft      pin F4:00:42:E2… http
+   [ ]  7  globalsign-r6      pin 13:9B:1C:71… http
+   [ ]  8  aped               pin 44:4D:AE:31… 
+   [ ]  9  cartaodecidadao    tofu             http
+   [ ] 10  swisssign          tofu             http
+   [ ] 11  apple              pin 61:1E:5B:66… http
+   [ ] 12  dfn                pin 58:81:54:65… http
+   [ ] 13  globalsign-advanc… pin 13:9B:1C:71… http
+   [ ] 14  comodoca           tofu             http
+   [ ] 15  identrust          pin BA:29:41:60… http
+   [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
+   [ ] 17  ssl-com            pin B7:AB:33:08… http
+   [ ] 18  belgium            pin 98:98:9F:EE… http
+   [ ] 19  cesnet             pin E7:84:74:90… 
+  …
+url: http://timestamp.digicert.com
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
 1 selected
 > _
@@ -230,10 +245,16 @@ time tsa select --interactive` still works. A buffer that does not parse shows o
 keeps the frame. A terminal that cannot be put into raw mode at all falls back to the line prompt of
 the early versions, saying so in one line.
 
-The right-hand column is the trust tier. `pinned` is checked against the table when it is pinned and
-a mismatch is a refusal. `tofu` can only be reviewed by reading the fingerprint the command prints —
+The `pin` column is the trust tier: the root is checked against the table when it is pinned and a
+mismatch is a refusal. `tofu` can only be reviewed by reading the fingerprint the command prints —
 `git time anchor pin` records the pinned bundle's fingerprint in `time.anchors-lock` so a later
-change is caught. `insecure-http` marks a plain-`http` endpoint.
+change is caught. `http` marks a plain-`http` endpoint; the endpoint of the cursor row is printed in
+full below the list.
+
+The list is a window sized to the terminal: the footer, the URL line and the cursor row stay on
+screen, a cut edge is marked `…`, and the frame is re-measured from the terminal each key so a
+resize is honoured. On a terminal too short for the footer it degrades to the cursor row and the
+footer.
 
 Each enabled authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned
 prints `failed <id>: <reason>` and makes the command exit `1` while the others still pin. Under
