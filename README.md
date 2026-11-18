@@ -34,12 +34,12 @@ endpoint; the full URL of the cursor row is printed below the list, so no column
    [ ]  6  acs-microsoft      pin F4:00:42:E2… http
    [ ]  7  globalsign-r6      pin 13:9B:1C:71… http
    [ ]  8  aped               pin 44:4D:AE:31… 
-   [ ]  9  cartaodecidadao    tofu             http
+   [ ]  9  cartaodecidadao    pin E8:9D:08:31… http
    [ ] 10  swisssign          tofu             http
    [ ] 11  apple              pin 61:1E:5B:66… http
    [ ] 12  dfn                pin 58:81:54:65… http
    [ ] 13  globalsign-advanc… pin 13:9B:1C:71… http
-   [ ] 14  comodoca           tofu             http
+   [ ] 14  comodoca           pin 52:42:1A:EA… http
    [ ] 15  identrust          pin BA:29:41:60… http
    [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
    [ ] 17  ssl-com            pin B7:AB:33:08… http
@@ -135,16 +135,16 @@ the docs recommend, nothing more — the selector preselects none of them.
 | `digicert` | `http://timestamp.digicert.com` | default | pinned SHA-1 fingerprint, plain http |
 | `sectigo` | `https://timestamp.sectigo.com/qualified` | opt-in | pinned SHA-1 fingerprint |
 | `certum` | `http://time.certum.pl` | opt-in | pinned SHA-1 fingerprint, plain http |
-| `izenpe` | `http://tsa.izenpe.com` | opt-in | pinned SHA-256 fingerprint, unverified, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | opt-in | pinned SHA-256 fingerprint, plain http |
 | `acs-microsoft` | `http://timestamp.acs.microsoft.com` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `aped` | `https://timestamp.aped.gov.gr/qtss` | opt-in | pinned SHA-1 fingerprint |
-| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | trust on first use, plain http |
-| `swisssign` | `http://tsa.swisssign.net` | opt-in | trust on first use, plain http |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | pinned SHA-1 fingerprint, plain http, anchor at the state PKI |
+| `swisssign` | `http://tsa.swisssign.net` | opt-in | trust on first use, plain http, answers `400` since 11/2026 |
 | `apple` | `http://timestamp.apple.com/ts01` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `dfn` | `http://zeitstempel.dfn.de` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | opt-in | pinned SHA-1 fingerprint, plain http |
-| `comodoca` | `http://timestamp.comodoca.com` | opt-in | trust on first use, plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `identrust` | `http://timestamp.identrust.com` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `ssl-com` | `http://ts.ssl.com` | opt-in | pinned SHA-1 fingerprint, plain http |
@@ -154,14 +154,18 @@ the docs recommend, nothing more — the selector preselects none of them.
 | `lex-persona` | `http://tsa.lex-persona.com/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `accv` | `http://tss.accv.es:8318/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 
-Root fingerprints were measured by querying each endpoint and walking its chain, except izenpe's,
-which is supplied and unverified. Two earlier values were wrong for their endpoint and were
-replaced by measured ones: `sectigo` belongs to a different Sectigo root than the one the endpoint
-chains to, and `certum` too (`07:E0:32:E0:…`, Certum Trusted Network CA).
+Root fingerprints were measured by querying each endpoint and walking its chain — the reply's
+certificates plus the top certificate's AIA `caIssuers` where the root is not embedded. izenpe's
+value was supplied and is confirmed by that walk. `swisssign` is the only trust-on-first-use row
+left: every query to it is answered with a `400`. Two earlier values were wrong for their endpoint
+and were replaced by measured ones: `sectigo` belongs to a different Sectigo root than the one the
+endpoint chains to, and `certum` too (`07:E0:32:E0:…`, Certum Trusted Network CA).
 
 A pinned fingerprint makes the *first* fetch verifiable: a bundle whose root hashes to anything
 else is refused and an existing pin is left alone. Where no fingerprint is published the fetch is
-trust on first use, so the fetched root is printed in full for a reader to compare. Plain `http`
+trust on first use, so the fetched root is printed in full for a reader to compare. A download may
+be PEM, DER or PKCS#7; `cartaodecidadao` names its issuers as a chain because its reply carries the
+signing leaf alone. Plain `http`
 costs no integrity — the token is verified against the pinned root — but it exposes the imprint and
 lets an attacker block the authority; an insecure authority keeps printing a warning at seal time.
 
