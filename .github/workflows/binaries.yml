@@ -88,7 +88,7 @@ jobs:
 
   macos:
     name: macos (darwin)
-    runs-on: macos-14
+    runs-on: macos-13
     continue-on-error: ${{ inputs.tolerant }}
     steps:
       - uses: actions/checkout@v5
