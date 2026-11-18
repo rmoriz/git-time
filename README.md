@@ -18,10 +18,42 @@ $ git time verify                             # judges the evidence, gates CI
 `cargo install` without `--path` needs the crates published, which they are not yet; use the
 `--path` form above, or build and put `target/release/git-time` on `PATH`.
 
-Prebuilt binaries for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
-`aarch64-apple-darwin` and `x86_64-apple-darwin` are attached to every release, and every CI run
-on `main` uploads the same four tarballs as workflow artifacts (with `SHA256SUMS` on the release).
-The Linux builds are static; the macOS builds use the system libraries.
+## Install from a release binary
+
+No toolchain needed. Pick the asset for your platform from
+[the latest release](https://github.com/rmoriz/git-time/releases/latest):
+
+| Platform | Asset |
+|---|---|
+| Linux, x86-64 | `git-time-x86_64-unknown-linux-musl.tar.gz` |
+| Linux, arm64 | `git-time-aarch64-unknown-linux-musl.tar.gz` |
+| macOS, Apple silicon | `git-time-aarch64-apple-darwin.tar.gz` |
+| macOS, Intel | `git-time-x86_64-apple-darwin.tar.gz` |
+
+```console
+$ VERSION=0.1.0
+$ TARGET=x86_64-unknown-linux-musl        # or aarch64-apple-darwin, etc.
+$ NAME=git-time-$TARGET
+
+$ curl -LO https://github.com/rmoriz/git-time/releases/download/v$VERSION/$NAME.tar.gz
+$ curl -LO https://github.com/rmoriz/git-time/releases/download/v$VERSION/SHA256SUMS
+$ sha256sum --ignore-missing -c SHA256SUMS      # macOS: shasum -a 256 -c SHA256SUMS
+
+$ tar -xzf $NAME.tar.gz
+$ install -m 0755 $NAME/git-time ~/.local/bin/git-time   # ensure ~/.local/bin is on PATH
+$ git time --version
+
+$ cd /path/to/a/repo
+$ git time install --preset public
+$ git commit -m "add entry point"
+```
+
+Verifying the checksum before running the binary is worth the extra line: the whole point of this
+tool is evidence you can check yourself.
+
+Every CI run on `main` also uploads the same four tarballs as workflow artifacts, so an unreleased
+build is one [Actions run](https://github.com/rmoriz/git-time/actions) away. The Linux builds are
+static (`static-pie`); the macOS builds link the system libraries.
 
 ## A real transcript
 
