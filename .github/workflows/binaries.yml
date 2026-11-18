@@ -61,7 +61,7 @@ jobs:
       - name: Install cross
         uses: taiki-e/install-action@cross
 
-      - name: Build and package
+      - name: Build and stage
         run: |
           set -eu
           # A target dir per target: both invocations share this job, and cargo
@@ -75,14 +75,14 @@ jobs:
       - name: Smoke test the native binary
         run: |
           set -eu
-          ./dist-binaries/git-time-x86_64-unknown-linux-musl/git-time --version
-          ./dist-binaries/git-time-x86_64-unknown-linux-musl/git-time --help >/dev/null
+          ./dist-binaries/git-time-x86_64-unknown-linux-musl --version
+          ./dist-binaries/git-time-x86_64-unknown-linux-musl --help >/dev/null
 
       - name: Upload the artifacts
         uses: actions/upload-artifact@v4
         with:
           name: git-time-linux
-          path: dist-binaries/*.tar.gz*
+          path: dist-binaries/*
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}
 
@@ -125,7 +125,7 @@ jobs:
           cargo clippy --workspace --all-targets -- -D warnings
           cargo test --workspace
 
-      - name: Build and package
+      - name: Build and stage
         run: |
           set -eu
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -136,13 +136,13 @@ jobs:
       - name: Smoke test the native binary
         run: |
           set -eu
-          ./dist-binaries/git-time-x86_64-apple-darwin/git-time --version
-          ./dist-binaries/git-time-x86_64-apple-darwin/git-time --help >/dev/null
+          ./dist-binaries/git-time-x86_64-apple-darwin --version
+          ./dist-binaries/git-time-x86_64-apple-darwin --help >/dev/null
 
       - name: Upload the artifacts
         uses: actions/upload-artifact@v4
         with:
           name: git-time-macos
-          path: dist-binaries/*.tar.gz*
+          path: dist-binaries/*
           if-no-files-found: error
           retention-days: ${{ inputs.retention-days }}

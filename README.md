@@ -75,24 +75,22 @@ tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without
 No toolchain needed. Pick the asset for your platform from
 [the latest release](https://github.com/rmoriz/git-time/releases/latest):
 
+Each release asset is the bare binary for its target, named after it — nothing
+to unpack, no checksum file beside it.
+
 | Platform | Asset |
 |---|---|
-| Linux, x86-64 | `git-time-x86_64-unknown-linux-musl.tar.gz` |
-| Linux, arm64 | `git-time-aarch64-unknown-linux-musl.tar.gz` |
-| macOS, Apple silicon | `git-time-aarch64-apple-darwin.tar.gz` |
-| macOS, Intel | `git-time-x86_64-apple-darwin.tar.gz` |
+| Linux, x86-64 | `git-time-x86_64-unknown-linux-musl` |
+| Linux, arm64 | `git-time-aarch64-unknown-linux-musl` |
+| macOS, Apple silicon | `git-time-aarch64-apple-darwin` |
+| macOS, Intel | `git-time-x86_64-apple-darwin` |
 
 ```console
 $ VERSION=0.1.0
 $ TARGET=x86_64-unknown-linux-musl        # or aarch64-apple-darwin, etc.
-$ NAME=git-time-$TARGET
 
-$ curl -LO https://github.com/rmoriz/git-time/releases/download/v$VERSION/$NAME.tar.gz
-$ curl -LO https://github.com/rmoriz/git-time/releases/download/v$VERSION/SHA256SUMS
-$ sha256sum --ignore-missing -c SHA256SUMS      # macOS: shasum -a 256 -c SHA256SUMS
-
-$ tar -xzf $NAME.tar.gz
-$ install -m 0755 $NAME/git-time ~/.local/bin/git-time   # ensure ~/.local/bin is on PATH
+$ curl -fLO https://github.com/rmoriz/git-time/releases/download/v$VERSION/git-time-$TARGET
+$ install -m 0755 git-time-$TARGET ~/.local/bin/git-time   # ensure ~/.local/bin is on PATH
 $ git time --version
 
 $ cd /path/to/a/repo

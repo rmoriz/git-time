@@ -99,7 +99,8 @@ targets in two jobs (one per OS) — the macOS job running the same suite before
 needs a single macOS runner. That is deliberate: the account serves about two concurrent macOS
 runners and cancels a job that queues for more than fifteen minutes, which fails the run. A job so
 cancelled twice is what kept `v0.1.0` from publishing. `.github/workflows/release.yml` builds the
-tag, refuses to publish unless the suite is green, and attaches `SHA256SUMS`. The musl targets
+tag and refuses to publish unless the suite is green. A release attaches the four bare binaries
+and nothing else — no archive, no checksum file — so a download is a `chmod +x` and a run. The musl targets
 build in separate target dirs, so no host-built build script crosses a container boundary.
 
 A job in `ci.yml` named `changes` decides whether anything but markdown was touched; the

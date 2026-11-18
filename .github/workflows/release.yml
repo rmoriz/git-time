@@ -56,20 +56,26 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Combine the checksums
+      # The build jobs stage bare binaries, so the release attaches exactly
+      # those: no archive and no checksum file to fetch alongside, one asset per
+      # target, named after it.
+      - name: Check the assets
         run: |
           set -eu
           cd dist
+          chmod +x git-time-*
+          # Four targets, and each one has to be an executable of this project,
+          # or the release goes out short.
+          test "$(ls git-time-* | wc -l)" -eq 4
+          for binary in git-time-*; do
+            test -s "$binary"
+            file "$binary" | grep -Eq 'Mach-O|ELF'
+          done
           ls -l
-          cat ./*.tar.gz.sha256 > SHA256SUMS
-          rm ./*.tar.gz.sha256
-          cat SHA256SUMS
 
       - name: Publish the release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.tar.gz
-            dist/SHA256SUMS
+          files: dist/git-time-*
           fail_on_unmatched_files: true
           generate_release_notes: true
