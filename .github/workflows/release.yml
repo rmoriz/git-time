@@ -15,13 +15,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The tag push also triggers CI, but nothing made the release wait for it:
+  # without this gate a failing suite still publishes.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          components: rustfmt, clippy
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
   binaries:
     uses: ./.github/workflows/binaries.yml
     with:
       retention-days: 7
 
   release:
-    needs: binaries
+    needs: [binaries, test]
     runs-on: ubuntu-latest
     permissions:
       contents: write
