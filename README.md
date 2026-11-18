@@ -18,6 +18,9 @@ $ git time verify                             # judges the evidence, gates CI
 `cargo install` without `--path` needs the crates published, which they are not yet; use the
 `--path` form above, or build and put `target/release/git-time` on `PATH`.
 
+`install --preset public` enables every built-in authority. To choose a subset instead, run
+`git time tsa select` and pick by number; `git time tsa preset list` shows the table first.
+
 ## Install from a release binary
 
 No toolchain needed. Pick the asset for your platform from
@@ -101,6 +104,17 @@ from it. It is ordered the two originals, then the published roots, then trust o
 | `swisssign` | `http://tsa.swisssign.net` | trust on first use, plain http |
 | `apple` | `http://timestamp.apple.com/ts01` | trust on first use, plain http |
 | `dfn` | `http://zeitstempel.dfn.de` | trust on first use, plain http |
+| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | trust on first use, plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | trust on first use, plain http |
+| `digicert` | `http://timestamp.digicert.com` | trust on first use, plain http |
+| `identrust` | `http://timestamp.identrust.com` | trust on first use, plain http |
+| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | trust on first use, plain http |
+| `ssl-com` | `http://ts.ssl.com` | trust on first use, plain http |
+| `belgium` | `http://tsa.belgium.be/connect` | trust on first use, plain http |
+| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | trust on first use |
+| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | trust on first use, plain http |
+| `lex-persona` | `http://tsa.lex-persona.com/tsa` | trust on first use, plain http |
+| `accv` | `http://tss.accv.es:8318/tsa` | trust on first use, plain http |
 
 A pinned fingerprint makes the *first* fetch verifiable: a bundle whose root hashes to anything
 else is refused and an existing pin is left alone. Where no fingerprint is published the fetch is

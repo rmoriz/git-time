@@ -10,7 +10,7 @@
 //! fingerprint that root must have.
 //!
 //! The order is deliberate: the two originals, then the three with a published
-//! root, then seven that are trust on first use. FreeTSA publishes a plain PEM;
+//! root, then the rest, which are trust on first use. FreeTSA publishes a plain PEM;
 //! for every other preset the anchor URL *is* the endpoint, because no
 //! certificate download is served there. The fetch asks the endpoint for a token
 //! and takes the self-signed root of the chain it replies with — the same
@@ -64,7 +64,7 @@ pub struct Preset {
 
 /// The built-in presets, in the order they are written: the two originals, the
 /// three with a published root, then the seven that are trust on first use.
-pub const PRESETS: [Preset; 12] = [
+pub const PRESETS: [Preset; 23] = [
     Preset {
         name: "freetsa",
         url: "https://freetsa.org/tsr",
@@ -189,6 +189,112 @@ pub const PRESETS: [Preset; 12] = [
         fingerprint: None,
         insecure_http: true,
     },
+    // The owner's live-TSA list, minus the endpoints already above. Its
+    // `certum-legacy` entry is skipped: it names exactly the `certum` endpoint,
+    // and a second row for one endpoint would be two ids for one authority.
+    Preset {
+        name: "globalsign-advanced",
+        url: "http://rfc3161timestamp.globalsign.com/advanced",
+        anchor_url: "http://rfc3161timestamp.globalsign.com/advanced",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "comodoca",
+        url: "http://timestamp.comodoca.com",
+        anchor_url: "http://timestamp.comodoca.com",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "digicert",
+        url: "http://timestamp.digicert.com",
+        anchor_url: "http://timestamp.digicert.com",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "identrust",
+        url: "http://timestamp.identrust.com",
+        anchor_url: "http://timestamp.identrust.com",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "quovadis-eu",
+        url: "http://ts.quovadisglobal.com/eu",
+        anchor_url: "http://ts.quovadisglobal.com/eu",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "ssl-com",
+        url: "http://ts.ssl.com",
+        anchor_url: "http://ts.ssl.com",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "belgium",
+        url: "http://tsa.belgium.be/connect",
+        anchor_url: "http://tsa.belgium.be/connect",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        // The same authority also answers on `http://tsa.cesnet.cz:3161/tsa`;
+        // the TLS port is the one worth carrying.
+        name: "cesnet",
+        url: "https://tsa.cesnet.cz:3162/tsa",
+        anchor_url: "https://tsa.cesnet.cz:3162/tsa",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: false,
+    },
+    Preset {
+        // The query string is part of the endpoint: it selects the worker and
+        // is stored and posted verbatim.
+        name: "cra-ge",
+        url: "http://tsa.cra.ge/signserver/tsa?workerName=qtsa",
+        anchor_url: "http://tsa.cra.ge/signserver/tsa?workerName=qtsa",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "lex-persona",
+        url: "http://tsa.lex-persona.com/tsa",
+        anchor_url: "http://tsa.lex-persona.com/tsa",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
+    Preset {
+        name: "accv",
+        url: "http://tss.accv.es:8318/tsa",
+        anchor_url: "http://tss.accv.es:8318/tsa",
+        alg: "sha256",
+        policy: None,
+        fingerprint: None,
+        insecure_http: true,
+    },
 ];
 
 /// The preset called `name`.
@@ -228,6 +334,22 @@ mod tests {
             assert_eq!(preset.alg, "sha256");
         }
         assert_eq!(find("nope"), None);
+    }
+
+    /// One endpoint must not appear twice: two ids for one authority would both
+    /// be written by `install --preset public` and both pinned.
+    #[test]
+    fn no_endpoint_and_no_id_repeats() {
+        for (index, preset) in PRESETS.iter().enumerate() {
+            for other in &PRESETS[index + 1..] {
+                assert_ne!(preset.name, other.name, "{} is named twice", preset.name);
+                assert_ne!(
+                    preset.url, other.url,
+                    "{} and {} share an endpoint",
+                    preset.name, other.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -291,6 +413,16 @@ mod tests {
                 "swisssign",
                 "apple",
                 "dfn",
+                "globalsign-advanced",
+                "comodoca",
+                "digicert",
+                "identrust",
+                "quovadis-eu",
+                "ssl-com",
+                "belgium",
+                "cra-ge",
+                "lex-persona",
+                "accv",
             ]
         );
     }

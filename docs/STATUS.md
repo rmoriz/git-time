@@ -51,7 +51,7 @@ and detached HEAD.
 | 11 | hook (post-commit, post-merge), `seal --range`, `drop`, `pre-commit` gate, published-commit guard |
 | 12 | `install`/`uninstall`/`doctor`, hook chaining without destroying user hooks, presets |
 | 13 | `verify`/`log`: verdict matrix, per-TSA evidence, JSON, quorum and signature gates |
-| 14 | `tsa add/list/remove`, `tsa preset list/add`, `anchor fetch/list/pin`, shared preset table |
+| 14 | `tsa add/list/remove`, `tsa preset list/add`, `tsa select`, `anchor fetch/list/pin`, shared preset table |
 
 399 tests (one a live-network test, `#[ignore]`), `clippy -D warnings`, `fmt --check` clean. Every
 task passed an independent review with fix rounds; the crypto review attacked nine specific

@@ -150,6 +150,17 @@ what makes the first pin reviewable.
 | `swisssign` | `http://tsa.swisssign.net` | TOFU, plain http |
 | `apple` | `http://timestamp.apple.com/ts01` | TOFU, plain http |
 | `dfn` | `http://zeitstempel.dfn.de` | TOFU, plain http |
+| `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | TOFU, plain http |
+| `comodoca` | `http://timestamp.comodoca.com` | TOFU, plain http |
+| `digicert` | `http://timestamp.digicert.com` | TOFU, plain http |
+| `identrust` | `http://timestamp.identrust.com` | TOFU, plain http |
+| `quovadis-eu` | `http://ts.quovadisglobal.com/eu` | TOFU, plain http |
+| `ssl-com` | `http://ts.ssl.com` | TOFU, plain http |
+| `belgium` | `http://tsa.belgium.be/connect` | TOFU, plain http |
+| `cesnet` | `https://tsa.cesnet.cz:3162/tsa` | TOFU |
+| `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | TOFU, plain http |
+| `lex-persona` | `http://tsa.lex-persona.com/tsa` | TOFU, plain http |
+| `accv` | `http://tss.accv.es:8318/tsa` | TOFU, plain http |
 
 A `http://` authority is recorded with `time.tsa.<id>.insecure-http = true` and warns once per
 authority whenever the policy is loaded — that is, at seal time — because the token integrity comes
@@ -157,6 +168,32 @@ from the signature against the pinned root, not from the transport.
 
 Every preset but `freetsa` is fetched by asking the endpoint for a token and taking the self-signed
 root of the reply; only FreeTSA publishes a plain PEM.
+
+Each endpoint appears once. An authority that answers on several URLs keeps one row: `cesnet` is
+carried on its TLS port only, and `http://time.certum.pl` is the `certum` row, so no `certum-legacy`
+row exists. A query string belongs to the endpoint and is stored and posted verbatim, as with
+`cra-ge`.
+
+### `git time tsa select [--preset public|none] [--interactive] [--dry-run]`
+
+Choose interactively which preset authorities this repository uses, then pin the chosen anchors and
+remove the preset sections that were not chosen. A section whose id is not a preset is untouched.
+
+```
+1) freetsa https://freetsa.org/tsr pinned A6:37:…
+2) ai-moda https://rfc3161.ai.moda tofu
+…
+Authorities to enable (e.g. 1,3-4, all, none): 1,3-4
+```
+
+Indices are one-based, ranges are inclusive, and an empty answer means `none`. Anything else is
+reported in one line and asked again, three times, then the command exits `2`. Each enabled
+authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned prints
+`failed <id>: <reason>` and makes the command exit `1`. `--dry-run` prints what it would do.
+
+The command asks a question, so a stdin that is not a terminal is refused (`2`) rather than left to
+hang. `--interactive` says the answer is being piped. A script that needs no prompt uses
+`--preset public|none`, `git time tsa preset add <id>`, or `git time tsa add <url>`.
 
 ### `git time anchor fetch <url> --id ID [--insecure-http]`
 

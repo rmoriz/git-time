@@ -380,6 +380,16 @@ impl Repo {
         run_time_at(self.path(), self.xdg.path(), args, env)
     }
 
+    /// Run a command with `input` on stdin.
+    fn run_time_with_stdin(
+        &self,
+        args: &[&str],
+        env: &[(&'static str, String)],
+        input: &str,
+    ) -> Output {
+        run_time_stdin(self.path(), self.xdg.path(), args, env, input)
+    }
+
     /// The environment that makes an anchor fetch hand back the throwaway CA.
     fn fetch_ca(&self) -> Vec<(&'static str, String)> {
         vec![(
@@ -511,6 +521,40 @@ fn run_time_at(dir: &Path, xdg: &Path, args: &[&str], env: &[(&str, String)]) ->
         .stderr(Stdio::piped())
         .output()
         .expect("runs the binary")
+}
+
+/// Run the binary with `input` on its stdin, the way a piped answer arrives.
+fn run_time_stdin(
+    dir: &Path,
+    xdg: &Path,
+    args: &[&str],
+    env: &[(&str, String)],
+    input: &str,
+) -> Output {
+    let mut child = Command::new(BIN)
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_TIME_SKIP")
+        .envs(insulated_env().iter().copied())
+        .env("PATH", path_env())
+        .env("XDG_CONFIG_HOME", xdg)
+        .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawns the binary");
+    child
+        .stdin
+        .take()
+        .expect("a stdin pipe")
+        .write_all(input.as_bytes())
+        .expect("writes the answer");
+    child.wait_with_output().expect("runs the binary")
 }
 
 fn ok(output: &Output) -> String {
@@ -1144,6 +1188,205 @@ fn tsa_add_writes_the_insecure_transport_when_accepted() {
     assert_eq!(repo.config("time.tsa.safe.insecure-http"), None);
 }
 
+/// The prompt `tsa select` prints, so the count of re-asks can be counted.
+const SELECT_PROMPT: &str = "Authorities to enable (e.g. 1,3-4, all, none): ";
+
+/// Enable exactly the selected three, with their keys and a printed
+/// fingerprint each.
+#[test]
+fn select_enables_exactly_the_chosen_authorities() {
+    let repo = Repo::new();
+    repo.init();
+
+    let chosen = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
+        &repo.fetch_known_root(),
+        "1,2,8\n",
+    );
+    assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
+
+    let stdout = text(&chosen.stdout);
+    for (id, url) in [
+        ("freetsa", "https://freetsa.org/tsr"),
+        ("ai-moda", "https://rfc3161.ai.moda"),
+        ("aped", "https://timestamp.aped.gov.gr/qtss"),
+    ] {
+        assert_eq!(
+            repo.config(&format!("time.tsa.{id}.url")).as_deref(),
+            Some(url)
+        );
+        assert_eq!(
+            repo.config(&format!("time.tsa.{id}.alg")).as_deref(),
+            Some("sha256")
+        );
+        assert!(repo.config(&format!("time.tsa.{id}.anchor")).is_some());
+        assert!(repo.anchors().join(format!("{id}.pem")).exists(), "{id}");
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with(&format!("enabled {id} ")))
+            .unwrap_or_else(|| panic!("{id} enabled: {stdout}"));
+        let printed = fingerprint_after(line, "fingerprint ");
+        assert_eq!(printed.len(), 64, "{line}");
+    }
+
+    // Anything not chosen stays unconfigured.
+    for id in ["sectigo", "certum", "izenpe", "dfn"] {
+        assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
+    }
+}
+
+/// `none` removes the preset sections and leaves a hand-added authority alone.
+#[test]
+fn select_none_removes_preset_sections_but_not_hand_added_ones() {
+    let repo = Repo::new();
+    repo.init();
+    let enabled = repo.run_time_env(
+        &["tsa", "select", "--preset", "public"],
+        &repo.fetch_known_root(),
+    );
+    assert!(
+        repo.config("time.tsa.freetsa.url").is_some(),
+        "{}",
+        text(&enabled.stderr)
+    );
+    repo.add_tsa("acme", "http://tsa.example/tsr");
+
+    let cleared = repo.run_time(&["tsa", "select", "--preset", "none"]);
+    assert_eq!(cleared.status.code(), Some(0), "{}", text(&cleared.stderr));
+    for id in git_time_core::presets::names() {
+        assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
+    }
+    assert_eq!(
+        repo.config("time.tsa.acme.url").as_deref(),
+        Some("http://tsa.example/tsr"),
+        "a hand-added section is not a preset's"
+    );
+    let stdout = text(&cleared.stdout);
+    assert!(stdout.contains("disabled freetsa"), "{stdout}");
+    assert!(!stdout.contains("disabled acme"), "{stdout}");
+}
+
+#[test]
+fn select_reasks_three_times_then_exits_two() {
+    let repo = Repo::new();
+    repo.init();
+
+    let refused = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
+        &repo.fetch_known_root(),
+        "x\n99\n4-2\n",
+    );
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    assert_eq!(
+        text(&refused.stdout).matches(SELECT_PROMPT).count(),
+        3,
+        "one prompt per attempt: {}",
+        text(&refused.stdout)
+    );
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("is not a selection"), "{stderr}");
+    assert!(stderr.contains("counts backwards"), "{stderr}");
+}
+
+#[test]
+fn select_refuses_a_non_terminal_stdin_and_names_the_alternatives() {
+    let repo = Repo::new();
+    repo.init();
+
+    let refused = repo.run_time(&["tsa", "select"]);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("not a terminal"), "{stderr}");
+    assert!(stderr.contains("tsa preset add"), "{stderr}");
+    assert!(stderr.contains("tsa add"), "{stderr}");
+    // Nothing was prompted, so nothing hangs a script.
+    assert!(!text(&refused.stdout).contains(SELECT_PROMPT));
+}
+
+#[test]
+fn select_dry_run_prints_the_plan_and_writes_nothing() {
+    let repo = Repo::new();
+    repo.init();
+
+    let plan = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive", "--dry-run"],
+        &repo.fetch_known_root(),
+        "1,2\n",
+    );
+    assert_eq!(plan.status.code(), Some(0), "{}", text(&plan.stderr));
+    let stdout = text(&plan.stdout);
+    assert!(stdout.contains("would enable freetsa"), "{stdout}");
+    assert!(stdout.contains("would enable ai-moda"), "{stdout}");
+    assert_eq!(repo.config("time.tsa.freetsa.url"), None, "nothing written");
+    assert!(!repo.anchors().join("freetsa.pem").exists());
+
+    // A dry run of `none` says what it would remove and removes nothing.
+    assert!(
+        repo.run_time_env(
+            &["tsa", "select", "--preset", "public"],
+            &repo.fetch_known_root()
+        )
+        .status
+        .code()
+        .is_some()
+    );
+    let dry = repo.run_time(&["tsa", "select", "--preset", "none", "--dry-run"]);
+    assert_eq!(dry.status.code(), Some(0), "{}", text(&dry.stderr));
+    assert!(text(&dry.stdout).contains("would disable freetsa"));
+    assert!(
+        repo.config("time.tsa.freetsa.url").is_some(),
+        "still enabled"
+    );
+}
+
+#[test]
+fn select_reports_a_failed_authority_and_still_pins_the_others() {
+    let repo = Repo::new();
+    repo.init();
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!(
+            "case \"$GIT_TIME_ANCHOR_URL\" in https://freetsa.org/*) cat {} ;; *) exit 1 ;; esac",
+            pstr(&freetsa_root())
+        ),
+    )];
+
+    let chosen = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &fetch, "1,2\n");
+    assert_eq!(chosen.status.code(), Some(1), "{}", text(&chosen.stderr));
+    let stdout = text(&chosen.stdout);
+    assert!(stdout.contains("enabled freetsa "), "{stdout}");
+    assert!(
+        stdout.contains("failed ai-moda: no anchor could be pinned"),
+        "{stdout}"
+    );
+    assert!(repo.anchors().join("freetsa.pem").exists());
+    assert_eq!(
+        repo.config("time.tsa.ai-moda.url").as_deref(),
+        Some("https://rfc3161.ai.moda")
+    );
+}
+
+/// A query string is part of the endpoint: it has to survive validation and
+/// land in the config exactly as given.
+#[test]
+fn a_query_string_is_stored_verbatim() {
+    let repo = Repo::new();
+    repo.init();
+    let url = "http://tsa.cra.ge/signserver/tsa?workerName=qtsa";
+
+    repo.add_tsa("cra-ge", url);
+    assert_eq!(
+        repo.config("time.tsa.cra-ge.url").as_deref(),
+        Some(url),
+        "the query is not stripped"
+    );
+
+    // The preset carries the same endpoint, so the two cannot drift.
+    let preset = git_time_core::presets::find("cra-ge").expect("the preset exists");
+    assert_eq!(preset.url, url);
+    assert_eq!(preset.anchor_url, url);
+}
+
 #[test]
 fn preset_add_exits_one_when_the_fetch_leaves_no_anchor() {
     let repo = Repo::new();
@@ -1186,6 +1429,7 @@ fn every_registry_command_refuses_outside_a_repository() {
         &["anchor", "fetch", "https://a.example/ca.pem", "--id", "a"],
         &["anchor", "pin"],
         &["anchor", "pin", "--check"],
+        &["tsa", "select", "--preset", "public"],
     ];
     for args in cases {
         let output = run_time_at(dir.path(), xdg.path(), args, &[]);

@@ -14,7 +14,14 @@
 //! example.net/tsr` becomes `tsa-example-net`) and is always restricted to
 //! `[a-z0-9-]`: it ends up in a config key, a trailer value and a file name, so
 //! anything else would need quoting somewhere.
+//!
+//! `select` is the interactive middle ground between `install --preset public`,
+//! which enables every preset, and `preset add <id>`, which enables one: it
+//! shows the table, takes a selection and only then pins. It asks a question, so
+//! it needs a terminal unless `--interactive` says an answer is being piped; a
+//! script otherwise uses `install --preset` or `preset add` instead.
 
+use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 
 use clap::Subcommand;
@@ -69,6 +76,27 @@ pub enum Command {
         #[command(subcommand)]
         command: PresetCommand,
     },
+    /// Choose interactively which preset authorities to enable here.
+    Select {
+        /// Do not prompt: enable every preset, or remove the configured ones.
+        #[arg(long, value_name = "PRESET")]
+        preset: Option<SelectPreset>,
+        /// Prompt even when stdin is not a terminal, so an answer can be piped.
+        #[arg(long)]
+        interactive: bool,
+        /// Print the selection and what would be written, change nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+/// The non-interactive form of `tsa select`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum SelectPreset {
+    /// Enable every preset authority.
+    Public,
+    /// Remove every authority a preset configured.
+    None,
 }
 
 /// The subcommands of `git time tsa preset`.
@@ -134,6 +162,11 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
             PresetCommand::List => preset_list(&repo),
             PresetCommand::Add { name } => preset_add(&repo, &name).await,
         },
+        Command::Select {
+            preset,
+            interactive,
+            dry_run,
+        } => select(&repo, preset, interactive, dry_run).await,
     }
 }
 
@@ -391,6 +424,223 @@ async fn preset_add(repo: &Repo, name: &str) -> Exit {
         return Exit::seal(String::new());
     }
     Exit::ok()
+}
+
+/// The question the selector asks, verbatim so the transcript is stable.
+const SELECT_PROMPT: &str = "Authorities to enable (e.g. 1,3-4, all, none): ";
+
+/// How many answers are taken before the selector gives up.
+const SELECT_ATTEMPTS: usize = 3;
+
+/// Run `git time tsa select`: show the table, take a selection, pin it.
+///
+/// The selection decides what is enabled *and* what is not: a preset section
+/// that is not chosen is removed, so the command can narrow a configuration as
+/// well as widen it. Sections whose id is not a preset are never touched.
+async fn select(
+    repo: &Repo,
+    preset: Option<SelectPreset>,
+    interactive: bool,
+    dry_run: bool,
+) -> Exit {
+    let chosen = match preset {
+        Some(SelectPreset::Public) => (0..presets::PRESETS.len()).collect(),
+        Some(SelectPreset::None) => Vec::new(),
+        None => {
+            // A prompt nobody answers hangs a script; say so instead.
+            if !interactive && !std::io::stdin().is_terminal() {
+                return Exit::usage(
+                    "git time tsa select: stdin is not a terminal; use `git time tsa select \
+                     --preset public|none`, `git time tsa preset add <id>` or `git time tsa \
+                     add <url>`",
+                );
+            }
+            match ask() {
+                Ok(chosen) => chosen,
+                Err(exit) => return exit,
+            }
+        }
+    };
+    apply(repo, &chosen, dry_run).await
+}
+
+/// Print the preset table and take the selection, re-asking on nonsense.
+fn ask() -> Result<Vec<usize>, Exit> {
+    for (index, preset) in presets::PRESETS.iter().enumerate() {
+        println!(
+            "{}) {} {} {}{}",
+            index + 1,
+            preset.name,
+            preset.url,
+            match preset.fingerprint {
+                Some(fingerprint) => format!("pinned {fingerprint}"),
+                None => "tofu".to_owned(),
+            },
+            if preset.insecure_http {
+                " insecure-http"
+            } else {
+                ""
+            },
+        );
+    }
+
+    for _ in 0..SELECT_ATTEMPTS {
+        print!("{SELECT_PROMPT}");
+        // The prompt has no newline, so it has to leave the buffer now.
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            // A terminal that closed is as good as an empty answer: nothing.
+            Ok(0) => return Ok(Vec::new()),
+            Ok(_) => {}
+            Err(error) => {
+                return Err(Exit::config(format!("cannot read the selection: {error}")));
+            }
+        }
+        match parse_choice(&line, presets::PRESETS.len()) {
+            Ok(chosen) => return Ok(chosen),
+            Err(message) => eprintln!("git time tsa select: {message}"),
+        }
+    }
+    Err(Exit::usage(format!(
+        "git time tsa select: no valid selection after {SELECT_ATTEMPTS} attempts"
+    )))
+}
+
+/// Turn `1,3-4`, `all`, `none` or an empty answer into zero-based indices.
+///
+/// The result keeps the order of the input and never repeats an index, so a
+/// doubled `1,1` still enables one authority once.
+fn parse_choice(input: &str, count: usize) -> Result<Vec<usize>, String> {
+    let answer = input.trim().to_ascii_lowercase();
+    if answer.is_empty() || answer == "none" {
+        return Ok(Vec::new());
+    }
+    if answer == "all" {
+        return Ok((0..count).collect());
+    }
+    let unrecognised = || format!("`{answer}` is not a selection; use 1,3-4, all or none");
+    let mut chosen = Vec::new();
+    for token in answer.split(',') {
+        let token = token.trim();
+        let (first, last) = match token.split_once('-') {
+            Some((first, last)) => (first.trim(), last.trim()),
+            None => (token, token),
+        };
+        let first = index(first, count).ok_or_else(unrecognised)?;
+        let last = index(last, count).ok_or_else(unrecognised)?;
+        if first > last {
+            return Err(format!(
+                "`{token}` counts backwards; write the smaller index first"
+            ));
+        }
+        for index in first..=last {
+            if !chosen.contains(&index) {
+                chosen.push(index);
+            }
+        }
+    }
+    Ok(chosen)
+}
+
+/// A one-based number in the answer as a zero-based index, when it is in range.
+fn index(text: &str, count: usize) -> Option<usize> {
+    let value: usize = text.parse().ok()?;
+    (1..=count).contains(&value).then(|| value - 1)
+}
+
+/// Disable what is not chosen, then pin what is.
+async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
+    let configured = match anchors::configured(repo) {
+        Ok(configured) => configured,
+        Err(exit) => return exit,
+    };
+    // Only preset ids are managed here; a hand-added section stays.
+    let unwanted: Vec<&str> = presets::names()
+        .filter(|name| {
+            !chosen
+                .iter()
+                .filter_map(|index| presets::PRESETS.get(*index))
+                .any(|preset| preset.name == *name)
+                && configured.iter().any(|anchor| anchor.id == *name)
+        })
+        .collect();
+
+    if dry_run {
+        for name in &unwanted {
+            println!("would disable {name}");
+        }
+    } else {
+        for name in &unwanted {
+            if let Err(exit) = disable(repo, name) {
+                return exit;
+            }
+        }
+    }
+
+    let mut failed = false;
+    for index in chosen {
+        let Some(preset) = presets::PRESETS.get(*index) else {
+            continue;
+        };
+        if dry_run {
+            println!(
+                "would enable {} ({}) fingerprint {}",
+                preset.name,
+                preset.url,
+                preset.fingerprint.unwrap_or("tofu")
+            );
+            continue;
+        }
+        match install::pin(repo, preset).await {
+            Ok(pinned) => {
+                if pinned.fingerprint_mismatch || pinned.missing_anchor.is_some() {
+                    failed = true;
+                    let reason = if pinned.fingerprint_mismatch {
+                        "the published root fingerprint did not match"
+                    } else {
+                        "no anchor could be pinned"
+                    };
+                    println!("failed {}: {reason}", preset.name);
+                    continue;
+                }
+                let anchor = anchors::configured(repo)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|anchor| anchor.id == preset.name)
+                    .map(|anchor| anchor.path)
+                    .unwrap_or_else(|| anchors::dir().join(format!("{}.pem", preset.name)));
+                let fingerprint = crate::cmd::anchor::first_certificate_at(&anchor)
+                    .map(|der| anchors::fingerprint(&der))
+                    .unwrap_or_default();
+                println!(
+                    "enabled {} ({}) fingerprint {fingerprint}",
+                    preset.name, preset.url
+                );
+            }
+            Err(exit) => return exit,
+        }
+    }
+    if failed {
+        Exit::seal(String::new())
+    } else {
+        Exit::ok()
+    }
+}
+
+/// Delete one preset's whole section, saying so.
+fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
+    git_stdout(
+        repo,
+        &[
+            "config",
+            "--local",
+            "--remove-section",
+            &format!("time.tsa.{id}"),
+        ],
+    )?;
+    println!("disabled {id}");
+    Ok(())
 }
 
 /// Whether `id`'s anchor at `path` loads.
