@@ -102,6 +102,12 @@ cancelled twice is what kept `v0.1.0` from publishing. `.github/workflows/releas
 tag, refuses to publish unless the suite is green, and attaches `SHA256SUMS`. The musl targets
 build in separate target dirs, so no host-built build script crosses a container boundary.
 
+A job in `ci.yml` named `changes` decides whether anything but markdown was touched; the
+`binaries` job is gated on it, so a documentation-only push spends no macOS slot and produces no
+artifacts. The suites still run: `fmt`, `clippy` and the tests are cheap enough, and a skipped
+workflow would leave an empty check list on a pull request. No markdown file is compiled in, so a
+doc change cannot break a build.
+
 GitHub reports capacity constraints on arm64 macOS runners, and a queued-out job is cancelled
 after fifteen minutes, so the darwin job targets the Intel pool (`macos-15-intel`) instead of
 `macos-latest` and fails itself at twelve. When it is cancelled anyway,
