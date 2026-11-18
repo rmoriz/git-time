@@ -256,7 +256,7 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
                 // bundle may append chain certificates and would otherwise get
                 // two hashes.
                 println!(
-                    "anchor {}: {} sha256 {}",
+                    "anchor {}: {} fingerprint {}",
                     authority.name,
                     path.display(),
                     fingerprint
@@ -299,16 +299,20 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
     })
 }
 
-/// The digest of `der` in the length the expected fingerprint is written in.
+/// The digest of `der` in the length the expectation is written in.
 ///
 /// SHA-1 (20 octets) and SHA-256 (32) are both published by authorities and both
 /// pinned; taking the length from the expectation keeps a mismatched spelling a
-/// mismatch instead of silently comparing the wrong digest.
-fn matching_digest(expected: &str, der: &[u8]) -> String {
-    if expected.split(':').count() == 20 {
-        git_time_core::trust::sha1_fingerprint(der)
-    } else {
-        git_time_core::trust::fingerprint(der)
+/// mismatch instead of silently comparing the wrong digest — and makes a printed
+/// value comparable with the line above it. Without an expectation (trust on
+/// first use) it is SHA-1, because that printed value is the only artefact a
+/// human gets to check.
+pub(crate) fn digest_for(expected: Option<&str>, der: &[u8]) -> String {
+    match expected {
+        Some(expected) if expected.split(':').count() != 20 => {
+            git_time_core::trust::fingerprint(der)
+        }
+        _ => git_time_core::trust::sha1_fingerprint(der),
     }
 }
 
@@ -359,18 +363,17 @@ fn install_anchor(
     let der = crate::cmd::anchor::first_certificate(bytes).ok_or_else(|| {
         AnchorProblem::Unusable(format!("{} carried no certificate", path.display()))
     })?;
-    let fingerprint = anchors::fingerprint(&der);
-    if let Some(expected) = authority.fingerprint {
-        let found = matching_digest(expected, &der);
-        if !expected.eq_ignore_ascii_case(&found) {
-            // Nothing is written at all: an expected-but-wrong root must not
-            // become the anchor merely because it parsed.
-            let _ = std::fs::remove_file(&staging);
-            return Err(AnchorProblem::Mismatch {
-                expected: expected.to_owned(),
-                found,
-            });
-        }
+    let fingerprint = digest_for(authority.fingerprint, &der);
+    if let Some(expected) = authority.fingerprint
+        && !expected.eq_ignore_ascii_case(&fingerprint)
+    {
+        // Nothing is written at all: an expected-but-wrong root must not become
+        // the anchor merely because it parsed.
+        let _ = std::fs::remove_file(&staging);
+        return Err(AnchorProblem::Mismatch {
+            expected: expected.to_owned(),
+            found: fingerprint,
+        });
     }
     std::fs::rename(&staging, path).map_err(|error| {
         let _ = std::fs::remove_file(&staging);
@@ -406,4 +409,35 @@ pub(crate) fn gate(repo: &Repo) -> Result<bool, Exit> {
         .config_non_empty("time.gate")
         .map_err(Exit::config)?
         .is_some_and(|value| value.eq_ignore_ascii_case("pre-commit")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::digest_for;
+
+    /// 95 characters: 32 upper-hex octets, colon separated.
+    const SHA256: &str = "05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43:81:13:7C:5E:5F:D6:D4:70:1A:57:33:9C";
+    /// 59 characters: 20 upper-hex octets, colon separated.
+    const SHA1: &str = "0B:93:07:6C:81:39:FA:2B:83:38:5F:78:28:D7:BE:75:73:40:D2:41";
+
+    #[test]
+    fn the_digest_length_follows_the_expectation() {
+        let der = b"a certificate";
+
+        let sha256 = digest_for(Some(SHA256), der);
+        assert_eq!(sha256.len(), 95);
+        assert_eq!(sha256, git_time_core::trust::fingerprint(der));
+
+        let sha1 = digest_for(Some(SHA1), der);
+        assert_eq!(sha1.len(), 59);
+        assert_eq!(sha1, git_time_core::trust::sha1_fingerprint(der));
+    }
+
+    #[test]
+    fn trust_on_first_use_is_sha1() {
+        let der = b"a certificate";
+        let printed = digest_for(None, der);
+        assert_eq!(printed.len(), 59, "{printed}");
+        assert_eq!(printed, git_time_core::trust::sha1_fingerprint(der));
+    }
 }

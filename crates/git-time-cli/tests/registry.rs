@@ -565,17 +565,17 @@ fn ok(output: &Output) -> String {
 /// The token after `marker` in `stdout`, asserted to be a SHA-256 in hex.
 fn fingerprint_after(stdout: &str, marker: &str) -> String {
     let rest = stdout
-        .split_once(marker)
+        .rsplit_once(marker)
         .unwrap_or_else(|| panic!("`{marker}` in {stdout}"))
         .1;
     let token = rest
         .split_whitespace()
         .next()
         .unwrap_or_else(|| panic!("a fingerprint after `{marker}` in {stdout}"));
-    // SHA-256 in plain hex, or SHA-1 in the colons-and-uppercase spelling.
+    // Colon separated uppercase: 20 octets (59) or 32 octets (95).
     assert!(
-        token.len() == 64 || token.len() == 59,
-        "a SHA-256 or a SHA-1 fingerprint: {token}"
+        token.len() == 59 || token.len() == 95,
+        "a SHA-1 or a SHA-256 fingerprint: {token}"
     );
     assert!(
         token
@@ -1088,14 +1088,19 @@ fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
     assert!(repo.anchors().join("freetsa.pem").exists(), "the anchor");
 
     let root = std::fs::read(freetsa_root()).expect("the fixture root");
-    let expected = fingerprint(&first_der(&String::from_utf8_lossy(&root)));
+    let expected = fingerprint_colon(&first_der(&String::from_utf8_lossy(&root)));
     let stdout = text(&added.stdout);
     assert!(
         stdout.contains("freetsa: root fingerprint matches "),
         "the match is said: {stdout}"
     );
-    let printed = fingerprint_after(&stdout, "sha256 ");
+    let printed = fingerprint_after(&stdout, "matches ");
     assert_eq!(printed, expected, "the first certificate is fingerprinted");
+    assert_eq!(
+        printed.len(),
+        95,
+        "the expectation is SHA-256, so is the line"
+    );
 }
 
 /// A preset without a published root is trust on first use: the fetched
@@ -1116,15 +1121,19 @@ fn preset_add_of_a_tofu_preset_prints_the_fetched_fingerprint() {
     let stdout = text(&added.stdout);
     assert!(stdout.contains("trust on first use"), "{stdout}");
     let printed = fingerprint_after(&stdout, "root is ");
-    assert_eq!(printed.len(), 64, "a full SHA-256: {printed}");
+    // Nothing can be compared, so the printed value is the artefact; it is in
+    // the SHA-1 spelling the authority publishes.
+    assert_eq!(printed.len(), 59, "a full SHA-1: {printed}");
     assert!(
-        printed.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        printed
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b':'),
         "hex: {printed}"
     );
     let root = std::fs::read(freetsa_root()).expect("the fixture root");
     assert_eq!(
         printed,
-        fingerprint(&first_der(&String::from_utf8_lossy(&root))),
+        git_time_core::trust::sha1_fingerprint(&first_der(&String::from_utf8_lossy(&root))),
         "the printed value is the value that was pinned"
     );
     // The TOFU preset publishes no expected value, so nothing is compared.
@@ -1254,14 +1263,63 @@ fn select_enables_exactly_the_chosen_authorities() {
             .find(|line| line.starts_with(&format!("enabled {id} ")))
             .unwrap_or_else(|| panic!("{id} enabled: {stdout}"));
         let printed = fingerprint_after(line, "fingerprint ");
-        assert_eq!(printed.len(), 59, "the SHA-1 spelling: {line}");
-        assert!(printed.contains(':'), "colon separated: {line}");
+        // freetsa is served the pinned root, every other id the stub CA.
+        let bundle = if id == "freetsa" {
+            std::fs::read(freetsa_root()).expect("the fixture root")
+        } else {
+            std::fs::read_to_string(&repo.authority.ca)
+                .expect("the CA")
+                .into_bytes()
+        };
+        let der = first_der(&String::from_utf8_lossy(&bundle));
+        // The digest length follows the expectation: freetsa is SHA-256, the
+        // two TOFU rows are SHA-1.
+        if id == "freetsa" {
+            assert_eq!(printed.len(), 95, "{line}");
+            assert_eq!(printed, fingerprint_colon(&der), "the served root: {line}");
+        } else {
+            assert_eq!(printed.len(), 59, "{line}");
+            assert_eq!(
+                printed,
+                git_time_core::trust::sha1_fingerprint(&der),
+                "the served root: {line}"
+            );
+        }
     }
 
     // Anything not chosen stays unconfigured.
     for id in ["digicert", "sectigo", "certum", "izenpe", "aped"] {
         assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
     }
+}
+
+/// A piped answer is not echoed, so the prompt has to supply the line break
+/// itself; otherwise the first output line runs into the prompt.
+#[test]
+fn a_piped_answer_does_not_leave_the_output_on_the_prompt_line() {
+    let repo = Repo::new();
+    repo.init();
+
+    let answered = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive", "--dry-run"],
+        &repo.fetch_known_root(),
+        "1\n",
+    );
+    assert_eq!(
+        answered.status.code(),
+        Some(0),
+        "{}",
+        text(&answered.stderr)
+    );
+    let stdout = text(&answered.stdout);
+    assert!(
+        stdout.contains("all, none): \n"),
+        "the prompt is closed: {stdout}"
+    );
+    assert!(
+        !stdout.contains("all, none): would enable"),
+        "nothing runs into the prompt: {stdout}"
+    );
 }
 
 /// `none` removes the preset sections and leaves a hand-added authority alone.

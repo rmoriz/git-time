@@ -494,6 +494,11 @@ fn ask() -> Result<Vec<usize>, Exit> {
                 return Err(Exit::config(format!("cannot read the selection: {error}")));
             }
         }
+        // A terminal echoes the answer and the newline; a pipe does not, so
+        // without this the next output would start on the prompt line.
+        if !std::io::stdin().is_terminal() {
+            println!();
+        }
         match parse_choice(&line, presets::PRESETS.len()) {
             Ok(chosen) => return Ok(chosen),
             Err(message) => eprintln!("git time tsa select: {message}"),
@@ -617,10 +622,10 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
                     .find(|anchor| anchor.id == preset.name)
                     .map(|anchor| anchor.path)
                     .unwrap_or_else(|| anchors::dir().join(format!("{}.pem", preset.name)));
-                // The spelling authorities publish, so the line can be compared
-                // with the preset table at a glance.
+                // The spelling the preset is written in: SHA-256 where it pins
+                // one, SHA-1 for a SHA-1 pin and for trust on first use.
                 let fingerprint = crate::cmd::anchor::first_certificate_at(&anchor)
-                    .map(|der| git_time_core::trust::sha1_fingerprint(&der))
+                    .map(|der| install::digest_for(preset.fingerprint, &der))
                     .unwrap_or_default();
                 println!(
                     "enabled {} ({}) fingerprint {fingerprint}",
