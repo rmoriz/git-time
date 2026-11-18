@@ -19,6 +19,13 @@ $ git time verify                             # judges the evidence, gates CI
 `cargo install` without `--path` needs the crates published, which they are not yet; use the
 `--path` form above, or build and put `target/release/git-time` on `PATH`.
 
+**`git-time` has to be on `PATH`**, not merely called by path once. The hooks git runs are shell
+shims that look the binary up as a bare command (`command -v git-time`) at commit time, with git's
+environment and no shell aliases; `cargo install` already places it in `~/.cargo/bin`, otherwise
+copy it to something like `/usr/local/bin`. Without it on `PATH` the shims exit `0` and the commit
+is made **unsealed** and silently so — `git time doctor` names a missing binary, and `git time
+verify` reports `UNSEALED`.
+
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
 everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`). The
 `pin` column is the trust tier: the root is checked against the table and a mismatch is a refusal.
