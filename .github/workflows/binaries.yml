@@ -21,6 +21,12 @@ on:
         description: Run fmt, clippy and the suite in the macOS job before building.
         type: boolean
         default: false
+      tolerant:
+        description: >-
+          Do not fail the run when the macOS job is cancelled in the queue. CI
+          sets this; a tag does not, so a release never goes out incomplete.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -83,6 +89,7 @@ jobs:
   macos:
     name: macos (darwin)
     runs-on: macos-latest
+    continue-on-error: ${{ inputs.tolerant }}
     steps:
       - uses: actions/checkout@v5
 

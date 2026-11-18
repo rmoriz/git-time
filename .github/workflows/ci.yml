@@ -69,3 +69,6 @@ jobs:
     with:
       retention-days: 14
       test: true
+      # macOS runners are frequently unschedulable and cancel after fifteen
+      # minutes; that must not redden every push. A tag still demands them.
+      tolerant: true
