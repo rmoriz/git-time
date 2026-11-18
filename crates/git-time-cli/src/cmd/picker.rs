@@ -203,7 +203,9 @@ const HELP: &str = "space toggle  a all  n none  j/k or arrows move  enter save 
 /// The endpoint of the cursor row is printed in full below the list instead of
 /// costing a column.
 ///
-/// At most `rows` lines, at most `cols` columns, every line `\r\n` terminated.
+/// At most `rows` lines, at most `cols` columns, lines separated by `\r\n` and
+/// the last one not terminated: a trailing newline would scroll the top row
+/// away on a screen that is exactly full.
 /// The list is a window that keeps the cursor visible and marks a cut edge with
 /// `…`; the footer (URL, help, count, prompt, error) is always there. Below the
 /// room the footer needs, it degrades to the cursor row and the footer.
@@ -255,9 +257,11 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
     }
 
     let mut out = String::with_capacity((budget + footer) * 64);
-    for line in &lines {
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            out.push_str("\r\n");
+        }
         out.push_str(&fit(line, cols));
-        out.push_str("\r\n");
     }
     out
 }
@@ -311,9 +315,10 @@ impl Raw {
     #[must_use]
     pub fn open() -> Option<Self> {
         let saved = stty(&["-g"])?;
-        // `raw` clears `opost`, so the output flags have to be re-set after it;
-        // otherwise every `\n` would walk to the right margin.
-        stty(&["raw", "-echo", "min", "0", "time", "1", "opost", "onlcr"])?;
+        // `raw` clears `opost`, so it has to be re-set after it; without it every
+        // `\n` would walk to the right margin. `onlcr` is cleared too, or the
+        // frame's own `\r\n` would become `\r\r\n`.
+        stty(&["raw", "-echo", "min", "0", "time", "1", "opost", "-onlcr"])?;
         print!("\x1b[?1049h\x1b[?25l");
         let _ = std::io::stdout().flush();
         Some(Self { saved })
@@ -392,15 +397,23 @@ pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
         eprintln!("rfc3161: note: no raw terminal; falling back to the line prompt");
         None
     })?;
+    let (mut rows, mut cols) = size();
+    terminal.paint(&frame(selection, presets, rows, cols));
     loop {
-        let (rows, cols) = size();
-        terminal.paint(&frame(selection, presets, rows, cols));
         let bytes = terminal.read_key();
         let Some(key) = parse_key(&bytes) else {
+            // The only silent change the frame shows is a resize.
+            let (next_rows, next_cols) = size();
+            if (next_rows, next_cols) != (rows, cols) {
+                rows = next_rows;
+                cols = next_cols;
+                terminal.paint(&frame(selection, presets, rows, cols));
+            }
             continue;
         };
+        (rows, cols) = size();
         match selection.apply_key(key, presets.len()) {
-            Outcome::Stay => {}
+            Outcome::Stay => terminal.paint(&frame(selection, presets, rows, cols)),
             outcome => return Some(outcome),
         }
     }
@@ -600,13 +613,24 @@ mod tests {
                     press(&mut selection, Key::Down);
                 }
                 let rendered = frame(&selection, &presets::PRESETS, 24, cols);
-                assert!(rendered.ends_with("\r\n"), "every line ends CRLF");
-                for line in rendered.split_inclusive("\r\n") {
-                    let body = line.strip_suffix("\r\n").expect("CRLF at {cols}/{cursor}");
+                assert!(
+                    !rendered.ends_with('\n'),
+                    "as {cols}/{cursor}: no trailing line"
+                );
+                assert_eq!(
+                    rendered.matches("\r\n").count(),
+                    shards(&rendered).len() - 1,
+                    "CRLF between lines only, as {cols}/{cursor}"
+                );
+                for line in shards(&rendered) {
                     assert!(
-                        body.chars().count() <= cols,
-                        "{} > {cols} at cursor {cursor}: {body:?}",
-                        body.chars().count()
+                        !line.contains('\r'),
+                        "no lone CR as {cols}/{cursor}: {line:?}"
+                    );
+                    assert!(
+                        line.chars().count() <= cols,
+                        "{} > {cols} at cursor {cursor}: {line:?}",
+                        line.chars().count()
                     );
                 }
             }
@@ -624,6 +648,11 @@ mod tests {
                 "{} lines for {rows} rows",
                 rendered.lines().count()
             );
+            // No trailing newline, or the top row scrolls away on a full screen.
+            assert!(!rendered.ends_with('\n'), "no scroll at {rows} rows");
+            if rows == 24 {
+                assert_eq!(rendered.lines().count(), rows, "a full screen is full");
+            }
         }
     }
 
@@ -696,6 +725,14 @@ mod tests {
             "{long:?} / {short:?}"
         );
         assert_eq!(column(&long, "pin "), 11 + super::NAME_WIDTH + 1);
+    }
+
+    #[test]
+    fn the_last_line_is_not_terminated_and_nothing_doubles_the_carriage_return() {
+        let rendered = frame(&picked(), &presets::PRESETS, 24, 80);
+        assert!(!rendered.ends_with('\n'), "{rendered:?}");
+        assert!(!rendered.contains("\r\r\n"), "{rendered:?}");
+        assert!(rendered.ends_with("> _"), "{rendered:?}");
     }
 
     #[test]
