@@ -7,6 +7,12 @@ on:
 permissions:
   contents: read
 
+# A new push supersedes the previous run: without this, queued macOS jobs from
+# stale commits hold the runner pool and the binaries job never starts.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -52,7 +58,8 @@ jobs:
 
   binaries:
     name: binaries
-    needs: test
+    # Deliberately not gated on `test`: the artifacts are useful on their own,
+    # and waiting for a scarce macOS runner would delay every Linux build.
     uses: ./.github/workflows/binaries.yml
     with:
       retention-days: 14
