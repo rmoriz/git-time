@@ -11,8 +11,8 @@
 //! with `GIT_TIME_ANCHOR_URL` set to the URL, and its stdout is the bundle; tests
 //! use this instead of the network. Without it URL ending in `.pem` is a GET and
 //! anything else is treated as a TSA endpoint: the anchor is then the self-signed
-//! root of a genuine timestamp reply, which is the only way a load balancer like
-//! `rfc3161.ai.moda` can name a CA at all.
+//! root of a genuine timestamp reply, which is how an authority that publishes no
+//! certificate of its own — `dfn`, say — can name a CA at all.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

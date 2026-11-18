@@ -11,7 +11,7 @@ const PREFIX: &str = "X-RFC3161-";
 const TRAILER: &[u8] = b"X-RFC3161-Imprint: sha256:9f2c41\n\
 X-RFC3161-Object: 4f1c9e0\n\
 X-RFC3161-Token: ver=1; id=freetsa; tst=AA\n\
-X-RFC3161-Fail: id=ai-moda; reason=http-503";
+X-RFC3161-Fail: id=sectigo; reason=http-503";
 
 /// Append a trailer block to an object: one `\n` (the separating blank line),
 /// the block, and a final `\n`.
@@ -468,7 +468,7 @@ Merge branch 'topic'\n\
 F\xE4hn\n\
 \n\
 X-RFC3161-Imprint: sha256:9f2c41\n\
-X-RFC3161-Fail: id=ai-moda; reason=http-503\n";
+X-RFC3161-Fail: id=sectigo; reason=http-503\n";
 
 #[test]
 fn compose_reproduces_a_literal_cat_file_dump() {
@@ -486,7 +486,7 @@ fn pre_image_strips_a_literal_sealed_dump() {
     assert_eq!(
         pre_image.trailer.as_deref(),
         Some(
-            b"X-RFC3161-Imprint: sha256:9f2c41\nX-RFC3161-Fail: id=ai-moda; reason=http-503"
+            b"X-RFC3161-Imprint: sha256:9f2c41\nX-RFC3161-Fail: id=sectigo; reason=http-503"
                 .as_slice()
         )
     );

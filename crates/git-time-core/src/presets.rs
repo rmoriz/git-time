@@ -38,11 +38,6 @@
 //! than two because every configured authority costs a request on every commit
 //! and every plain-http one costs a warning line. The rest is opt-in.
 //!
-//! `ai-moda` was dropped from the table: it appears on no live-TSA list we were
-//! given, and as a load balancer over several CAs it is the one authority that
-//! can never have a correct pinned fingerprint — it answered with a DigiCert
-//! root the day it was measured.
-//!
 //! # Where the fingerprints come from
 //!
 //! **Measured** — every value below was obtained by querying the endpoint and

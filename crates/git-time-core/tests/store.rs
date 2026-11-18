@@ -103,7 +103,7 @@ fn block() -> TrailerBlock {
         tokens: vec![
             token("freetsa", 1, 300),
             token("digicert", 2, 300),
-            token("ai-moda", 3, 300),
+            token("sectigo", 3, 300),
         ],
         failures: Vec::new(),
         extra: Vec::new(),
@@ -137,7 +137,7 @@ fn wire_format_is_one_field_per_line_in_fixed_order() {
     let mut original = block();
     original.tokens.truncate(1);
     original.failures.push(FailureRecord {
-        id: "ai-moda".to_owned(),
+        id: "sectigo".to_owned(),
         reason: "http-503".to_owned(),
     });
     original
@@ -161,7 +161,7 @@ fn wire_format_is_one_field_per_line_in_fixed_order() {
     );
     assert_eq!(
         lines[3],
-        format!("{PREFIX}Fail: id=ai-moda; reason=http-503")
+        format!("{PREFIX}Fail: id=sectigo; reason=http-503")
     );
     assert_eq!(lines[4], format!("{PREFIX}Note: kept verbatim"));
     assert_eq!(lines.len(), 5);
@@ -355,7 +355,7 @@ fn with_every_token_dropped_and_still_too_large_the_block_fails() {
     // The block as it looks after every token was dropped and recorded.
     let mut reduced = original.clone();
     reduced.tokens.clear();
-    for id in ["freetsa", "digicert", "ai-moda"] {
+    for id in ["freetsa", "digicert", "sectigo"] {
         reduced.failures.push(FailureRecord {
             id: id.to_owned(),
             reason: "oversized".to_owned(),
@@ -378,7 +378,7 @@ fn every_token_can_be_dropped_until_only_the_imprint_and_failures_remain() {
     // Room for the imprint, the object and a failure line per dropped token.
     let mut dropped = original.clone();
     dropped.tokens.clear();
-    for id in ["freetsa", "digicert", "ai-moda"] {
+    for id in ["freetsa", "digicert", "sectigo"] {
         dropped.failures.push(FailureRecord {
             id: id.to_owned(),
             reason: "oversized".to_owned(),
