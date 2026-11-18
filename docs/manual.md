@@ -276,10 +276,12 @@ tsa add <url>` for an endpoint of your own.
 
 ### `git time anchor fetch <url> --id ID [--insecure-http]`
 
-Fetch a PEM bundle and pin it for `ID`. The bundle is parsed before it replaces anything, so a
-garbled fetch never destroys a working anchor. It writes the configured
-`time.tsa.<id>.anchor` when one is set (the file the policy reads), else the anchors directory.
-Exits `0`, `1` for an unusable bundle, `2` for a bad id, URL or config.
+Fetch a bundle and pin it for `ID`. The body is read as PEM, DER or PKCS#7 — a CA's download is
+often the latter two — and when `ID` is a preset, that preset's chain of issuers is fetched and
+appended behind the root. The bundle is parsed before it replaces anything, so a garbled fetch
+never destroys a working anchor. It writes the configured `time.tsa.<id>.anchor` when one is set
+(the file the policy reads), else the anchors directory. Exits `0`, `1` for an unusable bundle, `2`
+for a bad id, URL or config.
 
 ### `git time anchor list [--json]`
 

@@ -108,7 +108,12 @@ async fn fetch(repo: &Repo, url: &str, id: &str, insecure_http: bool) -> Exit {
         ));
     }
 
-    let bytes = match anchors::fetch(url).await {
+    // A preset's issuers belong to its bundle: without them a reply that stops
+    // below the root (`cartaodecidadao`) could never be chained.
+    let chain: &[&str] = git_time_core::presets::find(id)
+        .map(|preset| preset.chain)
+        .unwrap_or_default();
+    let bytes = match anchors::fetch_chain(url, chain).await {
         Ok(bytes) => bytes,
         Err(error) => return Exit::seal(format!("git time anchor: cannot fetch {url}: {error}")),
     };
