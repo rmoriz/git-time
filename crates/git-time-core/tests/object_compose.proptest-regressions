@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc d0e226cb405357badc9da813f13236675b14b06a94d4243270ee1b0684a4d999 # shrinks to commit = CommitObject { headers: [], message: [32] }, token_id = "a"

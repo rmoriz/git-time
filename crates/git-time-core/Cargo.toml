@@ -1,0 +1,37 @@
+[package]
+name = "git-time-core"
+description = "Core types and plumbing for RFC 3161 commit sealing"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
+base64.workspace = true
+tempfile.workspace = true
+der.workspace = true
+cms.workspace = true
+x509-cert.workspace = true
+rustls-pki-types.workspace = true
+sigstore-tsa.workspace = true
+sigstore-types.workspace = true
+rustls-webpki.workspace = true
+aws-lc-rs.workspace = true
+jiff.workspace = true
+rand_core.workspace = true
+rand.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+der = { workspace = true, features = ["derive", "oid"] }
+axum.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread"] }
