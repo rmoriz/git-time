@@ -3,6 +3,13 @@
 //! Every case runs against the committed FreeTSA fixture, offline. The fixture
 //! is only evidence once the FreeTSA root is pinned; with no anchor the very
 //! same bytes are `Untrusted`.
+//!
+//! The throwaway tokens are minted with the platform `openssl`, which may be
+//! LibreSSL: certificates there are built with `-sha256` and a named curve (its
+//! SHA-1 and explicit-parameter defaults are outside what `webpki` verifies) and
+//! the CA serial lives in its own file (`-CAcreateserial` races in the shared
+//! temp directory), while the tests for SHA-1 and explicit parameters ask for
+//! those shapes on purpose.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -130,6 +137,54 @@ fn genuine_token_with_pinned_root_is_valid() {
             gen_time: gen_time(),
             tsa: "www.freetsa.org".to_owned(),
         }
+    );
+}
+
+/// LibreSSL's `openssl ts -reply` signs SHA-1 whatever the query asks for, so a
+/// token in the wild may name SHA-1 in its signer info. `ring` has no SHA-1
+/// algorithm, and the token must still verify.
+#[test]
+fn a_sha1_signed_token_is_valid() {
+    let dir = scratch();
+    let (token, ca_pem) =
+        throwaway_tsa_token_signed_with(dir.path(), "critical,timeStamping", "sha1");
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    assert!(
+        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        "a SHA-1 signature is legal: {:?}",
+        verify::token(&record, &imprint(), wide_range(), &anchors)
+    );
+}
+
+/// RFC 5480 allows the EC parameters to be the full `SpecifiedECDomain`
+/// instead of a named curve; LibreSSL writes exactly that by default. `webpki`
+/// only looks at the point, so the token must verify without a curve OID.
+#[test]
+fn an_explicit_parameter_curve_is_valid() {
+    let dir = scratch();
+    let (token, ca_pem) =
+        throwaway_tsa_token_with(dir.path(), "critical,timeStamping", "sha256", "explicit");
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    assert!(
+        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        "explicit parameters are legal: {:?}",
+        verify::token(&record, &imprint(), wide_range(), &anchors)
     );
 }
 
@@ -532,6 +587,17 @@ fn record_algorithm_disagreeing_with_imprint_is_an_imprint_failure() {
 /// The token carries its own CA certificate. Nothing about it chains to
 /// FreeTSA.
 fn throwaway_tsa_token(dir: &Path, eku: &str) -> (Vec<u8>, PathBuf) {
+    throwaway_tsa_token_with(dir, eku, "sha256", "named_curve")
+}
+
+/// The same, signed with `digest` instead of SHA-256.
+fn throwaway_tsa_token_signed_with(dir: &Path, eku: &str, digest: &str) -> (Vec<u8>, PathBuf) {
+    throwaway_tsa_token_with(dir, eku, digest, "named_curve")
+}
+
+/// The same, with the key's curve written as `enc` (`named_curve` or the
+/// `explicit` domain parameters LibreSSL writes by default).
+fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (Vec<u8>, PathBuf) {
     let ca_key = dir.join("tsa-ca-key.pem");
     let ca_pem = dir.join("tsa-ca.pem");
     let leaf_key = dir.join("tsa-leaf-key.pem");
@@ -552,10 +618,13 @@ fn throwaway_tsa_token(dir: &Path, eku: &str) -> (Vec<u8>, PathBuf) {
     openssl(&[
         "req".as_ref(),
         "-x509".as_ref(),
+        "-sha256".as_ref(),
         "-newkey".as_ref(),
         "ec".as_ref(),
         "-pkeyopt".as_ref(),
         "ec_paramgen_curve:P-256".as_ref(),
+        "-pkeyopt".as_ref(),
+        "ec_param_enc:named_curve".as_ref(),
         "-nodes".as_ref(),
         "-keyout".as_ref(),
         ca_key.as_os_str(),
@@ -577,6 +646,8 @@ fn throwaway_tsa_token(dir: &Path, eku: &str) -> (Vec<u8>, PathBuf) {
         "ec".as_ref(),
         "-pkeyopt".as_ref(),
         "ec_paramgen_curve:P-256".as_ref(),
+        "-pkeyopt".as_ref(),
+        format!("ec_param_enc:{enc}").as_ref(),
         "-nodes".as_ref(),
         "-keyout".as_ref(),
         leaf_key.as_os_str(),
@@ -594,16 +665,22 @@ fn throwaway_tsa_token(dir: &Path, eku: &str) -> (Vec<u8>, PathBuf) {
         ),
     )
     .expect("write leaf extensions");
+    // LibreSSL's `-CAcreateserial` writes its serial into the shared temp
+    // directory, not next to the CA, so parallel fixtures race on one file.
+    let serial_file = dir.join("tsa-ca.srl");
+    std::fs::write(&serial_file, "01\n").expect("write serial");
     openssl(&[
         "x509".as_ref(),
         "-req".as_ref(),
+        "-sha256".as_ref(),
         "-in".as_ref(),
         leaf_csr.as_os_str(),
         "-CA".as_ref(),
         ca_pem.as_os_str(),
         "-CAkey".as_ref(),
         ca_key.as_os_str(),
-        "-CAcreateserial".as_ref(),
+        "-CAserial".as_ref(),
+        serial_file.as_os_str(),
         "-out".as_ref(),
         leaf_pem.as_os_str(),
         "-days".as_ref(),
@@ -652,7 +729,7 @@ fn throwaway_tsa_token(dir: &Path, eku: &str) -> (Vec<u8>, PathBuf) {
         "-certfile".as_ref(),
         ca_pem.as_os_str(),
         "-md".as_ref(),
-        "sha256".as_ref(),
+        digest.as_ref(),
         "-outform".as_ref(),
         "DER".as_ref(),
         "-econtent_type".as_ref(),

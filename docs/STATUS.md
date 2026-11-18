@@ -115,6 +115,24 @@ $ cargo test -p git-time-cli --test live_tsa -- --ignored --nocapture
 
 It skips when the network is gone and removes its repository and fetched anchors otherwise.
 
+### Why the macOS fixtures name their algorithms
+
+The suite is the same everywhere, but macOS `/usr/bin/openssl` is LibreSSL 3.3.6 and its defaults are
+not what `webpki` verifies. Three defects surfaced only there, all in fixture code:
+
+| LibreSSL default | Symptom | Fixture now |
+|---|---|---|
+| `x509 -req` / `req -x509` sign SHA-1 | `reason=invalid-untrusted`: `webpki` has no SHA-1 verification algorithm at all | `-sha256` on every certificate |
+| `req -newkey ec` writes `SpecifiedECDomain` instead of a named curve | `reason=invalid-malformed`: no curve OID to map to a key type | `-pkeyopt ec_param_enc:named_curve` |
+| `-CAcreateserial` writes a bare `.srl` into `$TMPDIR`, not next to the CA | parallel fixtures read each other's half-written serial | a per-CA serial file with `-CAserial` |
+
+Reproduce any of them locally by putting `/usr/bin` first: `PATH=/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:/opt/homebrew/bin`
+(keep `~/.cargo/bin` before `/opt/homebrew/bin`, or the Homebrew `rustc` shadows the toolchain). The
+verifier also learned both shapes, because a TSA may emit them: SHA-1 signer infos are verified by a
+pre-hash fallback (`ring` has no SHA-1), and an explicit-parameter leaf is tried against both
+supported curves. A *chain* whose own signatures are SHA-1, or whose CA states explicit parameters,
+still fails in `webpki` (see the known gaps).
+
 ## Deviations from the design, and why
 
 | Design said | Shipped | Reason |
@@ -135,4 +153,8 @@ It skips when the network is gone and removes its repository and fetched anchors
   repo unsealed rather than broken (`doctor` names the missing anchor).
 - `seal --range` cannot rewrite descendants of a range member; those dangle until re-sealed.
 - Failure reasons are sanitised into one trailer line, so an absolute path appears truncated.
+- `webpki` has no SHA-1 and no explicit-parameter support for *certificate* signatures: a TSA whose
+  chain is signed SHA-1, or whose CA encodes its curve explicitly, is rejected as `invalid-untrusted`
+  before the token itself is judged. The token's own CMS signature handles both shapes, so only the
+  chain build relies on `webpki`; walking the chain ourselves would lift it.
 - `time-dropped` grows without pruning in long-lived clones.

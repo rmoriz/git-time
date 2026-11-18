@@ -54,6 +54,13 @@
 //! `rustls-webpki` with the same rules the library applies: build to the pinned
 //! root, pin the signer to the token's own CMS signer, and require the
 //! timestamping EKU at genTime.
+//!
+//! Two shapes `ring` cannot express are verified by a second, narrow path
+//! instead (see [`verify_without_ring`]): a SHA-1 signer info, which LibreSSL's
+//! `openssl ts -reply` writes whatever the query asked for, and an EC key whose
+//! parameters are explicit domain parameters rather than a named curve. Both are
+//! legal RFC 3161; refusing them would fail whole TSA services for the shape of
+//! their signatures rather than their evidence.
 
 use std::collections::BTreeSet;
 use std::ops::Range;
@@ -71,6 +78,10 @@ use der::TagNumber;
 use der::asn1::{GeneralizedTime, ObjectIdentifier, OctetStringRef, SetOfVec};
 use der::{Decode, Encode, Reader, SliceReader, Tag};
 use jiff::Timestamp;
+use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
+use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
+use rsa::pkcs8::DecodePublicKey as _;
+use rsa::signature::Verifier as _;
 use rustls_pki_types::{CertificateDer, UnixTime};
 use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use sigstore_tsa::TsaAuthority;
@@ -90,6 +101,7 @@ const OID_COMMON_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.3"
 const OID_SUBJECT_KEY_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
 const OID_EXTENDED_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
 const OID_KP_TIME_STAMPING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
 const OID_SHA512: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.3");
@@ -449,7 +461,12 @@ impl Parsed {
             spki.algorithm.parameters.as_ref(),
             &self.digest_alg,
         ) else {
-            return Err(Invalid::Malformed);
+            return verify_without_ring(
+                spki,
+                &self.digest_alg,
+                &self.signed_attrs,
+                &self.signature,
+            );
         };
 
         let key = spki.subject_public_key.raw_bytes();
@@ -496,6 +513,74 @@ fn signature_algorithm(
         (d, OID_SECP384R1) if *d == OID_SHA512 => Some(&ECDSA_P384_SHA512_ASN1),
         _ => None,
     }
+}
+
+/// Verify a signature `ring` has no algorithm for.
+///
+/// Two legal shapes reach here: a SHA-1 signer info (`ring` knows no SHA-1
+/// algorithm; LibreSSL's `openssl ts -reply` writes SHA-1 whatever the query
+/// asked for) and an EC key whose parameters are a full `SpecifiedECDomain`
+/// instead of a named curve (LibreSSL's other default). The hash is computed
+/// here and handed to a verifier that takes a pre-hash.
+fn verify_without_ring(
+    spki: &x509_cert::spki::SubjectPublicKeyInfoOwned,
+    digest: &ObjectIdentifier,
+    message: &[u8],
+    signature: &[u8],
+) -> Result<(), Invalid> {
+    let key = spki.subject_public_key.raw_bytes();
+
+    if spki.algorithm.oid == OID_EC_PUBLIC_KEY {
+        // Without a named curve both supported curves are tried: the key bytes
+        // only parse as a point on the curve that actually signed.
+        let named = spki
+            .algorithm
+            .parameters
+            .as_ref()
+            .and_then(|parameters| parameters.decode_as::<ObjectIdentifier>().ok());
+        let p256 = named.as_ref().is_none_or(|curve| *curve == OID_SECP256R1);
+        let p384 = named.as_ref().is_none_or(|curve| *curve == OID_SECP384R1);
+        if !p256 && !p384 {
+            return Err(Invalid::Malformed);
+        }
+        let hashed = hash(digest, message)?;
+
+        if p256 && let Ok(key) = p256::ecdsa::VerifyingKey::from_sec1_bytes(key) {
+            let signature =
+                p256::ecdsa::Signature::from_der(signature).map_err(|_| Invalid::Malformed)?;
+            if key.verify_prehash(&hashed, &signature).is_ok() {
+                return Ok(());
+            }
+        }
+        if p384 && let Ok(key) = p384::ecdsa::VerifyingKey::from_sec1_bytes(key) {
+            let signature =
+                p384::ecdsa::Signature::from_der(signature).map_err(|_| Invalid::Malformed)?;
+            if key.verify_prehash(&hashed, &signature).is_ok() {
+                return Ok(());
+            }
+        }
+        return Err(Invalid::Untrusted);
+    }
+
+    // The RSA verifiers hash the message themselves, so they take it as it is.
+    let key_der = spki.to_der().map_err(|_| Invalid::Malformed)?;
+    let key = rsa::RsaPublicKey::from_public_key_der(&key_der).map_err(|_| Invalid::Malformed)?;
+    if spki.algorithm.oid == OID_RSA {
+        let key = rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(key);
+        let signature =
+            rsa::pkcs1v15::Signature::try_from(signature).map_err(|_| Invalid::Malformed)?;
+        return key
+            .verify(message, &signature)
+            .map_err(|_| Invalid::Untrusted);
+    }
+    if spki.algorithm.oid == OID_RSA_PSS {
+        let key = rsa::pss::VerifyingKey::<sha1::Sha1>::new(key);
+        let signature = rsa::pss::Signature::try_from(signature).map_err(|_| Invalid::Malformed)?;
+        return key
+            .verify(message, &signature)
+            .map_err(|_| Invalid::Untrusted);
+    }
+    Err(Invalid::Malformed)
 }
 
 /// Build the chain from the token's signer to the pinned root at `gen_time`,
@@ -668,6 +753,7 @@ fn sole_timestamping_eku(certificate: &Certificate) -> bool {
 /// unknown one.
 fn hash(algorithm: &ObjectIdentifier, bytes: &[u8]) -> Result<Vec<u8>, Invalid> {
     match *algorithm {
+        d if d == OID_SHA1 => Ok(sha1::Sha1::digest(bytes).to_vec()),
         d if d == OID_SHA256 => Ok(Sha256::digest(bytes).to_vec()),
         d if d == OID_SHA384 => Ok(Sha384::digest(bytes).to_vec()),
         d if d == OID_SHA512 => Ok(Sha512::digest(bytes).to_vec()),
@@ -860,10 +946,13 @@ mod tests {
             .args([
                 "req",
                 "-x509",
+                "-sha256",
                 "-newkey",
                 "ec",
                 "-pkeyopt",
                 "ec_paramgen_curve:P-256",
+                "-pkeyopt",
+                "ec_param_enc:named_curve",
                 "-nodes",
             ])
             .arg("-keyout")

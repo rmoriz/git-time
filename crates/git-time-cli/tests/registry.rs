@@ -13,6 +13,12 @@
 //!
 //! `anchor pin` is a review artifact, not a trust store: test 8 proves `verify`
 //! judges from the anchor and is unchanged when the lock is deleted.
+//!
+//! The throwaway certificates are built for LibreSSL as well as OpenSSL:
+//! `-sha256` and a named curve, because LibreSSL's defaults (SHA-1 signatures,
+//! explicit EC parameters) are outside what `webpki` verifies, and a per-CA
+//! serial file because `-CAcreateserial` writes into the shared temp directory
+//! and races between parallel fixtures.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -64,6 +70,17 @@ fn text(bytes: &[u8]) -> String {
 
 fn pstr(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// A per-authority serial file for `openssl x509 -CAserial`.
+///
+/// LibreSSL's `-CAcreateserial` ignores the CA's directory and writes a bare
+/// `.srl` into the shared temp directory, so parallel fixtures race on one file
+/// and occasionally read it half-written. Owning the path keeps them apart.
+fn serial(ca: &Path) -> String {
+    let path = ca.with_extension("srl");
+    std::fs::write(&path, "01\n").expect("write serial");
+    pstr(&path)
 }
 
 /// The captured FreeTSA root, the one published fingerprint a test can match.
@@ -124,10 +141,13 @@ impl Authority {
         openssl(&[
             "req",
             "-x509",
+            "-sha256",
             "-newkey",
             "ec",
             "-pkeyopt",
             "ec_paramgen_curve:P-256",
+            "-pkeyopt",
+            "ec_param_enc:named_curve",
             "-nodes",
             "-keyout",
             &pstr(&ca_key),
@@ -149,6 +169,8 @@ impl Authority {
             "ec",
             "-pkeyopt",
             "ec_paramgen_curve:P-256",
+            "-pkeyopt",
+            "ec_param_enc:named_curve",
             "-nodes",
             "-keyout",
             &pstr(&leaf_key),
@@ -167,13 +189,15 @@ impl Authority {
         openssl(&[
             "x509",
             "-req",
+            "-sha256",
             "-in",
             &pstr(&leaf_csr),
             "-CA",
             &pstr(&ca),
             "-CAkey",
             &pstr(&ca_key),
-            "-CAcreateserial",
+            "-CAserial",
+            &serial(&ca),
             "-out",
             &pstr(&leaf),
             "-days",

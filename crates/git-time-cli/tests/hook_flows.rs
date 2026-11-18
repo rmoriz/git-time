@@ -9,6 +9,12 @@
 //! throwaway CA made for the test — no fixture is trusted that was not issued
 //! for the run.
 //!
+//! The certificates are built for LibreSSL as well as OpenSSL: `-sha256` and a
+//! named curve, because LibreSSL's defaults (SHA-1 signatures, explicit EC
+//! parameters) are outside what `webpki` verifies, and a per-CA serial file
+//! because `-CAcreateserial` writes into the shared temp directory and races
+//! between parallel fixtures.
+//!
 //! The repository is hermetic: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and
 //! `GNUPGHOME` point into temporary directories and `GIT_DIR`/`GIT_WORK_TREE`/
 //! `GIT_TIME_SKIP` are cleared, so nothing on the machine steers branches,
@@ -91,7 +97,42 @@ fn git_output_env(dir: &Path, args: &[&str], input: &[u8], env: &[(&str, &str)])
             .write_all(input)
             .expect("writes stdin");
     }
-    child.wait_with_output().expect("waits for git")
+    let output = child.wait_with_output().expect("waits for git");
+    note_failure(dir, args, &output);
+    output
+}
+
+/// Show what a seal recorded when it went wrong: the hook line alone says
+/// nothing about *why* an authority failed, while the reasons are trailers on
+/// the commit — which no assertion ever prints.
+fn note_failure(dir: &Path, args: &[&str], output: &Output) {
+    let evidence = evidence(dir);
+    if output.status.success() && !evidence.contains("X-RFC3161-Fail") {
+        return;
+    }
+    eprintln!(
+        "--- {:?} -> {:?}\nstdout:\n{}\nstderr:\n{}\nevidence:\n{}",
+        args,
+        output.status,
+        text(&output.stdout),
+        text(&output.stderr),
+        evidence
+    );
+}
+
+/// The seal's own record on the current commit, without the bulky token.
+fn evidence(dir: &Path) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["log", "-1", "--format=%B"])
+        .output()
+        .expect("reads the commit");
+    text(&output.stdout)
+        .lines()
+        .filter(|line| line.starts_with("X-RFC3161") && !line.starts_with("X-RFC3161-Token:"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn git_output(dir: &Path, args: &[&str], input: &[u8]) -> Output {
@@ -140,36 +181,8 @@ fn run_time(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let output = command.output().expect("runs the binary");
-    // A seal that lost an authority is asserted on through one hook line,
-    // which says nothing about *why* it failed. The reasons are trailers on
-    // the commit, so print them where a red CI log will show them.
-    let evidence = evidence(dir);
-    if !output.status.success() || evidence.contains("X-RFC3161-Fail") {
-        eprintln!(
-            "--- {:?} -> {:?}\nstdout:\n{}\nstderr:\n{}\nevidence:\n{}",
-            args,
-            output.status,
-            text(&output.stdout),
-            text(&output.stderr),
-            evidence
-        );
-    }
+    note_failure(dir, args, &output);
     output
-}
-
-/// The seal's own record on the current commit, without the bulky token.
-fn evidence(dir: &Path) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["log", "-1", "--format=%B"])
-        .output()
-        .expect("reads the commit");
-    text(&output.stdout)
-        .lines()
-        .filter(|line| line.starts_with("X-RFC3161") && !line.starts_with("X-RFC3161-Token:"))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 // --- throwaway authority ------------------------------------------------
@@ -197,10 +210,13 @@ impl Authority {
         openssl(&[
             "req",
             "-x509",
+            "-sha256",
             "-newkey",
             "ec",
             "-pkeyopt",
             "ec_paramgen_curve:P-256",
+            "-pkeyopt",
+            "ec_param_enc:named_curve",
             "-nodes",
             "-keyout",
             &pstr(&ca_key),
@@ -222,6 +238,8 @@ impl Authority {
             "ec",
             "-pkeyopt",
             "ec_paramgen_curve:P-256",
+            "-pkeyopt",
+            "ec_param_enc:named_curve",
             "-nodes",
             "-keyout",
             &pstr(&leaf_key),
@@ -240,13 +258,15 @@ impl Authority {
         openssl(&[
             "x509",
             "-req",
+            "-sha256",
             "-in",
             &pstr(&leaf_csr),
             "-CA",
             &pstr(&ca),
             "-CAkey",
             &pstr(&ca_key),
-            "-CAcreateserial",
+            "-CAserial",
+            &serial(&ca),
             "-out",
             &pstr(&leaf),
             "-days",
@@ -324,6 +344,17 @@ fn openssl(args: &[&str]) {
 
 fn pstr(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// A per-authority serial file for `openssl x509 -CAserial`.
+///
+/// LibreSSL's `-CAcreateserial` ignores the CA's directory and writes a bare
+/// `.srl` into the shared temp directory, so parallel fixtures race on one file
+/// and occasionally read it half-written. Owning the path keeps them apart.
+fn serial(ca: &Path) -> String {
+    let path = ca.with_extension("srl");
+    std::fs::write(&path, "01\n").expect("write serial");
+    pstr(&path)
 }
 
 // --- stub authority -----------------------------------------------------

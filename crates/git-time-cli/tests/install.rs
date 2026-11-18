@@ -16,6 +16,12 @@
 //! the request in flight, so a seal here is a real seal and the pinned anchor is
 //! the throwaway CA made for the run.
 //!
+//! The certificates are built for LibreSSL as well as OpenSSL: `-sha256` and a
+//! named curve, because LibreSSL's defaults (SHA-1 signatures, explicit EC
+//! parameters) are outside what `webpki` verifies, and a per-CA serial file
+//! because `-CAcreateserial` writes into the shared temp directory and races
+//! between parallel fixtures.
+//!
 //! Beyond the happy paths, the cases pin the refusal paths: a second install over
 //! a regenerated foreign hook keeps both originals and chains the newest; a shim
 //! without `+x`, a dangling symlink, a missing binary, an anchor that is not a
@@ -87,6 +93,17 @@ fn pstr(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// A per-authority serial file for `openssl x509 -CAserial`.
+///
+/// LibreSSL's `-CAcreateserial` ignores the CA's directory and writes a bare
+/// `.srl` into the shared temp directory, so parallel fixtures race on one file
+/// and occasionally read it half-written. Owning the path keeps them apart.
+fn serial(ca: &Path) -> String {
+    let path = ca.with_extension("srl");
+    std::fs::write(&path, "01\n").expect("write serial");
+    pstr(&path)
+}
+
 /// The captured FreeTSA root, the one published fingerprint a test can match.
 fn freetsa_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../git-time-core/tests/fixtures/freetsa_root.pem")
@@ -140,10 +157,13 @@ impl Authority {
         openssl(&[
             "req",
             "-x509",
+            "-sha256",
             "-newkey",
             "ec",
             "-pkeyopt",
             "ec_paramgen_curve:P-256",
+            "-pkeyopt",
+            "ec_param_enc:named_curve",
             "-nodes",
             "-keyout",
             &pstr(&ca_key),
@@ -165,6 +185,8 @@ impl Authority {
             "ec",
             "-pkeyopt",
             "ec_paramgen_curve:P-256",
+            "-pkeyopt",
+            "ec_param_enc:named_curve",
             "-nodes",
             "-keyout",
             &pstr(&leaf_key),
@@ -183,13 +205,15 @@ impl Authority {
         openssl(&[
             "x509",
             "-req",
+            "-sha256",
             "-in",
             &pstr(&leaf_csr),
             "-CA",
             &pstr(&ca),
             "-CAkey",
             &pstr(&ca_key),
-            "-CAcreateserial",
+            "-CAserial",
+            &serial(&ca),
             "-out",
             &pstr(&leaf),
             "-days",
