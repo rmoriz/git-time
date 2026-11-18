@@ -24,8 +24,30 @@ use std::path::{Path, PathBuf};
 use der::Decode;
 use rustls_pki_types::CertificateDer;
 use rustls_pki_types::pem::PemObject as _;
+use sha2::{Digest as _, Sha256};
 use sigstore_types::DerCertificate;
 use x509_cert::Certificate;
+
+/// The SHA-256 fingerprint of the certificate `der`, uppercase and colon
+/// separated — the form `openssl x509 -fingerprint -sha256` prints.
+///
+/// It is the value a preset pins and the one a reader can compare against the
+/// authority's own publication, so it is spelled the way both of them are
+/// written. The empty string is impossible: a certificate always has a digest.
+#[must_use]
+pub fn fingerprint(der: &[u8]) -> String {
+    let digest = Sha256::digest(der);
+    let mut out = String::with_capacity(digest.len() * 3);
+    for (index, byte) in digest.iter().enumerate() {
+        use std::fmt::Write as _;
+        if index > 0 {
+            out.push(':');
+        }
+        // Writing into a String cannot fail.
+        let _ = write!(out, "{byte:02X}");
+    }
+    out
+}
 
 /// The pinned material for one TSA: the anchor plus its allowed intermediates.
 #[derive(Debug, Clone)]

@@ -66,12 +66,27 @@ fn pstr(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+/// The captured FreeTSA root, the one published fingerprint a test can match.
+fn freetsa_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../git-time-core/tests/fixtures/freetsa_root.pem")
+}
+
 /// Lowercase hex of the SHA-256 of `bytes`.
 fn fingerprint(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// The SHA-256 fingerprint of `bytes` in the preset spelling: uppercase, colon
+/// separated.
+fn fingerprint_colon(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// The DER of the first PEM certificate in `pem`.
@@ -370,6 +385,20 @@ impl Repo {
         vec![(
             "GIT_TIME_ANCHOR_FETCH_CMD",
             format!("cat {}", pstr(&self.authority.ca)),
+        )]
+    }
+
+    /// A fetch that answers FreeTSA's own URL with the fixture root and every
+    /// other URL with the throwaway CA, so the one pinned preset with a kept
+    /// fixture can be matched while the others exercise the mismatch path.
+    fn fetch_known_root(&self) -> Vec<(&'static str, String)> {
+        vec![(
+            "GIT_TIME_ANCHOR_FETCH_CMD",
+            format!(
+                "case \"$GIT_TIME_ANCHOR_URL\" in https://freetsa.org/*) cat {} ;; *) cat {} ;; esac",
+                pstr(&freetsa_root()),
+                pstr(&self.authority.ca)
+            ),
         )]
     }
 
@@ -943,17 +972,37 @@ fn pin_writes_the_lock_and_check_names_a_changed_anchor() {
 }
 
 #[test]
-fn preset_list_names_both_and_preset_add_writes_the_install_config() {
+fn preset_list_names_every_preset_and_marks_the_trust_level() {
     let repo = Repo::new();
     repo.init();
 
     let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
-    for name in ["freetsa", "ai-moda"] {
-        assert!(listing.contains(name), "{listing}");
+    for name in git_time_core::presets::names() {
+        assert!(
+            listing.lines().any(|line| line.starts_with(name)),
+            "{name}: {listing}"
+        );
     }
+    // The published roots are shown, the TOFU presets say so, and a plain-http
+    // endpoint is visible as such.
     assert!(listing.contains("https://freetsa.org/tsr"), "{listing}");
+    assert!(
+        listing.contains("A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC"),
+        "{listing}"
+    );
+    assert!(listing.contains("tofu"), "{listing}");
+    assert!(listing.contains("http://time.certum.pl"), "{listing}");
+}
 
-    let added = repo.run_time_env(&["tsa", "preset", "add", "freetsa"], &repo.fetch_ca());
+#[test]
+fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
+    let repo = Repo::new();
+    repo.init();
+
+    let added = repo.run_time_env(
+        &["tsa", "preset", "add", "freetsa"],
+        &repo.fetch_known_root(),
+    );
     assert!(added.status.success(), "{}", text(&added.stderr));
     assert_eq!(
         repo.config("time.tsa.freetsa.url").as_deref(),
@@ -963,14 +1012,136 @@ fn preset_list_names_both_and_preset_add_writes_the_install_config() {
         repo.config("time.tsa.freetsa.alg").as_deref(),
         Some("sha256")
     );
+    assert_eq!(
+        repo.config("time.tsa.freetsa.policy").as_deref(),
+        Some("1.2.3.4.1")
+    );
     let anchor = repo
         .config("time.tsa.freetsa.anchor")
         .expect("the anchor key is written");
     assert_eq!(anchor, pstr(&repo.anchors().join("freetsa.pem")));
     assert!(repo.anchors().join("freetsa.pem").exists(), "the anchor");
-    let printed = fingerprint_after(&text(&added.stdout), "sha256 ");
-    let expected = fingerprint(&first_der(&text(&repo.authority.bytes())));
+
+    let root = std::fs::read(freetsa_root()).expect("the fixture root");
+    let expected = fingerprint(&first_der(&String::from_utf8_lossy(&root)));
+    let stdout = text(&added.stdout);
+    assert!(
+        stdout.contains("freetsa: root fingerprint matches "),
+        "the match is said: {stdout}"
+    );
+    let printed = fingerprint_after(&stdout, "sha256 ");
     assert_eq!(printed, expected, "the first certificate is fingerprinted");
+}
+
+/// A preset without a published root is trust on first use: the fetched
+/// fingerprint is printed in full, and the add still succeeds.
+#[test]
+fn preset_add_of_a_tofu_preset_prints_the_fetched_fingerprint() {
+    let repo = Repo::new();
+    repo.init();
+
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&freetsa_root())),
+    )];
+    let added = repo.run_time_env(&["tsa", "preset", "add", "ai-moda"], &fetch);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    assert!(repo.anchors().join("ai-moda.pem").exists(), "the anchor");
+
+    let stdout = text(&added.stdout);
+    assert!(stdout.contains("trust on first use"), "{stdout}");
+    let printed = fingerprint_after(&stdout, "root is ");
+    assert_eq!(printed.len(), 64, "a full SHA-256: {printed}");
+    assert!(
+        printed.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "hex: {printed}"
+    );
+    let root = std::fs::read(freetsa_root()).expect("the fixture root");
+    assert_eq!(
+        printed,
+        fingerprint(&first_der(&String::from_utf8_lossy(&root))),
+        "the printed value is the value that was pinned"
+    );
+    // The TOFU preset publishes no expected value, so nothing is compared.
+    assert!(!stdout.contains("root fingerprint matches"), "{stdout}");
+}
+
+/// The three presets with a published root refuse a different one, leave no
+/// anchor behind, and name both values.
+#[test]
+fn a_published_fingerprint_mismatch_is_refused() {
+    let repo = Repo::new();
+    repo.init();
+    let ca = std::fs::read_to_string(&repo.authority.ca).expect("the CA");
+    let fetched = fingerprint_colon(&first_der(&ca));
+
+    for id in ["sectigo", "certum", "izenpe"] {
+        let added = repo.run_time_env(&["tsa", "preset", "add", id], &repo.fetch_ca());
+        assert_eq!(
+            added.status.code(),
+            Some(1),
+            "{id}: {}",
+            text(&added.stderr)
+        );
+        assert!(
+            !repo.anchors().join(format!("{id}.pem")).exists(),
+            "{id}: nothing is pinned"
+        );
+        let stderr = text(&added.stderr);
+        assert!(stderr.contains(id), "{id} is named: {stderr}");
+        assert!(stderr.contains("does not match"), "{stderr}");
+        let published = git_time_core::presets::find(id)
+            .and_then(|preset| preset.fingerprint)
+            .expect("a published root");
+        assert!(stderr.contains(published), "{id}: {stderr}");
+        assert!(stderr.contains(&fetched), "{id}: {stderr}");
+        // The entry is still configured, so doctor can name the gap.
+        assert!(repo.config(&format!("time.tsa.{id}.url")).is_some(), "{id}");
+    }
+}
+
+#[test]
+fn an_http_preset_records_the_insecure_transport() {
+    let repo = Repo::new();
+    repo.init();
+
+    let added = repo.run_time_env(&["tsa", "preset", "add", "certum"], &repo.fetch_ca());
+    assert_eq!(added.status.code(), Some(1), "{}", text(&added.stderr));
+    assert_eq!(
+        repo.config("time.tsa.certum.insecure-http").as_deref(),
+        Some("true"),
+        "the acceptance is recorded, the mismatch does not remove it"
+    );
+
+    let listing = ok(&repo.run_time(&["tsa", "list"]));
+    let line = listing
+        .lines()
+        .find(|line| line.starts_with("certum "))
+        .expect("the id is listed");
+    assert!(line.ends_with("insecure-http"), "{line}");
+
+    let json = ok(&repo.run_time(&["tsa", "list", "--json"]));
+    assert!(json.contains("\"insecure_http\": true"), "{json}");
+}
+
+#[test]
+fn tsa_add_writes_the_insecure_transport_when_accepted() {
+    let repo = Repo::new();
+    repo.init();
+
+    let refused = repo.run_time(&["tsa", "add", "http://tsa.example/tsr", "--id", "acme"]);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    assert_eq!(repo.config("time.tsa.acme.url"), None, "nothing is written");
+
+    repo.add_tsa("acme", "http://tsa.example/tsr");
+    assert_eq!(
+        repo.config("time.tsa.acme.insecure-http").as_deref(),
+        Some("true")
+    );
+
+    // An https authority keeps the key absent.
+    repo.add_tsa("safe", "https://tsa.example/tsr");
+    assert_eq!(repo.config("time.tsa.safe.insecure-http"), None);
 }
 
 #[test]
@@ -994,7 +1165,10 @@ fn preset_add_exits_one_when_the_fetch_leaves_no_anchor() {
         Some("https://freetsa.org/tsr")
     );
 
-    let added = repo.run_time_env(&["tsa", "preset", "add", "freetsa"], &repo.fetch_ca());
+    let added = repo.run_time_env(
+        &["tsa", "preset", "add", "freetsa"],
+        &repo.fetch_known_root(),
+    );
     assert_eq!(added.status.code(), Some(0), "{}", text(&added.stderr));
 }
 

@@ -84,7 +84,10 @@ bundle, and deleting the lock changes no verdict.
 
 Presets live in `git_time_core::presets`; `install --preset public` and `tsa preset add` write
 the same keys from that one table. Only `anchor fetch` and `preset add` touch the network, and
-both honour `GIT_TIME_ANCHOR_FETCH_CMD`.
+both honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
+it is pinned; a mismatch is refused and leaves the previous anchor alone. The presets without one
+are trust on first use and print the fetched fingerprint, which is the only reviewable artifact of
+the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http` and warn at seal time.
 
 ## Adoption (Task 15)
 

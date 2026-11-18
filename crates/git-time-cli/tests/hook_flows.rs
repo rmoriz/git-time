@@ -707,9 +707,43 @@ fn a_plain_commit_is_sealed() {
     assert_rewrite(&repo, &head, &expected);
 }
 
+/// A plain-`http` authority warns on every seal, because the imprint travels in
+/// the clear — the token is still verified against the pinned root.
+#[test]
+fn an_insecure_authority_warns_at_seal_time() {
+    let repo = Repo::new();
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.insecure-http", "true"],
+    );
+
+    let output = git_output(
+        repo.path(),
+        &["commit", "--allow-empty", "-m", "insecure"],
+        b"",
+    );
+    assert!(
+        output.status.success(),
+        "on-failure = warn keeps the commit: {}",
+        text(&output.stderr)
+    );
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("`stub` is configured over plain http"),
+        "the authority is named: {stderr}"
+    );
+    assert!(
+        stderr.contains("verified against the pinned anchor"),
+        "the mitigation is named: {stderr}"
+    );
+    assert!(
+        stderr.contains("rfc3161: sealed "),
+        "the seal still happened: {stderr}"
+    );
+}
+
 #[test]
 fn an_empty_commit_is_sealed() {
-    // `--allow-empty` with no file at all: the tree is the empty tree.
     let repo = Repo::new();
     let base = repo.head();
     let tree = repo.snapshot(&base).tree;

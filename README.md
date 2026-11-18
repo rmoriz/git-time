@@ -81,6 +81,33 @@ X-RFC3161-Fail: id=freetsa; reason=timeout
 The commit exists, the worktree is clean, `git fsck` is silent, and the artifact says exactly which
 authority failed and why. A dead TSA costs evidence, never a commit.
 
+## Built-in authorities
+
+`git time install --preset public` writes all of these entries and fetches their anchors. The
+table lives in `git_time_core::presets`; `git time tsa preset add <name>` writes the same keys
+from it. It is ordered the two originals, then the published roots, then trust on first use.
+
+| Preset | Endpoint | Root |
+|---|---|---|
+| `freetsa` | `https://freetsa.org/tsr` | pinned SHA-256 fingerprint |
+| `ai-moda` | `https://rfc3161.ai.moda` | trust on first use (load balancer over several CAs) |
+| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned SHA-256 fingerprint |
+| `certum` | `http://time.certum.pl` | pinned SHA-256 fingerprint, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | pinned SHA-256 fingerprint, plain http |
+| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | trust on first use, plain http |
+| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | trust on first use, plain http |
+| `aped` | `https://timestamp.aped.gov.gr/qtss` | trust on first use |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | trust on first use, plain http |
+| `swisssign` | `http://tsa.swisssign.net` | trust on first use, plain http |
+| `apple` | `http://timestamp.apple.com/ts01` | trust on first use, plain http |
+| `dfn` | `http://zeitstempel.dfn.de` | trust on first use, plain http |
+
+A pinned fingerprint makes the *first* fetch verifiable: a bundle whose root hashes to anything
+else is refused and an existing pin is left alone. Where no fingerprint is published the fetch is
+trust on first use, so the fetched root is printed in full for a reader to compare. Plain `http`
+costs no integrity — the token is verified against the pinned root — but it exposes the imprint and
+lets an attacker block the authority; an insecure authority keeps printing a warning at seal time.
+
 ## How it works
 
 1. The hook reads the commit git just wrote and strips its trailer block and signature.

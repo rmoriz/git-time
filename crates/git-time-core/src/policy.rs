@@ -21,12 +21,17 @@
 //! correctly. Only when *no* configured authority has a usable anchor does the
 //! seal refuse.
 //!
-//! TSA keys are `time.tsa.<id>.url`, `.anchor`, `.alg`, `.policy` and
-//! `.timeout`. The id is the text between `time.tsa.` and the last dot, so an id
-//! cannot contain a dot but may contain any other character git accepts. An
-//! anchor or url *key* that is missing is still an error: a half-configured TSA
-//! would otherwise only fail at seal time. `alg` defaults to `sha256` and
-//! `timeout` to six seconds per attempt.
+//! TSA keys are `time.tsa.<id>.url`, `.anchor`, `.alg`, `.policy`, `.timeout`
+//! and `.insecure-http`. The id is the text between `time.tsa.` and the last
+//! dot, so an id cannot contain a dot but may contain any other character git
+//! accepts. An anchor or url *key* that is missing is still an error: a
+//! half-configured TSA would otherwise only fail at seal time. `alg` defaults to
+//! `sha256`, `timeout` to six seconds per attempt and `insecure-http` to false.
+//!
+//! `.insecure-http = true` records that a plain `http://` endpoint was accepted
+//! on purpose. The token is verified against the pinned anchor either way, so
+//! this changes no verdict; it only makes the risk visible — one warning per
+//! insecure authority while the policy is loaded, which is seal time.
 //!
 //! Durations accept `500ms`, `10s` and bare seconds. Relative anchor paths are
 //! resolved against the repository, because the config holding them is
@@ -120,6 +125,8 @@ pub struct TsaConfig {
     pub alg: Alg,
     /// The TSA policy to request, when one is configured.
     pub policy: Option<String>,
+    /// Whether the endpoint was accepted as plain `http://`.
+    pub insecure_http: bool,
     /// Per-attempt timeout.
     pub timeout: Duration,
 }
@@ -291,6 +298,17 @@ impl Policy {
                 url: tsa.url.clone(),
                 timeout: tsa.timeout,
             }));
+            // The transport is not what makes a token evidence, but a reader
+            // deserves to know the imprint travelled in the clear. Said once per
+            // authority, here, where the backend is built — that is seal time.
+            if tsa.insecure_http {
+                eprintln!(
+                    "rfc3161: warning: `{}` is configured over plain http ({}); the token is \
+                     verified against the pinned anchor, but the imprint is exposed and the \
+                     authority can be blocked in transit",
+                    tsa.id, tsa.url
+                );
+            }
             // One bundle at a time: a missing or unparseable anchor belongs to
             // its own authority and must not take the pinned ones down with it.
             let path = resolve_anchor(repo, &tsa.anchor);
@@ -335,6 +353,7 @@ struct TsaFields {
     anchor: Option<String>,
     alg: Option<String>,
     policy: Option<String>,
+    insecure_http: Option<String>,
     timeout: Option<String>,
 }
 
@@ -383,6 +402,7 @@ fn read_tsas(repo: &Repo) -> Result<Vec<TsaConfig>, ConfigError> {
             "anchor" => &mut fields.anchor,
             "alg" => &mut fields.alg,
             "policy" => &mut fields.policy,
+            "insecure-http" => &mut fields.insecure_http,
             "timeout" => &mut fields.timeout,
             // Unknown fields are left alone, so a newer writer's key does not
             // stop an older reader.
@@ -427,12 +447,21 @@ fn read_tsas(repo: &Repo) -> Result<Vec<TsaConfig>, ConfigError> {
             None => DEFAULT_TSA_TIMEOUT,
             Some(value) => parse_duration(value, &format!("{TSA_PREFIX}{id}.timeout"))?,
         };
+        let insecure_http = match fields
+            .insecure_http
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        {
+            None => false,
+            Some(value) => parse_bool(value, &format!("{TSA_PREFIX}{id}.insecure-http"))?,
+        };
         tsas.push(TsaConfig {
             id,
             url,
             anchor: PathBuf::from(anchor),
             alg,
             policy,
+            insecure_http,
             timeout,
         });
     }

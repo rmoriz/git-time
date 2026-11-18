@@ -87,9 +87,15 @@ not read. `--json` carries no `pass`, `gates` or `required`.
 Wire the hooks and configure authorities. `post-commit` and `post-merge` are always wired;
 `pre-commit` and `pre-merge-commit` only under `time.gate = pre-commit`. A foreign hook is
 preserved as `<name>.pre-time` (then `.pre-time.<n>`) and chained, never overwritten. `--preset
-public` (the default) writes the FreeTSA and rfc3161.ai.moda entries and fetches their anchors;
+public` (the default) writes every entry of the built-in authority table and fetches their anchors;
 `--preset none` or `--no-tsa` writes no authority. A failed anchor fetch is a warning, not a
 failure; `doctor` names the gap. Exits `0` or `2`.
+
+A preset with a published root fingerprint is checked before it is pinned: a bundle whose root
+hashes to anything else is refused with both values named, any existing pin is left untouched, and
+the install still exits `0` (the hooks are worth wiring; `doctor` names the missing anchor). A
+preset without one is trust on first use and prints the fetched root fingerprint, which is the
+value to compare against the authority's publication.
 
 ### `git time uninstall [--force]`
 
@@ -122,7 +128,35 @@ config.
 
 Print the built-in presets, or configure one, anchor included, through the install fetch path.
 `preset add` exits `1` when the anchor could not be pinned (a one-off add exists to pin), and `2`
-for an unknown name.
+for an unknown name. A root fingerprint that does not match is a refusal, so a pinned preset never
+takes a substituted root.
+
+The table is ordered: the two original presets first, then the presets with a published root, then
+those that are trust on first use (`ai-moda` is an original and TOFU). For the TOFU presets no
+value can be checked, so `preset add` prints the fetched root fingerprint in full — that line is
+what makes the first pin reviewable.
+
+| Preset | Endpoint | Root |
+|---|---|---|
+| `freetsa` | `https://freetsa.org/tsr` | pinned |
+| `ai-moda` | `https://rfc3161.ai.moda` | TOFU (load balancer over several CAs) |
+| `sectigo` | `https://timestamp.sectigo.com/qualified` | pinned |
+| `certum` | `http://time.certum.pl` | pinned, plain http |
+| `izenpe` | `http://tsa.izenpe.com` | pinned, plain http |
+| `acs-microsoft` | `http://timestamp.acs.microsoft.com` | TOFU, plain http |
+| `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | TOFU, plain http |
+| `aped` | `https://timestamp.aped.gov.gr/qtss` | TOFU |
+| `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | TOFU, plain http |
+| `swisssign` | `http://tsa.swisssign.net` | TOFU, plain http |
+| `apple` | `http://timestamp.apple.com/ts01` | TOFU, plain http |
+| `dfn` | `http://zeitstempel.dfn.de` | TOFU, plain http |
+
+A `http://` authority is recorded with `time.tsa.<id>.insecure-http = true` and warns once per
+authority whenever the policy is loaded — that is, at seal time — because the token integrity comes
+from the signature against the pinned root, not from the transport.
+
+Every preset but `freetsa` is fetched by asking the endpoint for a token and taking the self-signed
+root of the reply; only FreeTSA publishes a plain PEM.
 
 ### `git time anchor fetch <url> --id ID [--insecure-http]`
 

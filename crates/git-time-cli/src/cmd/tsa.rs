@@ -217,6 +217,9 @@ fn add(repo: &Repo, new: NewTsa<'_>) -> Exit {
     if let Some(policy) = policy {
         fields.push(("policy", policy));
     }
+    if insecure_http && url.starts_with("http://") {
+        fields.push(("insecure-http", "true".to_owned()));
+    }
     for (field, value) in fields {
         if let Err(exit) = local_set(repo, &format!("{base}.{field}"), &value) {
             return exit;
@@ -248,6 +251,11 @@ fn list(repo: &Repo, json: bool) -> Exit {
             Ok(alg) => alg.unwrap_or_else(|| "sha256".to_owned()),
             Err(exit) => return exit,
         };
+        let insecure_http = match local_get(repo, &format!("time.tsa.{id}.insecure-http")) {
+            Ok(Some(value)) => reads_true(&value),
+            Ok(None) => false,
+            Err(exit) => return exit,
+        };
         // The configured key wins, as it does in `Policy::load`; the default is
         // only what `add` would have written.
         let anchor = configured
@@ -260,22 +268,25 @@ fn list(repo: &Repo, json: bool) -> Exit {
         let anchored = pinned(&id, &anchor);
         let fingerprint =
             crate::cmd::anchor::first_certificate_at(&anchor).map(|der| anchors::fingerprint(&der));
-        rows.push((id, url, alg, anchor, anchored, fingerprint));
+        rows.push((id, url, alg, anchor, anchored, fingerprint, insecure_http));
     }
 
     if json {
         let rows: Vec<Value> = rows
             .iter()
-            .map(|(id, url, alg, anchor, anchored, fingerprint)| {
-                json!({
-                    "id": id,
-                    "url": url,
-                    "alg": alg,
-                    "anchor": anchor.to_string_lossy(),
-                    "anchored": anchored,
-                    "fingerprint": fingerprint,
-                })
-            })
+            .map(
+                |(id, url, alg, anchor, anchored, fingerprint, insecure_http)| {
+                    json!({
+                        "id": id,
+                        "url": url,
+                        "alg": alg,
+                        "anchor": anchor.to_string_lossy(),
+                        "anchored": anchored,
+                        "fingerprint": fingerprint,
+                        "insecure_http": insecure_http,
+                    })
+                },
+            )
             .collect();
         match serde_json::to_string_pretty(&rows) {
             Ok(text) => println!("{text}"),
@@ -284,12 +295,13 @@ fn list(repo: &Repo, json: bool) -> Exit {
             }
         }
     } else {
-        for (id, url, alg, anchor, anchored, fingerprint) in &rows {
+        for (id, url, alg, anchor, anchored, fingerprint, insecure_http) in &rows {
             println!(
-                "{id} {url} {alg} {} {} ({})",
+                "{id} {url} {alg} {} {} ({}){}",
                 anchor.display(),
                 fingerprint.as_deref().unwrap_or("-"),
-                if *anchored { "anchored" } else { "missing" }
+                if *anchored { "anchored" } else { "missing" },
+                if *insecure_http { " insecure-http" } else { "" },
             );
         }
     }
@@ -329,10 +341,13 @@ fn preset_list(_repo: &Repo) -> Exit {
     for preset in &presets::PRESETS {
         let anchor = anchors::dir().join(format!("{}.pem", preset.name));
         println!(
-            "{} {} {} ({})",
+            "{} {} {} {} ({})",
             preset.name,
             preset.url,
             preset.alg,
+            // A pinned root is verifiable on the first fetch; the rest are
+            // trust on first use and say so here as well as at the pin.
+            preset.fingerprint.unwrap_or("tofu"),
             if pinned(preset.name, &anchor) {
                 "anchored"
             } else {
@@ -358,6 +373,12 @@ async fn preset_add(repo: &Repo, name: &str) -> Exit {
     println!("tsa {}: {} configured", preset.name, preset.url);
     if pinned.kept > 0 {
         println!("tsa {}: {} existing key(s) kept", preset.name, pinned.kept);
+    }
+    if pinned.fingerprint_mismatch {
+        // The loud line naming both values was already said while pinning.
+        // Unlike `install`, where the hooks are still worth wiring, a one-off
+        // `preset add` exists to pin: a refused root did not do its job.
+        return Exit::seal(String::new());
     }
     if let Some(path) = pinned.missing_anchor {
         eprintln!(
@@ -484,6 +505,14 @@ fn validate_policy(alg: Alg, policy: &str) -> Result<(), Exit> {
         .and_then(|request| request.with_policy(Some(policy.to_owned())))
         .map_err(|error| Exit::usage(format!("git time tsa: {error}")))?;
     Ok(())
+}
+
+/// Whether a config value is one of the git spellings of true.
+fn reads_true(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "true" | "yes" | "on" | "1"
+    )
 }
 
 /// One local config value, `None` when the key is unset.

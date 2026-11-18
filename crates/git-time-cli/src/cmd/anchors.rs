@@ -27,7 +27,6 @@ use der::{Decode, Encode};
 use git_time_core::imprint::{Alg, Digest};
 use git_time_core::repo::Repo;
 use git_time_core::tsa::{StampRequest, encode, parse_response};
-use sha2::{Digest as _, Sha256};
 
 use crate::cmd::Exit;
 
@@ -47,16 +46,15 @@ pub fn dir() -> PathBuf {
 }
 
 /// The lowercase hex SHA-256 fingerprint of `bytes`.
+///
+/// The pins and the lock spell it as one lowercase token; the preset comparison
+/// needs the certificate form ([`git_time_core::trust::fingerprint`]), so the
+/// digest lives there and this only rewrites its spelling.
 #[must_use]
 pub fn fingerprint(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        // Writing into a String cannot fail.
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    git_time_core::trust::fingerprint(bytes)
+        .replace(':', "")
+        .to_ascii_lowercase()
 }
 
 /// Fetch the bundle at `url`.

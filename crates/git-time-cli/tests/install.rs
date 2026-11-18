@@ -36,6 +36,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, header::CONTENT_TYPE};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use sha2::{Digest as _, Sha256};
 use tempfile::TempDir;
 
 /// The binary under test, built by cargo for this integration test.
@@ -84,6 +85,34 @@ fn text(bytes: &[u8]) -> String {
 
 fn pstr(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+/// The captured FreeTSA root, the one published fingerprint a test can match.
+fn freetsa_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../git-time-core/tests/fixtures/freetsa_root.pem")
+}
+
+/// The SHA-256 fingerprint of `bytes` in the preset spelling: uppercase, colon
+/// separated.
+fn fingerprint_colon(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// The DER of the first PEM certificate in `pem`.
+fn first_der(pem: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let body = pem
+        .split_once("-----\n")
+        .and_then(|(_, rest)| rest.split_once("\n-----END"))
+        .map(|(body, _)| body.replace('\n', ""))
+        .expect("a PEM certificate block");
+    base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .expect("base64")
 }
 
 // --- throwaway authority ------------------------------------------------
@@ -439,6 +468,24 @@ impl Repo {
         vec![(
             "GIT_TIME_ANCHOR_FETCH_CMD",
             format!("cat {}", pstr(&self.authority.ca)),
+        )]
+    }
+
+    /// A fetch that answers FreeTSA's own URL with the fixture root and every
+    /// other URL with the throwaway CA.
+    ///
+    /// Only FreeTSA's root is kept as a fixture, so it is the one preset whose
+    /// published fingerprint can be matched here. The other pinned presets get
+    /// the throwaway CA and are therefore refused — the mismatch path, which an
+    /// install has to survive.
+    fn fetch_known_root(&self) -> Vec<(&'static str, String)> {
+        vec![(
+            "GIT_TIME_ANCHOR_FETCH_CMD",
+            format!(
+                "case \"$GIT_TIME_ANCHOR_URL\" in https://freetsa.org/*) cat {} ;; *) cat {} ;; esac",
+                pstr(&freetsa_root()),
+                pstr(&self.authority.ca)
+            ),
         )]
     }
 
@@ -952,11 +999,11 @@ fn doctor_names_an_anchor_that_is_not_a_certificate() {
 #[test]
 fn a_second_public_preset_keeps_a_working_config() {
     let repo = Repo::blank();
-    let first = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca());
+    let first = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
     assert!(first.status.success(), "{}", text(&first.stderr));
 
     repo.config("time.tsa.freetsa.url", "https://mirror.example/tsr");
-    let second = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca());
+    let second = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
     assert!(second.status.success(), "{}", text(&second.stderr));
     let url = text(&git(repo.path(), &["config", "time.tsa.freetsa.url"]));
     assert_eq!(url.trim(), "https://mirror.example/tsr", "url is kept");
@@ -987,7 +1034,7 @@ fn a_failed_fetch_under_the_gate_warns_that_commits_are_refused() {
 fn an_unparseable_fetch_leaves_the_previous_anchor_untouched() {
     let repo = Repo::blank();
     assert!(
-        repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca())
+        repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root())
             .status
             .success()
     );
@@ -1166,23 +1213,45 @@ fn a_merge_after_install_is_sealed() {
 #[test]
 fn install_fetches_anchors_and_prints_their_fingerprints() {
     let repo = Repo::new();
-    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca());
+    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
     assert!(
         install.status.success(),
         "install failed: {}",
         text(&install.stderr)
     );
     let stdout = text(&install.stdout);
-    assert!(stdout.contains("tsa: 2 configured"), "{stdout}");
-    assert_eq!(stdout.matches("sha256 ").count(), 2, "{stdout}");
+    assert!(
+        stdout.contains("tsa: 12 configured"),
+        "every preset is written: {stdout}"
+    );
+    // Freetsa and the eight TOFU presets: nine anchors pinned. Sectigo,
+    // Certum and Izenpe get the throwaway CA, so their published root does not
+    // match.
+    assert_eq!(stdout.matches("sha256 ").count(), 9, "{stdout}");
+    assert!(
+        stdout.contains("freetsa: root fingerprint matches"),
+        "the match is said out loud: {stdout}"
+    );
+    assert!(
+        stdout.contains("3 root fingerprint(s) did not match"),
+        "the refusals are summarised: {stdout}"
+    );
 
-    for id in ["freetsa", "ai-moda"] {
+    // FreeTSA's own fixture root is the one a published fingerprint can match.
+    assert!(stdout.contains("trust on first use"), "{stdout}");
+    for (id, source) in [
+        ("freetsa", freetsa_root()),
+        ("ai-moda", repo.authority.ca.clone()),
+    ] {
         let anchor = repo.anchors().join(format!("{id}.pem"));
         assert_eq!(
             read(&anchor),
-            read(&repo.authority.ca),
+            read(&source),
             "the fetched anchor is stored: {id}"
         );
+    }
+    for id in ["freetsa", "ai-moda"] {
+        let anchor = repo.anchors().join(format!("{id}.pem"));
         let configured = text(&git(
             repo.path(),
             &["config", &format!("time.tsa.{id}.anchor")],
@@ -1194,6 +1263,45 @@ fn install_fetches_anchors_and_prints_their_fingerprints() {
         ));
         assert_eq!(alg.trim(), "sha256");
     }
+}
+
+#[test]
+fn install_refuses_a_root_whose_fingerprint_does_not_match() {
+    let repo = Repo::blank();
+    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca());
+    assert!(
+        install.status.success(),
+        "the hooks are still worth wiring: {}",
+        text(&install.stderr)
+    );
+
+    // The fetched root is named next to the published one, and nothing is
+    // pinned at a path that would otherwise be a trust decision.
+    let stderr = text(&install.stderr);
+    assert!(stderr.contains("does not match"), "{stderr}");
+    for id in ["sectigo", "certum", "izenpe"] {
+        assert!(stderr.contains(id), "{id} is named: {stderr}");
+        assert!(
+            !repo.anchors().join(format!("{id}.pem")).exists(),
+            "{id} is not pinned"
+        );
+    }
+    let ca = std::fs::read_to_string(&repo.authority.ca).expect("the CA");
+    let fetched = fingerprint_colon(&first_der(&ca));
+    for preset in ["sectigo", "certum", "izenpe"] {
+        let published = git_time_core::presets::find(preset)
+            .and_then(|preset| preset.fingerprint)
+            .expect("a published root");
+        assert!(stderr.contains(published), "{preset}: {stderr}");
+    }
+    assert!(
+        stderr.contains(&fetched),
+        "the fetched value is named: {stderr}"
+    );
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    assert!(text(&doctor.stdout).contains("missing anchor"));
 }
 
 #[test]
@@ -1277,11 +1385,11 @@ fn install_fetches_into_the_configured_anchor_path() {
     let anchor = repo.path().join("pinned/custom-ca.pem");
     repo.config("time.tsa.freetsa.anchor", &pstr(&anchor));
 
-    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_ca());
+    let install = repo.run_time_env(&["install", "--preset", "public"], &repo.fetch_known_root());
     assert!(install.status.success(), "{}", text(&install.stderr));
     assert_eq!(
-        std::fs::read(&anchor).expect("the configured path was written"),
-        std::fs::read(&repo.authority.ca).expect("the fetched CA"),
+        read(&anchor),
+        read(&freetsa_root()),
         "the policy reads this path, so this is where the bundle belongs"
     );
     assert!(

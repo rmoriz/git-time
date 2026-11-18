@@ -1093,6 +1093,7 @@ fn policy_parses_every_key() {
         ("time.tsa.freetsa.anchor", &anchor.to_string_lossy()),
         ("time.tsa.freetsa.alg", "sha512"),
         ("time.tsa.freetsa.policy", "1.2.3.4.1"),
+        ("time.tsa.freetsa.insecure-http", "true"),
         ("time.tsa.freetsa.timeout", "750ms"),
     ] {
         git(dir.path(), &["config", key, value]);
@@ -1115,6 +1116,7 @@ fn policy_parses_every_key() {
     assert_eq!(tsa.anchor, anchor);
     assert_eq!(tsa.alg, Alg::Sha512);
     assert_eq!(tsa.policy.as_deref(), Some("1.2.3.4.1"));
+    assert!(tsa.insecure_http);
     assert_eq!(tsa.timeout, Duration::from_millis(750));
     assert_eq!(policy.backends().len(), 1);
     assert_eq!(policy.backends()[0].id(), "freetsa");

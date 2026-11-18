@@ -37,7 +37,7 @@ use crate::cmd::{Exit, anchors, git_stdout, hooks, open};
 /// Which authorities `install` configures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Preset {
-    /// The public FreeTSA and rfc3161.ai.moda authorities.
+    /// The public authorities of the built-in preset table.
     Public,
     /// No authority at all.
     None,
@@ -51,6 +51,9 @@ pub(crate) struct Pinned {
     pub(crate) kept: usize,
     /// Where its anchor is expected, and whether that path is now missing.
     pub(crate) missing_anchor: Option<PathBuf>,
+    /// Whether the fetched root was not the fingerprint the preset expects, so
+    /// the bundle was left unpinned.
+    pub(crate) fingerprint_mismatch: bool,
 }
 
 /// Run `git time install`.
@@ -97,11 +100,16 @@ pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: 
     };
     let mut kept = 0_usize;
     let mut unpinned = Vec::new();
+    let mut mismatched = 0_usize;
     for authority in authorities {
         match pin(&repo, authority).await {
             Ok(pinned) => {
                 kept += pinned.kept;
-                if let Some(path) = pinned.missing_anchor {
+                // A mismatch already said its loud line naming both values; the
+                // generic "no anchor" warning would only repeat the tail of it.
+                if pinned.fingerprint_mismatch {
+                    mismatched += 1;
+                } else if let Some(path) = pinned.missing_anchor {
                     unpinned.push((pinned.id, path));
                 }
             }
@@ -133,6 +141,11 @@ pub async fn run(directory: Option<std::path::PathBuf>, preset: Preset, no_tsa: 
             String::new()
         }
     );
+    if mismatched > 0 {
+        println!(
+            "tsa: {mismatched} root fingerprint(s) did not match; the bundle(s) were not pinned"
+        );
+    }
     for (id, path) in &unpinned {
         if gated {
             eprintln!(
@@ -191,6 +204,9 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
     if let Some(policy) = authority.policy {
         fields.push(("policy", policy.to_owned()));
     }
+    if authority.insecure_http {
+        fields.push(("insecure-http", "true".to_owned()));
+    }
     let mut kept = 0_usize;
     for (field, value) in fields {
         if set(repo, &format!("{base}.{field}"), &value)? {
@@ -198,20 +214,55 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
         }
     }
 
+    let mut fingerprint_mismatch = false;
     let mut missing_anchor = None;
     match anchors::fetch(authority.anchor_url).await {
-        Ok(bytes) => match install_anchor(authority.name, &path, &bytes) {
-            // The fingerprint of the first certificate, the same value
-            // `anchor list` and the lock carry, not of the whole file: a bundle
-            // may append chain certificates and would otherwise get two hashes.
-            Ok(fingerprint) => println!(
-                "anchor {}: {} sha256 {}",
-                authority.name,
-                path.display(),
-                fingerprint
-            ),
-            Err(error) => eprintln!(
-                "rfc3161: warning: the anchor of `{}` from {} is unusable: {error}",
+        Ok(bytes) => match install_anchor(authority, &path, &bytes) {
+            Ok(fingerprint) => {
+                // A pinned root is only worth something when the match is
+                // visible: the reader has to be able to see that the fetch was
+                // checked, not just that a file appeared.
+                if let Some(expected) = authority.fingerprint {
+                    println!("{}: root fingerprint matches {expected}", authority.name);
+                } else {
+                    // Trust on first use: the printed value is the only thing
+                    // that makes the first pin reviewable, so it is said loudly
+                    // and in full.
+                    println!(
+                        "{}: no published root fingerprint (trust on first use); the fetched \
+                         root is {fingerprint} — compare it with the authority's own publication",
+                        authority.name
+                    );
+                }
+                // The fingerprint of the first certificate, the same value
+                // `anchor list` and the lock carry, not of the whole file: a
+                // bundle may append chain certificates and would otherwise get
+                // two hashes.
+                println!(
+                    "anchor {}: {} sha256 {}",
+                    authority.name,
+                    path.display(),
+                    fingerprint
+                );
+            }
+            Err(AnchorProblem::Mismatch { expected, found }) => {
+                fingerprint_mismatch = true;
+                // Loud, and both values spelled out: this is the one case where
+                // the fetched bundle is thrown away although it is well formed.
+                eprintln!(
+                    "rfc3161: warning: the root fetched for `{}` from {} does not match: \
+                     expected {expected}, got {found}; the bundle was not pinned{}",
+                    authority.name,
+                    authority.anchor_url,
+                    if path.exists() {
+                        " and the existing anchor is untouched"
+                    } else {
+                        ""
+                    }
+                );
+            }
+            Err(AnchorProblem::Unusable(reason)) => eprintln!(
+                "rfc3161: warning: the anchor of `{}` from {} is unusable: {reason}",
                 authority.name, authority.anchor_url
             ),
         },
@@ -227,7 +278,21 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
         id: authority.name,
         kept,
         missing_anchor,
+        fingerprint_mismatch,
     })
+}
+
+/// Why a fetched bundle was not pinned.
+enum AnchorProblem {
+    /// It is not a certificate bundle, or could not be written.
+    Unusable(String),
+    /// Its root is not the fingerprint the preset expects.
+    Mismatch {
+        /// The fingerprint the preset pins.
+        expected: String,
+        /// The fingerprint the bundle actually carries.
+        found: String,
+    },
 }
 
 /// Parse `bytes` as `id`'s bundle before it replaces what is pinned at `path`.
@@ -235,11 +300,21 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
 /// The bundle is staged next to the target and moved over it only after
 /// [`AnchorStore::load`] accepted every certificate, so a fetch that returned
 /// prose or a truncated block leaves the previous anchor untouched.
-fn install_anchor(id: &str, path: &Path, bytes: &[u8]) -> Result<String, String> {
+///
+/// When the preset expects a root fingerprint, the first certificate — the one
+/// that would become the anchor — must carry it. A mismatch writes nothing: the
+/// previous pin, if any, survives and the path stays absent otherwise, which is
+/// exactly what `doctor` reports as a missing anchor.
+fn install_anchor(
+    authority: &Authority,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<String, AnchorProblem> {
     let staging = path.with_extension("pem.new");
-    std::fs::write(&staging, bytes)
-        .map_err(|error| format!("cannot write {}: {error}", staging.display()))?;
-    if let Err(error) = AnchorStore::load(&[(id.to_owned(), staging.clone())]) {
+    std::fs::write(&staging, bytes).map_err(|error| {
+        AnchorProblem::Unusable(format!("cannot write {}: {error}", staging.display()))
+    })?;
+    if let Err(error) = AnchorStore::load(&[(authority.name.to_owned(), staging.clone())]) {
         let reason = error.to_string();
         // A previous anchor is never replaced by an unparseable bundle; when
         // there is none, the bad bytes are kept so doctor can name them as
@@ -249,14 +324,27 @@ fn install_anchor(id: &str, path: &Path, bytes: &[u8]) -> Result<String, String>
         } else {
             let _ = std::fs::rename(&staging, path);
         }
-        return Err(reason);
+        return Err(AnchorProblem::Unusable(reason));
     }
-    let fingerprint = crate::cmd::anchor::first_certificate(bytes)
-        .map(|der| anchors::fingerprint(&der))
-        .ok_or_else(|| format!("{} carried no certificate", path.display()))?;
+    let der = crate::cmd::anchor::first_certificate(bytes).ok_or_else(|| {
+        AnchorProblem::Unusable(format!("{} carried no certificate", path.display()))
+    })?;
+    let fingerprint = anchors::fingerprint(&der);
+    if let Some(expected) = authority.fingerprint {
+        let found = git_time_core::trust::fingerprint(&der);
+        if !expected.eq_ignore_ascii_case(&found) {
+            // Nothing is written at all: an expected-but-wrong root must not
+            // become the anchor merely because it parsed.
+            let _ = std::fs::remove_file(&staging);
+            return Err(AnchorProblem::Mismatch {
+                expected: expected.to_owned(),
+                found,
+            });
+        }
+    }
     std::fs::rename(&staging, path).map_err(|error| {
         let _ = std::fs::remove_file(&staging);
-        format!("cannot write {}: {error}", path.display())
+        AnchorProblem::Unusable(format!("cannot write {}: {error}", path.display()))
     })?;
     Ok(fingerprint)
 }
