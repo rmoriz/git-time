@@ -10,11 +10,13 @@
 //! fingerprint that root must have.
 //!
 //! The order is deliberate: the curated default first, then the rest of the
-//! measured roots, then the ones that are trust on first use. FreeTSA publishes
-//! a plain PEM; for every other preset the anchor URL *is* the endpoint, because
-//! no certificate download is served there. The fetch asks the endpoint for a
-//! token and takes the self-signed root of the chain it replies with. None of
-//! those certificate URLs could be measured from here, so none are invented.
+//! measured roots, then the ones that are trust on first use. FreeTSA and DFN
+//! publish a plain PEM; for every other preset the anchor URL *is* the endpoint,
+//! because no certificate download is served there. The fetch asks the endpoint
+//! for a token and takes the self-signed root of the chain it replies with. No
+//! certificate URL is invented: where one is listed it was fetched and its
+//! fingerprint checked against the measured pin. Belgium publishes only DER for
+//! its root, which the anchor reader does not parse, so it keeps the endpoint.
 //!
 //! # Why an expected fingerprint
 //!
@@ -222,7 +224,10 @@ pub const PRESETS: [Preset; 22] = [
     Preset {
         name: "dfn",
         url: "http://zeitstempel.dfn.de",
-        anchor_url: "http://zeitstempel.dfn.de",
+        // DFN's own CA publication (`cacert.pem` next to `cdp1`/`cdp2`), not the
+        // endpoint: the pin comes from the authority's published root rather than
+        // from a token fetched over the same plain-http channel.
+        anchor_url: "http://cdp1.pca.dfn.de/dfn-verein-community-root-ca/pub/cacert/cacert.pem",
         alg: "sha256",
         policy: None,
         fingerprint: Some("58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"),

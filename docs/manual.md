@@ -175,8 +175,11 @@ policy is loaded, all of them share **one** warning line: five ids are named, th
 (`… and 2 more`). The token integrity comes from the signature against the pinned root, not from
 the transport; only the imprint and availability are exposed.
 
-Every preset but `freetsa` is fetched by asking the endpoint for a token and taking the self-signed
-root of the reply; only FreeTSA publishes a plain PEM.
+An anchor URL is fetched with a GET; a body carrying a PEM certificate is the bundle. Everything
+else — a timestamp endpoint answers a GET with prose or with `405`/`403` because it wants a POST —
+falls through to asking the URL for a token and taking the self-signed root of the reply. `freetsa`
+and `dfn` publish a PEM; every other preset keeps its endpoint, and `belgium` must, because it
+publishes its root only as DER.
 
 Each endpoint appears once. An authority that answers on several URLs keeps one row: `cesnet` is
 carried on its TLS port only, and `http://time.certum.pl` is the `certum` row, so no `certum-legacy`

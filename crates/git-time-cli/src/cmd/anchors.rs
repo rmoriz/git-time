@@ -9,10 +9,12 @@
 //!
 //! The fetch is replaceable. `GIT_TIME_ANCHOR_FETCH_CMD` is run through `sh -c`
 //! with `GIT_TIME_ANCHOR_URL` set to the URL, and its stdout is the bundle; tests
-//! use this instead of the network. Without it URL ending in `.pem` is a GET and
-//! anything else is treated as a TSA endpoint: the anchor is then the self-signed
-//! root of a genuine timestamp reply, which is how an authority that publishes no
-//! certificate of its own — `dfn`, say — can name a CA at all.
+//! use this instead of the network. Without it a GET is tried first and its body
+//! is taken when it carries a PEM certificate; otherwise the URL is asked for a
+//! token and the anchor is the self-signed root of a genuine reply. That covers
+//! the two shapes an authority publishes in: a certificate download, and a
+//! timestamp endpoint that answers a GET with prose or with 405/403 — several do
+//! the latter, and taking that for a failure abandoned the working POST.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -59,11 +61,17 @@ pub fn fingerprint(bytes: &[u8]) -> String {
 
 /// Fetch the bundle at `url`.
 ///
+/// A GET is tried first: when it answers 2xx with a PEM certificate, that body is
+/// the bundle and no token is requested. Every other outcome — a non-2xx status,
+/// a body that holds no certificate (a timestamp endpoint answers a GET with
+/// prose), or a transport error — falls through to [`root_from_endpoint`], and if
+/// that fails too the error names both attempts.
+///
 /// # Errors
 ///
-/// The reason the fetch failed: the stub command failed, the HTTP request
-/// failed, the reply carried no certificate, or the endpoint answered a
-/// timestamp reply without a self-signed root.
+/// The reason both attempts failed: the stub command failed, neither the GET nor
+/// the POST produced something, the reply carried no certificate, or the endpoint
+/// answered a timestamp reply without a self-signed root.
 pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     if let Some(command) = std::env::var_os("GIT_TIME_ANCHOR_FETCH_CMD") {
         return run_stub(&command, url);
@@ -73,23 +81,27 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
         .timeout(FETCH_TIMEOUT)
         .build()
         .map_err(|error| format!("cannot build the HTTP client: {error}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| format!("GET {url} failed: {error}"))?;
-    if !response.status().is_success() {
-        return Err(format!("GET {url} answered {}", response.status()));
+    let mut get_error = None;
+    match client.get(url).send().await {
+        Ok(response) if response.status().is_success() => {
+            match response.bytes().await {
+                // A certificate download: a plain `.pem` is the whole bundle.
+                Ok(body) if holds_certificate(&body) => return Ok(body.to_vec()),
+                // Something else that says 200 is still worth a token request: the
+                // endpoint may be serving its own landing page.
+                Ok(_) => {}
+                Err(error) => get_error = Some(format!("reading {url} failed: {error}")),
+            }
+        }
+        Ok(response) => get_error = Some(format!("GET {url} answered {}", response.status())),
+        Err(error) => get_error = Some(format!("GET {url} failed: {error}")),
     }
-    let body = response
-        .bytes()
+    root_from_endpoint(&client, url)
         .await
-        .map_err(|error| format!("reading {url} failed: {error}"))?;
-    if holds_certificate(&body) {
-        return Ok(body.to_vec());
-    }
-    // A TSA endpoint answers a GET with prose; ask it for a token instead.
-    root_from_endpoint(&client, url).await
+        .map_err(|error| match get_error {
+            Some(get_error) => format!("{get_error}; {error}"),
+            None => error,
+        })
 }
 
 /// Run the `GIT_TIME_ANCHOR_FETCH_CMD` stub for `url`.
@@ -370,5 +382,144 @@ mod tests {
             certificate.tbs_certificate.subject, certificate.tbs_certificate.issuer,
             "the first certificate is the self-signed root"
         );
+    }
+
+    /// The granted fixture's bundle, as the GET branch would receive it.
+    fn bundle() -> String {
+        let response =
+            include_bytes!("../../../git-time-core/tests/fixtures/resp_granted_freetsa.tsr");
+        let RawResponse::Granted { token, .. } =
+            parse_response(response).expect("a granted fixture")
+        else {
+            panic!("the fixture is not granted");
+        };
+        String::from_utf8(root_pem(&token).expect("a root")).expect("PEM is text")
+    }
+
+    /// A loopback server that answers the queued `(status, body)` pairs in order
+    /// and hands back the request heads it saw. `Connection: close` forces one
+    /// connection per request, so the pairs line up with the client's attempts.
+    fn serve(answers: Vec<(u16, Vec<u8>)>) -> (String, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::{Read, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for (status, body) in answers {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut head = Vec::new();
+                let mut buffer = [0u8; 512];
+                while !head.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = stream.read(&mut buffer).expect("read");
+                    if read == 0 {
+                        break;
+                    }
+                    head.extend_from_slice(&buffer[..read]);
+                }
+                let text = String::from_utf8_lossy(&head).into_owned();
+                // Drain the request body so the reply does not race a reset.
+                let length = text
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                    })
+                    .unwrap_or(0);
+                let already = head.len().saturating_sub(
+                    head.windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .unwrap_or(0)
+                        + 4,
+                );
+                let mut rest = vec![0u8; length.saturating_sub(already)];
+                if !rest.is_empty() {
+                    stream.read_exact(&mut rest).expect("read body");
+                }
+                seen.push(text);
+                let reply = format!(
+                    "HTTP/1.1 {status} {}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    if status == 200 { "OK" } else { "Nope" },
+                    body.len()
+                );
+                stream.write_all(reply.as_bytes()).expect("write head");
+                stream.write_all(&body).expect("write body");
+            }
+            seen
+        });
+        (format!("http://{address}/"), handle)
+    }
+
+    /// The fetch must not need the stub, and `GIT_TIME_ANCHOR_FETCH_CMD` is read
+    /// from the process, so every test here clears it.
+    fn unset_stub() {
+        unsafe { std::env::remove_var("GIT_TIME_ANCHOR_FETCH_CMD") };
+    }
+
+    fn block_on(
+        future: impl std::future::Future<Output = Result<Vec<u8>, String>>,
+    ) -> Result<Vec<u8>, String> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime")
+            .block_on(future)
+    }
+
+    /// A 405 on the GET is what DFN and the other endpoint-only presets answer;
+    /// it means "not this method", not "no anchor".
+    #[test]
+    fn a_get_that_is_not_a_certificate_falls_back_to_the_token() {
+        unset_stub();
+        let fixture =
+            include_bytes!("../../../git-time-core/tests/fixtures/resp_granted_freetsa.tsr");
+        let (url, server) = serve(vec![
+            (405, b"Method Not Allowed".to_vec()),
+            (200, fixture.to_vec()),
+        ]);
+
+        let pem = String::from_utf8(block_on(fetch(&url)).expect("the token's root"))
+            .expect("PEM is text");
+        assert!(pem.starts_with("-----BEGIN CERTIFICATE-----"), "{pem}");
+
+        let requests = server.join().expect("server");
+        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert!(requests[0].starts_with("GET "), "{}", requests[0]);
+        assert!(requests[1].starts_with("POST "), "{}", requests[1]);
+        assert!(
+            requests[1]
+                .to_ascii_lowercase()
+                .contains("content-type: application/timestamp-query"),
+            "{}",
+            requests[1]
+        );
+    }
+
+    /// A certificate answer is the bundle itself: no token request follows.
+    #[test]
+    fn a_certificate_answer_is_used_without_a_token_request() {
+        unset_stub();
+        let pem = bundle();
+        let (url, server) = serve(vec![(200, pem.clone().into_bytes())]);
+
+        assert_eq!(
+            String::from_utf8(block_on(fetch(&url)).expect("the bundle")).expect("PEM is text"),
+            pem
+        );
+        assert_eq!(server.join().expect("server").len(), 1, "one request only");
+    }
+
+    /// When both attempts fail, the reader has to see both, or a 403 that merely
+    /// means "wrong method" reads like a dead authority.
+    #[test]
+    fn both_failed_attempts_are_named() {
+        unset_stub();
+        let (url, server) = serve(vec![(403, Vec::new()), (500, Vec::new())]);
+
+        let error = block_on(fetch(&url)).expect_err("both fail");
+        assert!(error.contains("GET") && error.contains("403"), "{error}");
+        assert!(error.contains("POST") && error.contains("500"), "{error}");
+        server.join().expect("server");
     }
 }
