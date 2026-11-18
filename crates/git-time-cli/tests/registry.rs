@@ -349,7 +349,9 @@ impl Repo {
         git(self.path(), &["config", "user.email", "t@example.com"]);
         git(self.path(), &["config", "commit.gpgsign", "false"]);
         git(self.path(), &["config", "tag.gpgsign", "false"]);
-        git(self.path(), &["config", "time.deadline", "5s"]);
+        // Generous: the suite runs dozens of repositories at once and a 5s
+        // budget has expired under CI load. See hook_flows.rs.
+        git(self.path(), &["config", "time.deadline", "30s"]);
 
         let hooks = self.path().join(".git/hooks");
         std::fs::create_dir_all(&hooks).expect("hooks dir");

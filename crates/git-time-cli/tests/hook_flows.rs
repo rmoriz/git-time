@@ -411,8 +411,12 @@ impl Repo {
         git(&path, &["config", "commit.gpgsign", "false"]);
         git(&path, &["config", "tag.gpgsign", "false"]);
         git(&path, &["config", "gpg.program", "gpg"]);
-        git(&path, &["config", "time.deadline", "5s"]);
-        git(&path, &["config", "time.tsa.stub.timeout", "5s"]);
+        // Generous on purpose: the suite runs dozens of these repositories at
+        // once, and a five-second seal budget expires under CI load — on the
+        // same commit the same test spent 4.1s of it on Ubuntu and ran out on
+        // macOS, which reads as "under quorum (0 of 1)" instead of "by 1/1".
+        git(&path, &["config", "time.deadline", "30s"]);
+        git(&path, &["config", "time.tsa.stub.timeout", "30s"]);
         // The hook is what the whole task is about. Two hooks are needed: a
         // merge never runs `post-commit`, so `post-merge` is not optional.
         for (name, event) in [("post-commit", "post-commit"), ("post-merge", "post-merge")] {

@@ -391,8 +391,10 @@ impl Repo {
         git(&path, &["config", "commit.gpgsign", "false"]);
         git(&path, &["config", "tag.gpgsign", "false"]);
         git(&path, &["config", "gpg.program", "gpg"]);
-        git(&path, &["config", "time.deadline", "5s"]);
-        git(&path, &["config", "time.tsa.stub.timeout", "5s"]);
+        // Generous: the suite runs dozens of repositories at once and a 5s
+        // budget has expired under CI load. See hook_flows.rs.
+        git(&path, &["config", "time.deadline", "30s"]);
+        git(&path, &["config", "time.tsa.stub.timeout", "30s"]);
         self.wire("post-commit", "post-commit");
     }
 
