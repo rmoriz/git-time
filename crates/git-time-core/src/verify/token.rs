@@ -610,7 +610,10 @@ fn verify_chain(authority: &TsaAuthority, gen_time: Timestamp) -> Result<(), Inv
             None,
         )
         .map(|_| ())
-        .map_err(|_| Invalid::Untrusted)
+        .map_err(|error| {
+            eprintln!("DBG webpki: {error:?}");
+            Invalid::Untrusted
+        })
 }
 
 /// Parse the outer `ContentInfo` and its `SignedData`.

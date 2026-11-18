@@ -117,21 +117,27 @@ It skips when the network is gone and removes its repository and fetched anchors
 
 ### Why the macOS fixtures name their algorithms
 
-The suite is the same everywhere, but macOS `/usr/bin/openssl` is LibreSSL 3.3.6 and its defaults are
-not what `webpki` verifies. Three defects surfaced only there, all in fixture code:
+The suite is the same everywhere, but the `openssl` a run meets is not: macOS `/usr/bin/openssl` is
+LibreSSL 3.3.6, and the CI image puts Homebrew `openssl@1.1` (1.1.1w) ahead of it. Their defaults are
+outside what `webpki` verifies, and every symptom below started as a red macOS leg with no clue in
+the log — hence the fixture rules and the `openssl version -a` line a failed seal now prints:
 
-| LibreSSL default | Symptom | Fixture now |
+| Old-`openssl` default | Symptom | Fixture now |
 |---|---|---|
 | `x509 -req` / `req -x509` sign SHA-1 | `reason=invalid-untrusted`: `webpki` has no SHA-1 verification algorithm at all | `-sha256` on every certificate |
 | `req -newkey ec` writes `SpecifiedECDomain` instead of a named curve | `reason=invalid-malformed`: no curve OID to map to a key type | `-pkeyopt ec_param_enc:named_curve` |
 | `-CAcreateserial` writes a bare `.srl` into `$TMPDIR`, not next to the CA | parallel fixtures read each other's half-written serial | a per-CA serial file with `-CAserial` |
+| 1.1.1 adds `basicConstraints CA:TRUE` to `req -x509` by itself, so `-addext basicConstraints` duplicates it | `ExtensionValueInvalid` from `webpki`, which refuses duplicate extensions | CA extensions from a `-config` section |
 
-Reproduce any of them locally by putting `/usr/bin` first: `PATH=/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin:/opt/homebrew/bin`
-(keep `~/.cargo/bin` before `/opt/homebrew/bin`, or the Homebrew `rustc` shadows the toolchain). The
-verifier also learned both shapes, because a TSA may emit them: SHA-1 signer infos are verified by a
-pre-hash fallback (`ring` has no SHA-1), and an explicit-parameter leaf is tried against both
-supported curves. A *chain* whose own signatures are SHA-1, or whose CA states explicit parameters,
-still fails in `webpki` (see the known gaps).
+Three `openssl`s are worth testing against, because each broke something the others did not:
+`/usr/bin` first (LibreSSL), `/opt/homebrew/opt/openssl@1.1/bin` first (1.1.1, what CI sees) and the
+Homebrew default (4.x). Keep `~/.cargo/bin` before `/opt/homebrew/bin` in a probe `PATH`, or the
+Homebrew `rustc` shadows the pinned toolchain and the cross target loses `core`.
+
+The verifier itself also learned the two token shapes, because a TSA may emit them: SHA-1 signer
+infos are verified through a pre-hash fallback (`ring` has no SHA-1), and an explicit-parameter leaf
+is tried against both supported curves. A *chain* whose own signatures are SHA-1, or whose CA states
+explicit parameters, still fails in `webpki` (see the known gaps).
 
 ## Deviations from the design, and why
 

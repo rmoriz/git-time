@@ -9,11 +9,12 @@
 //! throwaway CA made for the test — no fixture is trusted that was not issued
 //! for the run.
 //!
-//! The certificates are built for LibreSSL as well as OpenSSL: `-sha256` and a
-//! named curve, because LibreSSL's defaults (SHA-1 signatures, explicit EC
-//! parameters) are outside what `webpki` verifies, and a per-CA serial file
-//! because `-CAcreateserial` writes into the shared temp directory and races
-//! between parallel fixtures.
+//! The certificates are built for the older `openssl` a run may meet (LibreSSL,
+//! OpenSSL 1.1.1) as well as a current one: `-sha256` and a named curve, because
+//! their defaults (SHA-1 signatures, explicit EC parameters) are outside what
+//! `webpki` verifies, a per-CA serial file because `-CAcreateserial` writes into
+//! the shared temp directory and races between parallel fixtures, and a config
+//! section for the CA extensions because 1.1.1 adds `basicConstraints` itself.
 //!
 //! The repository is hermetic: `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM` and
 //! `GNUPGHOME` point into temporary directories and `GIT_DIR`/`GIT_WORK_TREE`/
@@ -242,10 +243,10 @@ impl Authority {
             "2",
             "-subj",
             "/CN=hook-flow-ca",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
+            "-config",
+            &ca_config(path),
+            "-extensions",
+            "v3_ca",
         ]);
         openssl(&[
             "req",
@@ -370,6 +371,23 @@ fn pstr(path: &Path) -> String {
 fn serial(ca: &Path) -> String {
     let path = ca.with_extension("srl");
     std::fs::write(&path, "01\n").expect("write serial");
+    pstr(&path)
+}
+
+/// A config file carrying the CA extensions for `openssl req -x509`.
+///
+/// `-addext basicConstraints` duplicates the extension OpenSSL 1.1.1 adds by
+/// itself for `-x509`, and `webpki` rejects a duplicated extension; a config
+/// section is written exactly once by every version.
+fn ca_config(dir: &Path) -> String {
+    let path = dir.join("ca.cnf");
+    std::fs::write(
+        &path,
+        "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\ncommonName=Common Name\n\
+         [v3_ca]\nbasicConstraints=critical,CA:TRUE\n\
+         keyUsage=critical,keyCertSign,cRLSign\n",
+    )
+    .expect("write CA config");
     pstr(&path)
 }
 

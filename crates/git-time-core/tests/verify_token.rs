@@ -5,11 +5,12 @@
 //! same bytes are `Untrusted`.
 //!
 //! The throwaway tokens are minted with the platform `openssl`, which may be
-//! LibreSSL: certificates there are built with `-sha256` and a named curve (its
-//! SHA-1 and explicit-parameter defaults are outside what `webpki` verifies) and
-//! the CA serial lives in its own file (`-CAcreateserial` races in the shared
-//! temp directory), while the tests for SHA-1 and explicit parameters ask for
-//! those shapes on purpose.
+//! LibreSSL or OpenSSL 1.1.1: certificates are built with `-sha256` and a named
+//! curve (their SHA-1 and explicit-parameter defaults are outside what `webpki`
+//! verifies), the CA serial lives in its own file (`-CAcreateserial` races in the
+//! shared temp directory) and CA extensions come from a config section (1.1.1
+//! refuses `-addext basicConstraints`, which it adds itself), while the tests
+//! for SHA-1 and explicit parameters ask for those shapes on purpose.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -98,13 +99,32 @@ fn anchors(dir: &Path) -> AnchorStore {
     AnchorStore::load(&[(ID.to_owned(), path)]).expect("fixture root loads")
 }
 
+/// A config file carrying the CA extensions.
+///
+/// `-addext basicConstraints` duplicates the extension OpenSSL 1.1.1 adds by
+/// itself for `-x509`, and `webpki` refuses a duplicated extension; a config
+/// section is written exactly once by every version.
+fn ca_config(dir: &Path) -> PathBuf {
+    let path = dir.join("ca.cnf");
+    std::fs::write(
+        &path,
+        "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\ncommonName=Common Name\n\
+         [v3_ca]\nbasicConstraints=critical,CA:TRUE\n\
+         keyUsage=critical,keyCertSign,cRLSign\n",
+    )
+    .expect("write CA config");
+    path
+}
+
 /// Generate a throwaway self-signed CA and return its certificate path.
 fn throwaway_root(dir: &Path) -> PathBuf {
     let key = dir.join("throwaway-key.pem");
     let cert = dir.join("throwaway-ca.pem");
+    let config = ca_config(dir);
     let status = Command::new("openssl")
         .arg("req")
         .arg("-x509")
+        .arg("-sha256")
         .arg("-newkey")
         .arg("rsa:2048")
         .arg("-nodes")
@@ -116,8 +136,9 @@ fn throwaway_root(dir: &Path) -> PathBuf {
         .arg("2")
         .arg("-subj")
         .arg("/CN=throwaway-ca")
-        .arg("-addext")
-        .arg("basicConstraints=critical,CA:TRUE")
+        .arg("-config")
+        .arg(&config)
+        .args(["-extensions", "v3_ca"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -604,6 +625,7 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
     let leaf_csr = dir.join("tsa-leaf.csr");
     let leaf_pem = dir.join("tsa-leaf.pem");
     let leaf_ext = dir.join("tsa-leaf.ext");
+    let config = ca_config(dir);
 
     let openssl = |args: &[&std::ffi::OsStr]| {
         let status = Command::new("openssl")
@@ -634,10 +656,10 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
         "2".as_ref(),
         "-subj".as_ref(),
         "/CN=throwaway-tsa-ca".as_ref(),
-        "-addext".as_ref(),
-        "basicConstraints=critical,CA:TRUE".as_ref(),
-        "-addext".as_ref(),
-        "keyUsage=critical,keyCertSign,cRLSign".as_ref(),
+        "-config".as_ref(),
+        config.as_os_str(),
+        "-extensions".as_ref(),
+        "v3_ca".as_ref(),
     ]);
     openssl(&[
         "req".as_ref(),

@@ -83,6 +83,23 @@ fn serial(ca: &Path) -> String {
     pstr(&path)
 }
 
+/// A config file carrying the CA extensions for `openssl req -x509`.
+///
+/// `-addext basicConstraints` duplicates the extension OpenSSL 1.1.1 adds by
+/// itself for `-x509`, and `webpki` rejects a duplicated extension; a config
+/// section is written exactly once by every version.
+fn ca_config(dir: &Path) -> String {
+    let path = dir.join("ca.cnf");
+    std::fs::write(
+        &path,
+        "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\ncommonName=Common Name\n\
+         [v3_ca]\nbasicConstraints=critical,CA:TRUE\n\
+         keyUsage=critical,keyCertSign,cRLSign\n",
+    )
+    .expect("write CA config");
+    pstr(&path)
+}
+
 /// The captured FreeTSA root, the one published fingerprint a test can match.
 fn freetsa_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../git-time-core/tests/fixtures/freetsa_root.pem")
@@ -157,10 +174,10 @@ impl Authority {
             "2",
             "-subj",
             "/CN=registry-ca",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
+            "-config",
+            &ca_config(path),
+            "-extensions",
+            "v3_ca",
         ]);
         openssl(&[
             "req",
