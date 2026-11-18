@@ -18,6 +18,11 @@ $ git time verify                             # judges the evidence, gates CI
 `cargo install` without `--path` needs the crates published, which they are not yet; use the
 `--path` form above, or build and put `target/release/git-time` on `PATH`.
 
+Prebuilt binaries for `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`,
+`aarch64-apple-darwin` and `x86_64-apple-darwin` are attached to every release, and every CI run
+on `main` uploads the same four tarballs as workflow artifacts (with `SHA256SUMS` on the release).
+The Linux builds are static; the macOS builds use the system libraries.
+
 ## A real transcript
 
 Sealing on an ordinary commit:

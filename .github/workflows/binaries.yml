@@ -1,0 +1,109 @@
+name: Binaries
+
+# Reusable: builds the four shipped binaries. Called by CI on every push and by
+# Release on a tag, so a release can never fail on a target that CI never built.
+
+on:
+  workflow_call:
+    inputs:
+      retention-days:
+        description: How long the workflow artifacts are kept.
+        type: number
+        default: 14
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            native: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+            native: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+            native: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+            native: false
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the pinned toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.99.0
+          targets: ${{ matrix.target }}
+
+      - name: Cache the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target "${{ matrix.target }}" -p git-time-cli
+          else
+            cargo build --release --locked --target "${{ matrix.target }}" -p git-time-cli
+          fi
+
+      - name: Package
+        run: |
+          set -eu
+          name="git-time-${{ matrix.target }}"
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/git-time" "$name/"
+          cp README.md LICENSE "$name/"
+          printf '%s\n' "$version" > "$name/VERSION"
+          tar -czf "$name.tar.gz" "$name"
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          else
+            shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          fi
+          tar -tzf "$name.tar.gz" | sort
+
+      - name: Smoke test the binary
+        if: matrix.native
+        run: |
+          set -eu
+          name="git-time-${{ matrix.target }}"
+          "./$name/git-time" --version
+          "./$name/git-time" --help >/dev/null
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-time-${{ matrix.target }}
+          path: |
+            git-time-${{ matrix.target }}.tar.gz
+            git-time-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: ${{ inputs.retention-days }}

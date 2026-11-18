@@ -13,14 +13,14 @@ env:
 
 jobs:
   test:
-    name: ${{ matrix.os }}
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
@@ -49,3 +49,10 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+  binaries:
+    name: binaries
+    needs: test
+    uses: ./.github/workflows/binaries.yml
+    with:
+      retention-days: 14
