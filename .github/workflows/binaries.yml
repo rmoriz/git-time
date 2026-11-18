@@ -4,11 +4,12 @@ name: Binaries
 # Release on a tag, so a release can never fail on a target that CI never built.
 #
 # One job per operating system, with both of its targets built one after the
-# other inside that job: two runners in flight instead of four. A tag push
-# starts CI and Release simultaneously, and four parallel jobs — two of them
-# macOS — overran the macOS runner slots, so a job sat queued until something
-# cancelled it before a single step had run.
-
+# other inside that job. The macOS job is the account's *only* macOS job per run
+# on purpose: about two concurrent macOS runners exist behind a fifteen-minute
+# queue wall, and a cancelled queued job fails the run. CI therefore has no
+# macOS test job of its own — it asks the macOS job here to run the suite first
+# (`test: true`), so tests and the darwin build share one runner instead of
+# competing for two.
 on:
   workflow_call:
     inputs:
@@ -16,6 +17,10 @@ on:
         description: How long the workflow artifacts are kept.
         type: number
         default: 14
+      test:
+        description: Run fmt, clippy and the suite in the macOS job before building.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -86,6 +91,7 @@ jobs:
         with:
           toolchain: 1.99.0
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+          components: rustfmt, clippy
 
       - name: Cache the cargo registry
         uses: actions/cache@v4
@@ -96,6 +102,13 @@ jobs:
           key: ${{ runner.os }}-darwin-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-darwin-
+
+      - name: Suite
+        if: inputs.test
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
 
       - name: Build and package
         run: |

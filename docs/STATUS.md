@@ -94,13 +94,13 @@ line at seal time.
 ## Adoption (Task 15)
 
 `README.md` is the front door, `docs/manual.md` the operator manual. `.github/workflows/ci.yml`
-runs fmt, clippy and the suite on Ubuntu and macOS; `.github/workflows/release.yml` builds the two
-musl and two darwin targets on a `v*` tag, with `SHA256SUMS`. Each workflow builds both targets of
-an OS in one job, and a tag push occupies one macOS runner rather than three: the account serves
-about two concurrent macOS jobs and cancels one that waits more than fifteen minutes, so a tag
-pushed at the same moment as `main` starved its own macOS job twice and published nothing. The
-release workflow refuses to publish unless the same suite is green, and musl targets build in
-separate target dirs so no host-built build script crosses a container boundary. `tests/live_tsa.rs` is the ignored
+runs fmt, clippy and the suite on Ubuntu, and `.github/workflows/binaries.yml` builds all four
+targets in two jobs (one per OS) — the macOS job running the same suite before it builds, so a run
+needs a single macOS runner. That is deliberate: the account serves about two concurrent macOS
+runners and cancels a job that queues for more than fifteen minutes, which fails the run. A job so
+cancelled twice is what kept `v0.1.0` from publishing. `.github/workflows/release.yml` builds the
+tag, refuses to publish unless the suite is green, and attaches `SHA256SUMS`. The musl targets
+build in separate target dirs, so no host-built build script crosses a container boundary. `tests/live_tsa.rs` is the ignored
 smoke test against the public authorities:
 
 ```console
