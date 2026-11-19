@@ -488,7 +488,7 @@ async fn certificates_at(client: &reqwest::Client, url: &str) -> Result<Vec<Cert
 
 /// The certificates in `bytes`: a single DER certificate, a PKCS#7 collection,
 /// or any number of PEM blocks.
-fn parse_certificates(bytes: &[u8]) -> Vec<Certificate> {
+pub(crate) fn parse_certificates(bytes: &[u8]) -> Vec<Certificate> {
     if let Ok(certificate) = Certificate::from_der(bytes) {
         return vec![certificate];
     }

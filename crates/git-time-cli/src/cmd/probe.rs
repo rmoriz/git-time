@@ -12,6 +12,9 @@
 use std::fs;
 use std::path::PathBuf;
 
+use der::Encode as _;
+use git_time_core::presets::Preset;
+
 /// How long a probed answer is shown: one week.
 pub const TTL: i64 = 7 * 86_400;
 
@@ -76,11 +79,87 @@ pub fn forget(id: &str) -> bool {
     fs::remove_file(dir().join(id)).is_ok()
 }
 
+/// What a probe reply justifies showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Served {
+    /// A root the preset publishes, with the date and fingerprint to cache.
+    Known(Cached),
+    /// Certificates were parsed, but none of them is a root the preset
+    /// publishes — the authority serves a leaf first, or the bundle holds only
+    /// the path, or nothing at all.
+    Unpublished,
+    /// The reply carried no certificate, or its date is not a date.
+    Failed,
+}
+
+/// What `bundle` says about `preset` at `now`: the newest still-live published
+/// root in it, else the newest published root in it, else why neither exists.
+///
+/// Every certificate is checked against every value the preset publishes, and a
+/// match on any of them is the whole check: a leaf can never carry a root's
+/// fingerprint, so a match alone means this certificate is a root worth trusting
+/// a date from. Doing this is what lets a prose answer or a leaf-first reply be
+/// reported instead of printed.
+///
+/// A matched date that does not parse as `YYYY-MM-DD` is [`Served::Failed`]:
+/// nothing sensible can be shown for it.
+#[must_use]
+pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Served {
+    let certificates = super::anchors::parse_certificates(bundle);
+    if certificates.is_empty() {
+        return Served::Failed;
+    }
+
+    let mut matched: Vec<Cached> = Vec::new();
+    for certificate in certificates {
+        let Ok(der) = certificate.to_der() else {
+            continue;
+        };
+        if super::install::fingerprint_matches(preset.fingerprints, &der).is_none() {
+            continue;
+        }
+        matched.push(Cached {
+            not_after: super::anchors::not_after(&certificate),
+            fingerprint: super::anchors::fingerprint(&der),
+        });
+    }
+
+    // The greatest date that is still live, else the greatest date at all; the
+    // dates sort as strings because they are `YYYY-MM-DD`.
+    let chosen = matched
+        .iter()
+        .filter(|served| !super::anchors::expired(&served.not_after, now))
+        .max_by(|left, right| left.not_after.cmp(&right.not_after))
+        .or_else(|| {
+            matched
+                .iter()
+                .max_by(|left, right| left.not_after.cmp(&right.not_after))
+        });
+    let Some(chosen) = chosen else {
+        return Served::Unpublished;
+    };
+    if chosen.not_after.parse::<jiff::civil::Date>().is_err() {
+        return Served::Failed;
+    }
+    Served::Known(chosen.clone())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use std::path::Path;
+    use std::process::{Command, Stdio};
+
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use git_time_core::presets::{self, Preset};
 
     use super::{Cached, TTL, cached, forget, store};
+
+    /// The captured FreeTSA root: the one published fingerprint a test can match.
+    const FREETSA_ROOT: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../git-time-core/tests/fixtures/freetsa_root.pem"
+    );
 
     /// A process-wide temporary `XDG_CONFIG_HOME`.
     ///
@@ -188,5 +267,167 @@ pub(crate) mod tests {
         let mut permissions = std::fs::metadata(&root).expect("metadata").permissions();
         permissions.set_readonly(false);
         std::fs::set_permissions(&root, permissions).expect("chmod");
+    }
+
+    /// Run `openssl` with `args`, or panic with its stderr.
+    fn openssl(args: &[&std::ffi::OsStr]) {
+        let output = Command::new("openssl")
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("openssl is available");
+        assert!(
+            output.status.success(),
+            "openssl {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn os(value: &Path) -> &std::ffi::OsStr {
+        value.as_os_str()
+    }
+
+    /// A config file carrying the CA extensions for `openssl req -x509`, once.
+    fn ca_config(dir: &Path) -> std::path::PathBuf {
+        let path = dir.join("ca.cnf");
+        std::fs::write(
+            &path,
+            "[req]\ndistinguished_name=dn\nprompt=no\n[dn]\ncommonName=Common Name\n\
+             [v3_ca]\nbasicConstraints=critical,CA:TRUE\n\
+             keyUsage=critical,keyCertSign,cRLSign\n",
+        )
+        .expect("write CA config");
+        path
+    }
+
+    /// A self-signed CA whose validity window closed in 2020, as PEM.
+    fn stale_ca(dir: &Path) -> std::path::PathBuf {
+        let key = dir.join("stale-key.pem");
+        let ca = dir.join("stale-ca.pem");
+        openssl(&[
+            "req".as_ref(),
+            "-x509".as_ref(),
+            "-sha256".as_ref(),
+            "-newkey".as_ref(),
+            "ec".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_paramgen_curve:P-256".as_ref(),
+            "-pkeyopt".as_ref(),
+            "ec_param_enc:named_curve".as_ref(),
+            "-nodes".as_ref(),
+            "-keyout".as_ref(),
+            os(&key),
+            "-out".as_ref(),
+            os(&ca),
+            "-not_before".as_ref(),
+            "20200101000000Z".as_ref(),
+            "-not_after".as_ref(),
+            "20200201000000Z".as_ref(),
+            "-subj".as_ref(),
+            "/CN=stale-ca".as_ref(),
+            "-config".as_ref(),
+            os(&ca_config(dir)),
+            "-extensions".as_ref(),
+            "v3_ca".as_ref(),
+        ]);
+        ca
+    }
+
+    /// The DER of the first PEM certificate in `pem`.
+    fn first_der(pem: &str) -> Vec<u8> {
+        let body = pem
+            .split_once("-----\n")
+            .and_then(|(_, rest)| rest.split_once("\n-----END"))
+            .map(|(body, _)| body.replace('\n', ""))
+            .expect("a PEM certificate block");
+        BASE64.decode(body).expect("base64")
+    }
+
+    /// The FreeTSA root's DER.
+    fn freetsa_der() -> Vec<u8> {
+        first_der(&std::fs::read_to_string(FREETSA_ROOT).expect("fixture"))
+    }
+
+    /// The SHA-256 fingerprint of `bytes`' first certificate in the preset
+    /// spelling: uppercase, colon separated. `bytes` may be PEM or DER; a preset
+    /// publishes the digest of the DER.
+    fn colon(bytes: &[u8]) -> String {
+        match std::str::from_utf8(bytes) {
+            Ok(text) if text.contains("-----BEGIN CERTIFICATE-----") => {
+                git_time_core::trust::fingerprint(&first_der(text))
+            }
+            _ => git_time_core::trust::fingerprint(bytes),
+        }
+    }
+
+    #[test]
+    fn a_published_root_yields_its_date() {
+        let preset = presets::find("freetsa").expect("preset");
+        let bundle = std::fs::read(FREETSA_ROOT).expect("fixture");
+        match super::probed_from(preset, &bundle, at(1_000)) {
+            super::Served::Known(cached) => {
+                assert!(cached.not_after.starts_with("20"), "{}", cached.not_after);
+                assert!(!cached.fingerprint.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_root_nothing_published_is_unpublished() {
+        // The FreeTSA root is not a value the APED preset publishes.
+        let preset = presets::find("aped").expect("preset");
+        let other = std::fs::read(FREETSA_ROOT).expect("fixture");
+        assert!(matches!(
+            super::probed_from(preset, &other, at(1_000)),
+            super::Served::Unpublished
+        ));
+    }
+
+    #[test]
+    fn prose_is_failed() {
+        let preset = presets::find("freetsa").expect("preset");
+        assert!(matches!(
+            super::probed_from(preset, b"<html>204 OK</html>", at(1_000)),
+            super::Served::Failed
+        ));
+    }
+
+    #[test]
+    fn the_newest_live_matching_root_wins() {
+        // Two matching roots, one expired in 2020: the live one's date is the one
+        // shown. Both are PEM, so the concatenation also exercises the parser's
+        // PEM scanner across two blocks.
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let stale = std::fs::read(stale_ca(dir.path())).expect("fixture");
+        let live = std::fs::read(FREETSA_ROOT).expect("fixture");
+        let mut bundle = stale.clone();
+        bundle.extend(&live);
+        assert_eq!(
+            crate::cmd::anchors::parse_certificates(&bundle).len(),
+            2,
+            "both roots are readable from the bundle"
+        );
+        let (stale_fp, live_fp) = (colon(&stale), colon(&freetsa_der()));
+        let stale_fp: &'static str = Box::leak(stale_fp.into_boxed_str());
+        let live_fp: &'static str = Box::leak(live_fp.into_boxed_str());
+        let published: &'static [&'static str] =
+            Box::leak(vec![stale_fp, live_fp].into_boxed_slice());
+        let preset = Preset {
+            name: "both",
+            url: "",
+            anchor_url: "",
+            chain: &[],
+            alg: "sha256",
+            policy: None,
+            fingerprints: published,
+            insecure_http: false,
+            curated: false,
+        };
+        match super::probed_from(&preset, &bundle, at(1_000)) {
+            super::Served::Known(cached) => assert_ne!(cached.not_after, "2020-02-01"),
+            other => panic!("{other:?}"),
+        }
     }
 }
