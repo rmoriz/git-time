@@ -155,7 +155,7 @@ fn genuine_token_with_pinned_root_is_valid() {
     let anchors = anchors(dir.path());
 
     assert_eq!(
-        verify::token(&record(), &imprint(), wide_range(), &anchors),
+        verify::token(&record(), &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Valid {
             gen_time: gen_time(),
             tsa: "www.freetsa.org".to_owned(),
@@ -182,9 +182,9 @@ fn a_sha1_signed_token_is_valid() {
     };
 
     assert!(
-        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]).is_valid(),
         "a SHA-1 signature is legal: {:?}",
-        verify::token(&record, &imprint(), wide_range(), &anchors)
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[])
     );
 }
 
@@ -206,9 +206,9 @@ fn an_explicit_parameter_curve_is_valid() {
     };
 
     assert!(
-        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]).is_valid(),
         "explicit parameters are legal: {:?}",
-        verify::token(&record, &imprint(), wide_range(), &anchors)
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[])
     );
 }
 
@@ -228,6 +228,7 @@ fn altered_pre_image_is_an_imprint_failure() {
             },
             wide_range(),
             &anchors,
+            &[],
         ),
         TokenVerdict::Invalid(Invalid::Imprint)
     );
@@ -241,7 +242,7 @@ fn wrong_nonce_is_a_nonce_failure() {
     record.nonce[7] ^= 0x01;
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Nonce)
     );
 }
@@ -251,7 +252,7 @@ fn no_anchor_is_untrusted() {
     let anchors = AnchorStore::load(&[]).expect("an empty store loads");
 
     assert_eq!(
-        verify::token(&record(), &imprint(), wide_range(), &anchors),
+        verify::token(&record(), &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Untrusted)
     );
 }
@@ -262,9 +263,12 @@ fn different_root_is_untrusted() {
     let path = throwaway_root(dir.path());
     let anchors = AnchorStore::load(&[(ID.to_owned(), path)]).expect("throwaway root loads");
 
+    // The throwaway root is minted now, after the fixture's 2026-11-18
+    // genTime, so it is not even a candidate; a root in the window that does
+    // not chain is `Untrusted` (see `token_cannot_supply_its_own_anchor`).
     assert_eq!(
-        verify::token(&record(), &imprint(), wide_range(), &anchors),
-        TokenVerdict::Invalid(Invalid::Untrusted)
+        verify::token(&record(), &imprint(), wide_range(), &anchors, &[]),
+        TokenVerdict::Invalid(Invalid::NoRootAtGenTime)
     );
 }
 
@@ -275,7 +279,7 @@ fn gen_time_outside_the_range_is_cert_not_valid_at_gen_time() {
     let start = Timestamp::from_second(gen_time().as_second() + 1).expect("in range");
 
     assert_eq!(
-        verify::token(&record(), &imprint(), start..Timestamp::MAX, &anchors),
+        verify::token(&record(), &imprint(), start..Timestamp::MAX, &anchors, &[]),
         TokenVerdict::Invalid(Invalid::CertNotValidAtGenTime)
     );
 }
@@ -288,7 +292,7 @@ fn policy_mismatch_is_a_policy_failure() {
     record.policy = Some("1.2.3".to_owned());
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Policy)
     );
 }
@@ -301,7 +305,7 @@ fn absent_recorded_policy_still_verifies() {
     record.policy = None;
 
     assert!(matches!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Valid { .. }
     ));
 }
@@ -529,7 +533,7 @@ fn altered_tst_info_imprint_is_malformed() {
     // The signature still covers the untouched signed attributes, so only the
     // messageDigest binding can notice that the TSTInfo moved.
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Malformed)
     );
 }
@@ -556,7 +560,7 @@ fn shifted_gen_time_is_malformed() {
     });
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Malformed)
     );
 }
@@ -584,7 +588,7 @@ fn removed_message_digest_attribute_is_malformed() {
     assert_eq!(after.len() + 1, before.len());
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Malformed)
     );
 }
@@ -617,7 +621,7 @@ fn misnamed_content_type_attribute_is_malformed() {
     });
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Malformed)
     );
 }
@@ -630,9 +634,61 @@ fn record_algorithm_disagreeing_with_imprint_is_an_imprint_failure() {
     record.alg = Alg::Sha512;
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Imprint)
     );
+}
+
+#[test]
+fn a_token_signed_before_the_pinned_root_was_valid_is_refused() {
+    let dir = scratch();
+    // 2050: long after the two-day throwaway CA has expired.
+    let (token, ca_pem) = throwaway_tsa_token_stamped_at(dir.path(), "20500101000000Z");
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+    let named = Vec::new();
+    assert_eq!(
+        verify::token(&record, &imprint(), wide_range(), &anchors, &named),
+        TokenVerdict::Invalid(Invalid::NoRootAtGenTime)
+    );
+}
+
+#[test]
+fn a_named_root_that_is_not_pinned_is_its_own_reason() {
+    let dir = scratch();
+    let anchors = anchors(dir.path());
+    let named = vec!["00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33".to_owned()];
+    assert_eq!(
+        verify::token(&record(), &imprint(), wide_range(), &anchors, &named),
+        TokenVerdict::Invalid(Invalid::AnchorNotPinned)
+    );
+}
+
+#[test]
+fn a_named_root_that_matches_still_verifies() {
+    let dir = scratch();
+    let (token, ca_pem) =
+        throwaway_tsa_token_signed_with(dir.path(), "critical,timeStamping", "sha256");
+    let der = sigstore_types::DerCertificate::from_pem(
+        &std::fs::read_to_string(&ca_pem).expect("read CA"),
+    )
+    .expect("CA is PEM");
+    let named = vec![git_time_core::trust::fingerprint(der.as_bytes())];
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+    assert!(verify::token(&record, &imprint(), wide_range(), &anchors, &named).is_valid());
 }
 
 /// Mint a throwaway TSA (self-signed P-256 CA plus a P-256 leaf whose extended
@@ -653,7 +709,23 @@ fn throwaway_tsa_token_signed_with(dir: &Path, eku: &str, digest: &str) -> (Vec<
 /// The same, with the key's curve written as `enc` (`named_curve` or the
 /// `explicit` domain parameters LibreSSL writes by default).
 fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (Vec<u8>, PathBuf) {
-    throwaway_tsa_token_under(dir, eku, digest, enc, false)
+    throwaway_tsa_token_under(dir, eku, digest, enc, None, false)
+}
+
+/// The same, with the TSTInfo genTime written as `stamp` (`YYYYMMDDhhmmssZ`)
+/// instead of now.
+///
+/// The CA is minted with two days of validity, so a date far outside that
+/// window exercises the root's own validity rather than the signer's.
+fn throwaway_tsa_token_stamped_at(dir: &Path, stamp: &str) -> (Vec<u8>, PathBuf) {
+    throwaway_tsa_token_under(
+        dir,
+        "critical,timeStamping",
+        "sha256",
+        "named_curve",
+        Some(stamp),
+        false,
+    )
 }
 
 /// A token whose signer hangs off an intermediate CA that carries no extended
@@ -662,7 +734,14 @@ fn throwaway_tsa_token_with(dir: &Path, eku: &str, digest: &str, enc: &str) -> (
 /// This is the shape of the DFN, Belgium and CESnet chains. RFC 5280 makes a
 /// CA's EKU a restriction only when it is present, so the path must verify.
 fn throwaway_chain_token(dir: &Path) -> (Vec<u8>, PathBuf) {
-    throwaway_tsa_token_under(dir, "critical,timeStamping", "sha256", "named_curve", true)
+    throwaway_tsa_token_under(
+        dir,
+        "critical,timeStamping",
+        "sha256",
+        "named_curve",
+        None,
+        true,
+    )
 }
 
 fn throwaway_tsa_token_under(
@@ -670,6 +749,7 @@ fn throwaway_tsa_token_under(
     eku: &str,
     digest: &str,
     enc: &str,
+    stamp: Option<&str>,
     intermediate: bool,
 ) -> (Vec<u8>, PathBuf) {
     let ca_key = dir.join("tsa-ca-key.pem");
@@ -826,7 +906,7 @@ fn throwaway_tsa_token_under(
     //
     // The certificates start "now", so the fixture's 05:38Z genTime would be
     // before their notBefore; the stamp is moved to now (same length) and only
-    // then signed.
+    // then signed, unless the caller asked for its own date.
     let mut tst = tst_info(&token());
     // The fixture's `tsa` names FreeTSA and would not match the throwaway
     // signer; the ESS identifier below is written by openssl and does match.
@@ -834,15 +914,17 @@ fn throwaway_tsa_token_under(
     let now = Timestamp::now()
         .to_zoned(jiff::tz::TimeZone::UTC)
         .datetime();
-    let stamp = format!(
-        "{:04}{:02}{:02}{:02}{:02}{:02}Z",
-        now.year(),
-        u8::try_from(now.month()).expect("month fits"),
-        u8::try_from(now.day()).expect("day fits"),
-        u8::try_from(now.hour()).expect("hour fits"),
-        u8::try_from(now.minute()).expect("minute fits"),
-        u8::try_from(now.second()).expect("second fits"),
-    );
+    let stamp = stamp.map(str::to_owned).unwrap_or_else(|| {
+        format!(
+            "{:04}{:02}{:02}{:02}{:02}{:02}Z",
+            now.year(),
+            u8::try_from(now.month()).expect("month fits"),
+            u8::try_from(now.day()).expect("day fits"),
+            u8::try_from(now.hour()).expect("hour fits"),
+            u8::try_from(now.minute()).expect("minute fits"),
+            u8::try_from(now.second()).expect("second fits"),
+        )
+    });
     let gen_time_start = find(&tst, &[0x18, 0x0f]) + 2;
     tst[gen_time_start..gen_time_start + stamp.len()].copy_from_slice(stamp.as_bytes());
     let tst_path = dir.join("tst-info.der");
@@ -892,7 +974,7 @@ fn token_cannot_supply_its_own_anchor() {
     // The FreeTSA root is pinned and the token brings a self-signed CA.
     let free_tsa = anchors(dir.path());
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &free_tsa),
+        verify::token(&record, &imprint(), wide_range(), &free_tsa, &[]),
         TokenVerdict::Invalid(Invalid::Untrusted)
     );
 
@@ -900,7 +982,7 @@ fn token_cannot_supply_its_own_anchor() {
     // refusal above is the absent pin and not some other defect.
     let own = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
     assert!(
-        verify::token(&record, &imprint(), wide_range(), &own).is_valid(),
+        verify::token(&record, &imprint(), wide_range(), &own, &[]).is_valid(),
         "throwaway token is otherwise well formed"
     );
 }
@@ -926,9 +1008,9 @@ fn a_throwaway_token_carries_the_signer_identifier_and_verifies() {
         "the token carries the identifier the verifier requires"
     );
     assert!(
-        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]).is_valid(),
         "the identifier names the signer: {:?}",
-        verify::token(&record, &imprint(), wide_range(), &anchors)
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[])
     );
 }
 
@@ -953,7 +1035,7 @@ fn a_flipped_cert_hash_is_ess_mismatch_not_a_signature_error() {
     // Flipping the hash also breaks the signature over the attributes; the
     // identifier has to be judged first and say what actually moved.
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::EssMismatch)
     );
 }
@@ -975,7 +1057,7 @@ fn a_ca_without_eku_still_chains() {
     };
 
     assert!(
-        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]).is_valid(),
         "a CA without an EKU must not break the path"
     );
 }
@@ -985,7 +1067,8 @@ fn a_signer_without_eku_is_untrusted() {
     // The signer is held to the strict rule even though CAs are not: with no
     // EKU there is nothing proving the certificate is a TSA and nothing else.
     let dir = scratch();
-    let (token, ca_pem) = throwaway_tsa_token_under(dir.path(), "", "sha256", "named_curve", false);
+    let (token, ca_pem) =
+        throwaway_tsa_token_under(dir.path(), "", "sha256", "named_curve", None, false);
     let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
     let record = TokenRecord {
         id: ID.to_owned(),
@@ -996,7 +1079,7 @@ fn a_signer_without_eku_is_untrusted() {
     };
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Untrusted)
     );
 }
@@ -1019,7 +1102,7 @@ fn dual_purpose_or_non_critical_eku_is_untrusted() {
         };
 
         assert_eq!(
-            verify::token(&record, &imprint(), wide_range(), &anchors),
+            verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
             TokenVerdict::Invalid(Invalid::Untrusted),
             "{eku}"
         );
@@ -1042,7 +1125,7 @@ fn recorded_policy_without_tst_info_policy_is_a_policy_failure() {
     record.token = token_without_policy(&record.token);
 
     assert_eq!(
-        verify::token(&record, &imprint(), wide_range(), &anchors),
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]),
         TokenVerdict::Invalid(Invalid::Policy)
     );
 }
@@ -1064,6 +1147,7 @@ fn truncated_tokens_are_malformed_without_panicking() {
                 &imprint(),
                 wide_range(),
                 &anchors,
+                &[],
             ),
             TokenVerdict::Invalid(Invalid::Malformed),
             "prefix of {end} bytes"

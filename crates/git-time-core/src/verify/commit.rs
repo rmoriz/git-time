@@ -9,8 +9,9 @@
 //!    block's own claim; a mismatch is [`Verdict::BadImprint`], whatever the
 //!    block says. The block's `Object` field is provenance only and is never
 //!    trusted back out;
-//! 3. every token is judged by [`crate::verify::token`] against the pinned
-//!    anchors and the imprint recomputed for the token's own algorithm;
+//! 3. every token is judged by [`crate::verify::token`] against the roots the
+//!    block names, narrowed to those pinned and valid at the token's own
+//!    genTime, and the imprint recomputed for the token's own algorithm;
 //! 4. distinct TSA ids that verified are counted against `policy.required`;
 //! 5. the signature is read from the object and verified: a broken signature is
 //!    [`Verdict::BadSig`] even over a sealed commit, because evidence with a
@@ -78,7 +79,8 @@ pub enum Verdict {
     BadImprint,
     /// Tokens exist but not one of them verified, for reasons other than trust.
     BadToken,
-    /// No TSA of the commit is pinned, or every token is.
+    /// No TSA of the commit is pinned, every token is untrusted, or no pinned
+    /// root can vouch for a token at its genTime.
     Untrusted,
     /// The signature is broken, or it could not be checked at all.
     BadSig,
@@ -156,12 +158,19 @@ pub struct TsaEvidence {
     /// The signing certificate's serial in lowercase hex, for a token that
     /// verified.
     pub serial: Option<String>,
-    /// SHA-256 of the pinned anchor's first certificate, when one is pinned.
+    /// The first fingerprint the block names for the id, or the pinned bundle's
+    /// primary root when the block names none.
     ///
     /// Written out so a reader can compare it against the authority's own
     /// publication without trusting this output: a verdict says a token is
     /// good, this says under which root.
     pub anchor: Option<String>,
+    /// The anchor fingerprints the block recorded for the id, in block order and
+    /// empty when it named none.
+    ///
+    /// These are the roots the sealing run actually verified with, so they are
+    /// what a restore has to pin.
+    pub anchors: Vec<String>,
 }
 
 /// Everything verification found about one commit.
@@ -325,10 +334,20 @@ fn judge_tokens(
             alg: record.alg,
             bytes: digest(record.alg, pre_image),
         };
-        let anchor = anchors
-            .anchor(&record.id)
-            .map(|anchor| crate::trust::fingerprint(anchor.roots[0].as_bytes()));
-        match judge(record, &imprint, window.clone(), anchors) {
+        // The block names the roots the token was verified with. A block that
+        // predates the line falls back to the bundle's primary root for display.
+        let named = block
+            .anchors
+            .get(&record.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let anchor = named.first().cloned().or_else(|| {
+            anchors
+                .anchor(&record.id)
+                .and_then(|anchor| anchor.roots.first())
+                .map(|root| crate::trust::fingerprint(root.as_bytes()))
+        });
+        match judge(record, &imprint, window.clone(), anchors, named) {
             TokenVerdict::Valid {
                 gen_time,
                 tsa,
@@ -342,6 +361,7 @@ fn judge_tokens(
                     detail: Some(tsa),
                     serial: Some(serial),
                     anchor,
+                    anchors: named.to_vec(),
                 });
                 if gen_time < committer {
                     evidence.warnings.push(format!(
@@ -351,7 +371,12 @@ fn judge_tokens(
                 }
             }
             TokenVerdict::Invalid(invalid) => {
-                if invalid == Invalid::Untrusted {
+                // Both new reasons are trust refusals, like `Untrusted`: they
+                // say the right root is missing, not that the token is broken.
+                if matches!(
+                    invalid,
+                    Invalid::Untrusted | Invalid::AnchorNotPinned | Invalid::NoRootAtGenTime
+                ) {
                     untrusted += 1;
                 }
                 // The token's own reason is the verdict; a missing pin is worth
@@ -369,6 +394,14 @@ fn judge_tokens(
                     Invalid::TsaName => {
                         Some("the TSTInfo tsa name is not the signer's subject".to_owned())
                     }
+                    Invalid::AnchorNotPinned => Some(format!(
+                        "the block names anchor {}, which is not pinned; `git time tsa restore` fetches it",
+                        named.join(", ")
+                    )),
+                    Invalid::NoRootAtGenTime => Some(format!(
+                        "no pinned root for `{}` is valid at the token's genTime",
+                        record.id
+                    )),
                     _ => match anchors.anchor(&record.id) {
                         None => Some(format!("no anchor pinned for `{}`", record.id)),
                         Some(_) => Some("the token does not chain to the pinned anchor".to_owned()),
@@ -381,6 +414,7 @@ fn judge_tokens(
                     detail,
                     serial: None,
                     anchor,
+                    anchors: named.to_vec(),
                 });
             }
         }
@@ -396,6 +430,7 @@ fn judge_tokens(
             detail: Some(failure.reason.clone()),
             serial: None,
             anchor: None,
+            anchors: block.anchors.get(&failure.id).cloned().unwrap_or_default(),
         });
     }
 

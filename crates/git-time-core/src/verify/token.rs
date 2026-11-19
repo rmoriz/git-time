@@ -5,12 +5,12 @@
 //! A token carries its own CMS chain. That chain is untrusted input: anybody can
 //! mint a CA, self-sign a TSA certificate and produce a token that is
 //! internally consistent. What makes a token evidence is that the chain
-//! **terminates at the root pinned for that TSA id** in the
-//! [`AnchorStore`](crate::trust::AnchorStore). The pinned root is the only
-//! material taken from the pin; the signer and the intermediates are whatever
-//! the token brought, and they are accepted only if they build a path to that
-//! root. A CA certificate carried inside the token is therefore never an
-//! anchor, however self-signed it looks (see the
+//! **terminates at a root pinned for that TSA id** in the
+//! [`AnchorStore`](crate::trust::AnchorStore), at the token's own genTime. The
+//! pinned root is the only material taken from the pin; the signer and the
+//! intermediates are whatever the token brought, and they are accepted only if
+//! they build a path to that root. A CA certificate carried inside the token is
+//! therefore never an anchor, however self-signed it looks (see the
 //! `token_cannot_supply_its_own_anchor` test).
 //!
 //! # Order of checks
@@ -27,21 +27,27 @@
 //!    deliberately: the `sid` is outside it, so the attribute is the only signed
 //!    binding to the certificate, and a token whose binding was patched has to
 //!    say so instead of merely failing to verify;
-//! 4. the CMS signature, the chain to the pinned root, and the timestamping EKU
-//!    hold at the token's own genTime ([`Invalid::Untrusted`], or
-//!    [`Invalid::Malformed`] for a structurally unusable signature); the EKU
+//! 4. a pinned root for the id is valid at the token's own genTime
+//!    ([`Invalid::NoRootAtGenTime`]) and, when the block names fingerprints for
+//!    the id, one of the named roots is pinned ([`Invalid::AnchorNotPinned`]). A
+//!    root only vouches inside its own validity window: after a rotation the
+//!    retired root cannot bless new evidence and the new one cannot bless old
+//!    evidence;
+//! 5. the CMS signature, a chain to one of the candidate roots, and the
+//!    timestamping EKU hold at the token's own genTime ([`Invalid::Untrusted`],
+//!    or [`Invalid::Malformed`] for a structurally unusable signature); the EKU
 //!    must be critical and name no purpose but timestamping, which is stricter
 //!    than `webpki` alone (see [`sole_timestamping_eku`]);
-//! 5. the record's imprint algorithm agrees with its imprint, and the TSTInfo
+//! 6. the record's imprint algorithm agrees with its imprint, and the TSTInfo
 //!    imprint equals the expected imprint ([`Invalid::Imprint`]);
-//! 6. the TSTInfo nonce equals the recorded one ([`Invalid::Nonce`]);
-//! 7. the TSTInfo policy equals the recorded one, when one was recorded
+//! 7. the TSTInfo nonce equals the recorded one ([`Invalid::Nonce`]);
+//! 8. the TSTInfo policy equals the recorded one, when one was recorded
 //!    ([`Invalid::Policy`]);
-//! 8. genTime lies inside the caller's range ([`Invalid::CertNotValidAtGenTime`]);
-//! 9. genTime is not after the signer certificate's `notAfter`
-//!    ([`Invalid::Expired`]). `webpki` already rejects a signer outside its
-//!    validity at genTime, so this is shadowed in practice and kept as
-//!    belt-and-braces ([`expired`] has its own unit test).
+//! 9. genTime lies inside the caller's range ([`Invalid::CertNotValidAtGenTime`]);
+//! 10. genTime is not after the signer certificate's `notAfter`
+//!     ([`Invalid::Expired`]). `webpki` already rejects a signer outside its
+//!     validity at genTime, so this is shadowed in practice and kept as
+//!     belt-and-braces ([`expired`] has its own unit test).
 //!
 //! One deliberate exception to "the signature comes first": a record that names
 //! a policy while the TSTInfo carries none is answered with [`Invalid::Policy`]
@@ -193,6 +199,11 @@ pub enum Invalid {
     /// the pinned anchor, or the signer's extended key usage is not a critical,
     /// sole timestamping one.
     Untrusted,
+    /// No pinned root for the record's TSA id is valid at the token's genTime.
+    NoRootAtGenTime,
+    /// The block names an anchor fingerprint, and none of the named ones is
+    /// pinned.
+    AnchorNotPinned,
     /// genTime lies outside the range the caller allows.
     CertNotValidAtGenTime,
     /// The token was issued under a different policy than the record claims.
@@ -222,6 +233,8 @@ impl Invalid {
             Self::Imprint => "imprint",
             Self::Nonce => "nonce",
             Self::Untrusted => "untrusted",
+            Self::NoRootAtGenTime => "no-root-at-gen-time",
+            Self::AnchorNotPinned => "anchor-not-pinned",
             Self::CertNotValidAtGenTime => "cert-not-valid-at-gen-time",
             Self::Policy => "policy",
             Self::Malformed => "malformed",
@@ -240,15 +253,22 @@ impl std::fmt::Display for Invalid {
     }
 }
 
-/// Verify `record` against `imprint`, `gen_time_range` and `anchors`.
+/// Verify `record` against `imprint`, `gen_time_range`, `anchors` and `named`.
 ///
 /// `gen_time_range` is half-open: `start <= genTime < end`.
+///
+/// `named` is the fingerprints the block recorded for `record.id`, from the
+/// sealing run. When it is non-empty, only those of the pinned roots count; a
+/// token whose block names none at all is judged against every pinned root in
+/// its window. An empty candidate set either way is a refusal, never a wider
+/// search.
 #[must_use]
 pub fn token(
     record: &TokenRecord,
     imprint: &Digest,
     gen_time_range: Range<Timestamp>,
     anchors: &AnchorStore,
+    named: &[String],
 ) -> TokenVerdict {
     let parsed = match Parsed::parse(&record.token) {
         Ok(parsed) => parsed,
@@ -264,7 +284,27 @@ pub fn token(
         return TokenVerdict::Invalid(Invalid::Policy);
     }
 
-    match parsed.authenticate(anchor) {
+    // A root only vouches inside its own window, so a retired root cannot bless
+    // new evidence and a rotated-in one cannot bless old evidence.
+    let candidates = anchor.roots_at(parsed.tst.gen_time);
+    if candidates.is_empty() {
+        return TokenVerdict::Invalid(Invalid::NoRootAtGenTime);
+    }
+    let candidates: Vec<&DerCertificate> = if named.is_empty() {
+        candidates
+    } else {
+        let wanted: Vec<String> = named.iter().map(|fp| fp.to_ascii_uppercase()).collect();
+        let pinned: Vec<&DerCertificate> = candidates
+            .into_iter()
+            .filter(|root| wanted.contains(&crate::trust::fingerprint(root.as_bytes())))
+            .collect();
+        if pinned.is_empty() {
+            return TokenVerdict::Invalid(Invalid::AnchorNotPinned);
+        }
+        pinned
+    };
+
+    match parsed.authenticate(&candidates, anchor) {
         Ok(()) => {}
         Err(invalid) => return TokenVerdict::Invalid(invalid),
     }
@@ -526,12 +566,17 @@ impl Parsed {
     }
 
     /// Authenticate the token: the signed signer identifier, then the CMS
-    /// signature, chain to a pinned root, and the timestamping EKU at the
-    /// token's own genTime.
+    /// signature and the timestamping EKU at the token's own genTime, then a
+    /// chain to the first candidate root that builds one.
     ///
-    /// The pinned roots are the only material taken from `anchor`; the signer
-    /// and intermediates are the token's, and are pinned to `authority.leaf`.
-    fn authenticate(&self, anchor: &crate::trust::Anchor) -> Result<(), Invalid> {
+    /// The candidate roots are the only material taken from the pin that can end
+    /// a chain; the signer and intermediates are the token's, pinned to
+    /// `authority.leaf`.
+    fn authenticate(
+        &self,
+        roots: &[&DerCertificate],
+        anchor: &crate::trust::Anchor,
+    ) -> Result<(), Invalid> {
         // Before the signature: the identifier is what says *which* certificate
         // the signed bytes belong to, so a token that names another one is
         // answered as that rather than as a broken signature.
@@ -543,7 +588,7 @@ impl Parsed {
         // The token's own chain first, then whatever else the pin allows. The
         // two lists overlap in practice (a TSA that sends its root also has it
         // pinned), and webpki tolerates the duplicates, but a chain is easier to
-        // read without them.
+        // read without them. The set is the same for every candidate.
         let mut seen = BTreeSet::new();
         let intermediates: Vec<DerCertificate> = self
             .intermediates
@@ -552,24 +597,27 @@ impl Parsed {
             .filter(|certificate| seen.insert(certificate.as_bytes().to_vec()))
             .cloned()
             .collect();
-
-        let authority = TsaAuthority::new(
-            DerCertificate::new(signer_der.clone()),
+        let parts = AuthorityParts {
+            signer: DerCertificate::new(signer_der),
             intermediates,
-            // Task 4 filters candidates: for now the first root is the anchor.
-            anchor.roots[0].clone(),
-            None,
-        );
+        };
 
         self.verify_signature()?;
-        verify_chain(&authority, self.tst.gen_time)?;
         // `webpki` accepts an EKU of `timeStamping` plus anything else, and
         // ignores the criticality flag. RFC 3161 §2.3 is stricter: the signer is
         // a TSA and nothing else, and that restriction is critical.
         if !sole_timestamping_eku(&self.signer) {
             return Err(Invalid::Untrusted);
         }
-        Ok(())
+
+        // The signature covers the same bytes whichever root the path ends at,
+        // so it is checked once and the candidates only bear on the path.
+        for root in roots {
+            if verify_chain(root, &parts, self.tst.gen_time).is_ok() {
+                return Ok(());
+            }
+        }
+        Err(Invalid::Untrusted)
     }
 
     /// Verify the CMS signature over the signed attributes with the signer key,
@@ -710,9 +758,26 @@ fn verify_without_ring(
     Err(Invalid::Malformed)
 }
 
-/// Build the chain from the token's signer to the pinned root at `gen_time`,
-/// requiring the timestamping EKU.
-fn verify_chain(authority: &TsaAuthority, gen_time: Timestamp) -> Result<(), Invalid> {
+/// The per-token material a chain is built with, the same for every candidate
+/// root.
+struct AuthorityParts {
+    signer: DerCertificate,
+    intermediates: Vec<DerCertificate>,
+}
+
+/// Build the chain from the token's signer to `root` at `gen_time`, requiring
+/// the timestamping EKU.
+fn verify_chain(
+    root: &DerCertificate,
+    parts: &AuthorityParts,
+    gen_time: Timestamp,
+) -> Result<(), Invalid> {
+    let authority = TsaAuthority::new(
+        parts.signer.clone(),
+        parts.intermediates.clone(),
+        root.clone(),
+        None,
+    );
     let root = CertificateDer::from(authority.root.as_bytes().to_vec());
     let trust_anchor = webpki::anchor_from_trusted_cert(&root).map_err(|_| Invalid::Untrusted)?;
     let signer = CertificateDer::from(authority.leaf.as_bytes().to_vec());

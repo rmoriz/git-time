@@ -279,7 +279,7 @@ pub async fn seal(
             alg: record.alg,
             bytes: digest(record.alg, &pre.bytes),
         };
-        match verify::token(&record, &expected, window.clone(), anchors) {
+        match verify::token(&record, &expected, window.clone(), anchors, &[]) {
             TokenVerdict::Valid { .. } => tokens.push(record),
             TokenVerdict::Invalid(invalid) => failures.push(FailureRecord {
                 id: record.id,
