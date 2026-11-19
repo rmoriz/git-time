@@ -724,7 +724,12 @@ fn run_time_pty(
     env: &[(&str, String)],
     input: &str,
 ) -> Option<Output> {
-    let mut child = Command::new("script")
+    // The answer arrives from a file rather than a pipe: `script` reads its own
+    // stdin and forwards it, and a pipe there can already be closed by the time
+    // the picker quits on Linux (EPIPE on the tail).
+    let answer = xdg.join("pty-answer");
+    std::fs::write(&answer, input).expect("writes the answer");
+    let child = Command::new("script")
         .arg("-q")
         .arg("/dev/null")
         .arg(BIN)
@@ -739,17 +744,11 @@ fn run_time_pty(
         .env("PATH", path_env())
         .env("XDG_CONFIG_HOME", xdg)
         .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
-        .stdin(Stdio::piped())
+        .stdin(Stdio::from(std::fs::File::open(&answer).expect("opens it")))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .ok()?;
-    child
-        .stdin
-        .take()
-        .expect("a stdin pipe")
-        .write_all(input.as_bytes())
-        .expect("writes the answer");
     child.wait_with_output().ok()
 }
 
