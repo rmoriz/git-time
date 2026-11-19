@@ -89,7 +89,9 @@ authority was configured when it was sealed, and it is reported with the two com
 authority up. `--json` prints one document, so it collects what the pool judges rather than
 streaming. Exits `0` only when every commit passes, `1` on any evidence or gate failure, `2` on
 usage or config, and `141` when the reader of a streamed run stops early (`… | head`), because
-SIGPIPE keeps its default disposition rather than turning into a broken-pipe panic.
+SIGPIPE keeps its default disposition rather than turning into a broken-pipe panic. The `141` lands
+in place of the status the run would have had, so a piped run that would have exited `1` or `2`
+exits `141` instead.
 
 #### `--openssl` audit script
 
@@ -136,7 +138,8 @@ is not reached. `--json` and `--openssl` exclude each other, as do `--range` and
 The same evidence as one line per commit: short oid, TSA ids, genTimes, verdict. Lines stream as
 the pool judges the commits, still in walk order. No closing empty line follows, since every record
 is a single line. This is a record, not a judgement: it exits `0` whenever it could read
-everything, `1` only for a commit it could not read, and `141` for an early reader. `--json` carries no
+everything, `1` only for a commit it could not read, and `141` for an early reader. `--json`
+carries no
 `pass`, `gates` or `required`, and collects instead of streaming.
 
 ### `git time install [--no-tsa] [--accept <id>=<fingerprint>]`

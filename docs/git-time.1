@@ -935,6 +935,15 @@ Evidence or seal failure, and the verdict of a refusing gate.
 .B 2
 Usage or configuration problem.
 .TP
+.B 3
+Only from
+.BR hook ,
+and only under
+.BR "time.on\-failure = fail" .
+git ignores a
+.B post\-commit
+status; a wrapper does not.
+.TP
 .B 141
 Only from a streamed run that stopped being read —
 .BR log ,
@@ -944,15 +953,9 @@ Only from a streamed run that stopped being read —
 does.
 SIGPIPE keeps its default disposition, so the process ends quietly instead of
 reporting a broken pipe.
-.TP
-.B 3
-Only from
-.BR hook ,
-and only under
-.BR "time.on\-failure = fail" .
-git ignores a
-.B post\-commit
-status; a wrapper does not.
+It lands in place of the status the run would have had, so a piped
+.B verify
+that would have exited 1 or 2 exits 141 instead.
 .SH EXAMPLES
 Set a repository up:
 .PP

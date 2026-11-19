@@ -7,6 +7,13 @@
 //! walk gave them, because a result that overtakes a slow neighbour waits in a
 //! buffer until the neighbour is out.
 //!
+//! The cheap thing to bound is not the queue but the *index*: a worker waits
+//! before it hands over a result whose index is far ahead of the one the printer
+//! is on, so the pool never gets more than a fixed window ahead of the printer
+//! and the buffer holds at most that many results however long the range is.
+//! Bounding the channel alone does not do this — the printer drains it faster
+//! than results become unprintable, so it never pushes back.
+//!
 //! One [`Repo`](git_time_core::repo::Repo) is shared by reference: it is `Sync`
 //! since the `update-ref` counter became atomic, and the work here only reads
 //! through it. The write that does happen — `sigcheck` hashes a checked commit
@@ -19,7 +26,7 @@
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc;
+use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 
 /// The most workers a run uses. The per-commit work is process-bound, and past
 /// this the extra processes cost more than they win.
@@ -45,16 +52,23 @@ where
         .min(oids.len())
         .max(1);
     let next = AtomicUsize::new(0);
-    // Bounded, so a worker whose result cannot be printed yet waits instead of
-    // piling results up: the buffer stays at the two queued results per worker
-    // plus the one each worker is holding.
-    let (sender, receiver) = mpsc::sync_channel::<(usize, Result<T, String>)>(workers * 2);
+    // How far the pool may run ahead of the printer, in commits. Two per worker
+    // keeps every worker busy while a slow neighbour is out, and still caps the
+    // buffer far below the length of a range.
+    let window = workers * 2;
+    // Results the printer has emitted, i.e. the index it is on. A worker holds a
+    // finished result back while its index is `window` or more past it.
+    let emitted = Mutex::new(0_usize);
+    let room = Condvar::new();
+    let (sender, receiver) = mpsc::channel::<(usize, Result<T, String>)>();
     let work = &work;
 
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let sender = sender.clone();
             let next = &next;
+            let emitted = &emitted;
+            let room = &room;
             scope.spawn(move || {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -63,6 +77,15 @@ where
                     };
                     let outcome = panic::catch_unwind(AssertUnwindSafe(|| work(oid)))
                         .unwrap_or_else(|payload| Err(panic_message(payload.as_ref())));
+                    // Wait for room only *after* the work: a worker that is still
+                    // computing is never parked, and the lowest index can always
+                    // go through, so the wait cannot deadlock.
+                    {
+                        let mut done = emitted.lock().unwrap_or_else(PoisonError::into_inner);
+                        while index >= *done + window {
+                            done = room.wait(done).unwrap_or_else(PoisonError::into_inner);
+                        }
+                    }
                     if sender.send((index, outcome)).is_err() {
                         break;
                     }
@@ -74,7 +97,7 @@ where
         drop(sender);
 
         // Results can arrive out of order; the buffer holds the ones whose turn
-        // has not come, so it is small while a slow neighbour is out.
+        // has not come. The wait above is what keeps that set at `window`.
         let mut buffer: BTreeMap<usize, Result<T, String>> = BTreeMap::new();
         let mut next_emit = 0;
         for (index, outcome) in receiver {
@@ -82,6 +105,10 @@ where
             while let Some(outcome) = buffer.remove(&next_emit) {
                 emit(next_emit, outcome);
                 next_emit += 1;
+                // The lock is released while `emit` runs, so printing is never
+                // held against a worker; it is taken only to advance the count.
+                *emitted.lock().unwrap_or_else(PoisonError::into_inner) = next_emit;
+                room.notify_all();
             }
         }
     });
@@ -123,6 +150,38 @@ mod tests {
             },
         );
         assert_eq!(*seen.lock().expect("lock"), oids);
+    }
+
+    /// The pool stays a window ahead of the printer instead of running the whole
+    /// range out while the head is slow — the buffer cannot grow with `oids`.
+    #[test]
+    fn the_pool_does_not_run_away_from_a_slow_printer() {
+        let total = 400;
+        let oids: Vec<String> = (0..total).map(|index| index.to_string()).collect();
+        let finished = AtomicUsize::new(0);
+        let peak = AtomicUsize::new(0);
+        ordered(
+            &oids,
+            |oid| {
+                // The first is slow enough that an unbounded pool would finish
+                // every other commit before it comes back.
+                if oid == "0" {
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+                finished.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            },
+            |index, _| {
+                let ahead = finished.load(Ordering::Relaxed).saturating_sub(index + 1);
+                peak.fetch_max(ahead, Ordering::Relaxed);
+            },
+        );
+        // A window of two per worker, plus up to one result each worker is
+        // holding before it can wait.
+        let bound = super::MAX_WORKERS * 3;
+        let peak = peak.load(Ordering::Relaxed);
+        assert!(peak <= bound, "{peak} results ran ahead, bound {bound}");
+        assert!(peak > 1, "the head really did hold the others back: {peak}");
     }
 
     /// A panicking commit is one error entry, not a lost index that stalls the
