@@ -194,11 +194,20 @@ async fn seal_one(repo: &Repo, policy: &Policy, oid: &str, force: bool) -> Exit 
         }
         Ok(SealOutcome::UnderQuorum { oid, failures }) => {
             let ok = policy.backends().len().saturating_sub(failures.len());
-            println!(
-                "sealed {} under quorum ({ok} of {}) — see git time verify",
-                short(&oid),
-                policy.required
-            );
+            if policy.backends().is_empty() {
+                // Nothing was asked, so nothing stayed silent.
+                println!(
+                    "sealed {} with no TSA configured — `git time tsa select` picks one; see \
+                     git time verify",
+                    short(&oid)
+                );
+            } else {
+                println!(
+                    "sealed {} under quorum ({ok} of {}) — see git time verify",
+                    short(&oid),
+                    policy.required
+                );
+            }
             Exit::with(1, String::new())
         }
         Ok(SealOutcome::Skipped(SkipReason::AlreadySealed)) => {

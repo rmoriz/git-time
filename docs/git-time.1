@@ -11,6 +11,8 @@ git\-time \- RFC 3161 timestamp evidence for commits
 .B git time drop
 .PP
 .B git time verify [ \-\-range \fIRANGE\fR ] [ \-\-require\-sealed ] [ \-\-require\-signed ] [ \-\-json ] [ \fIcommit\fR ... ]
+.br
+.B git time verify \-\-openssl [ \-\-require\-sealed ] [ \-\-require\-signed ] \fIcommit\fR
 .PP
 .B git time log [ \-\-range \fIRANGE\fR ] [ \-\-json ] [ \fIcommit\fR ... ]
 .PP
@@ -141,7 +143,7 @@ Only a hook run that ends in a seal consumes the marker.
 .PP
 Exits 0, or 2 when the marker cannot be written.
 .SS verify
-.B git time verify [ \-\-range \fIRANGE\fR ] [ \-\-require\-sealed ] [ \-\-require\-signed ] [ \-\-json ] [ \fIcommit\fR ... ]
+.B git time verify [ \-\-range \fIRANGE\fR ] [ \-\-require\-sealed ] [ \-\-require\-signed ] [ \-\-json ] [ \-\-openssl ] [ \fIcommit\fR ... ]
 .PP
 Judge the evidence of each commit once, without calling an authority.
 The default target is HEAD.
@@ -183,10 +185,79 @@ and
 .B anchor
 alongside the verdict.
 .TP
+.B \-\-openssl
+Print, and only print, a POSIX
+.B sh
+script that re\-verifies the tokens of one commit with
+.BR openssl .
+Nothing is run and no TSA is called; the command exits 0 once the script is
+printed.
+Exactly one commit has to be named, and only that commit appears in the
+script: it is an artifact for one seal, so a range is not accepted and a
+missing commit is a usage error.
+Conflicts with
+.B \-\-json
+and
+.BR \-\-range .
+.PP
+The emitted script needs
+.B openssl
+with its
+.B ts
+command and nothing else: no
+.BR git ,
+no
+.BR zstd .
+It writes only into one
+.B mktemp \-d
+directory, which it removes again.
+The script carries its payload: the pre\-image of the commit is printed into it
+as clear text and the tokens follow base64\-encoded, so it does not read the
+repository and a reader sees the commit being judged.
+Keep it next to the commit it names.
+A message that is not UTF\-8 falls back to base64 for the whole pre\-image.
+The embedded pre\-image is hashed and compared with the block's
+.B X\-RFC3161\-Imprint
+before any token is trusted.
+Each token is decoded and checked with
+.B openssl ts \-verify \-purpose timestampsign
+against the anchor of the authority.
+The anchor is looked up at
+.B $XDG_CONFIG_HOME/git-time/anchors/<id>.pem
+(or
+.BR $HOME/.config/git-time/anchors/<id>.pem ),
+then at the path the generating machine had, and the bundle is passed whole
+as
+.BR \-CAfile ,
+so its intermediates count as trust material.
+It prints PASS or FAIL per token and a summary, and exits 1 when anything
+failed.
+Use an OpenSSL rather than the LibreSSL that ships as
+.B /usr/bin/openssl
+on macOS: its
+.B ts
+is older, has no
+.B \-purpose
+and refuses SHA\-384/SHA\-512 tokens.
+With such a binary the script still runs, names the version in a NOTE and
+skips the EKU check instead of passing it silently.
+A token whose authority has no anchor names both paths it looked at and fails.
+A commit without a token is summarised as SKIP, so an unsealed or dropped
+commit stays visible.
+The two require gates were applied when the script was generated and are named
+in it, but the script does not re\-check them.
+Only tokens in the commit trailer are audited: a seal kept only in a note is
+not reached.
+.TP
 .B \fIcommit\fR ...
 Additional commits to judge, on top of any range.
 An argument that does not name a commit is a usage error.
 .PP
+The verdicts are sealed, under\-quorum, none, unsealed, bad\-imprint,
+bad\-token, untrusted, bad\-sig and unsigned.
+.B none
+is a block that asked nobody, because no authority was configured when it was
+sealed.
 Exits 0 only when every commit passes, 1 on any evidence or gate failure, and
 2 for a usage or configuration problem.
 .SS log

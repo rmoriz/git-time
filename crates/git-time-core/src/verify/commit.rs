@@ -69,6 +69,9 @@ pub enum Verdict {
     Sealed,
     /// Evidence exists but fewer than `required` distinct TSAs verified.
     UnderQuorum,
+    /// The commit carries a block, but no authority was configured when it was
+    /// sealed: nothing was asked, so nothing failed either.
+    None,
     /// The commit carries no trailer block (and no note).
     Unsealed,
     /// The pre-image no longer hashes to the imprint the block claims.
@@ -90,6 +93,7 @@ impl Verdict {
         match self {
             Self::Sealed => "sealed",
             Self::UnderQuorum => "under-quorum",
+            Self::None => "none",
             Self::Unsealed => "unsealed",
             Self::BadImprint => "bad-imprint",
             Self::BadToken => "bad-token",
@@ -388,9 +392,16 @@ fn judge_tokens(
         // context; the evidence itself is broken whatever they say.
         Verdict::BadImprint
     } else if tokens == 0 {
-        // Nothing but `Fail` lines (or nothing at all): no token was even
-        // presented, so the quorum is simply not met.
-        Verdict::UnderQuorum
+        if block.failures.is_empty() {
+            // A block and nothing else: no authority was configured when this
+            // was sealed. "Under quorum" would be read as authorities that
+            // stayed silent, and there were none to stay silent.
+            Verdict::None
+        } else {
+            // Nothing but `Fail` lines: no token was presented, and each
+            // authority present is named as to why.
+            Verdict::UnderQuorum
+        }
     } else if valid.is_empty() {
         if untrusted == tokens {
             Verdict::Untrusted

@@ -480,6 +480,21 @@ impl Repo {
         self.stub = Some(stub);
     }
 
+    /// Point a second authority at the same stub, so a commit carries two
+    /// tokens and a generated script must emit a block per token.
+    fn second_tsa(&self) {
+        let url = self.stub.as_ref().expect("a serving stub").url.clone();
+        git(self.path(), &["config", "time.tsa.stub2.url", &url]);
+        git(
+            self.path(),
+            &[
+                "config",
+                "time.tsa.stub2.anchor",
+                &pstr(&self.authority.bundle()),
+            ],
+        );
+    }
+
     /// Point the configured TSA at a port nothing listens on.
     fn dead_tsa(&self) {
         git(
@@ -649,6 +664,43 @@ fn lines(output: &Output) -> Vec<String> {
 /// The first line of a verify run, which carries the verdict.
 fn first_line(output: &Output) -> String {
     lines(output).into_iter().next().unwrap_or_default()
+}
+
+/// Whether `binary` runs; `arg` is its harmless version flag.
+fn have(binary: &str, arg: &str) -> bool {
+    Command::new(binary)
+        .arg(arg)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// `git time verify --openssl` needs `openssl ts` and `zstd`: the tests that run
+/// the printed script skip when either is missing, the way `hook_flows.rs`
+/// treats a missing `openssl`.
+fn script_tools() -> bool {
+    have("openssl", "version")
+}
+
+/// Run a generated script with `sh`, in the repository and with the user's
+/// anchor directory out of reach.
+fn run_script(repo: &Repo, script: &str) -> Output {
+    let path = repo.path().join(".git/time-audit.sh");
+    std::fs::write(&path, script).expect("write the script");
+    let xdg = TempDir::new().expect("empty XDG_CONFIG_HOME");
+    let output = Command::new("sh")
+        .arg(&path)
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .envs(insulated_env().iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("runs sh");
+    std::mem::forget(xdg);
+    output
 }
 
 /// Parse a verify `--json` run.
@@ -973,6 +1025,34 @@ fn a_short_quorum_is_under_quorum_with_reasons() {
             .any(|line| line.contains("stub") && line.contains("fail")),
         "the failing TSA is named: {all:?}"
     );
+}
+
+/// A block written when no authority was configured is `NONE`: nothing was
+/// asked, so nothing stayed silent, and the hint names the way back.
+#[test]
+fn a_commit_sealed_without_any_tsa_is_none() {
+    let repo = Repo::new();
+    let removed = run_time(repo.path(), &["tsa", "remove", "stub"]);
+    assert!(removed.status.success(), "{}", text(&removed.stderr));
+
+    std::fs::write(repo.path().join("plain.txt"), "plain").expect("write file");
+    git(repo.path(), &["add", "plain.txt"]);
+    git(repo.path(), &["commit", "-q", "-m", "no authority"]);
+    let oid = repo.head();
+
+    let output = verify(&repo, &oid, &[]);
+    let all = lines(&output);
+    assert_eq!(output.status.code(), Some(1), "{all:?}");
+    assert!(all[0].contains(" NONE "), "{all:?}");
+    assert!(
+        all.iter()
+            .any(|line| line.contains("no TSA was configured") && line.contains("tsa restore")),
+        "the hint is there: {all:?}"
+    );
+
+    let evidence = json_commits(&verify(&repo, &oid, &["--json"]));
+    assert_eq!(evidence[0]["verdict"], "none", "{evidence:?}");
+    assert_eq!(evidence[0]["per_tsa"], json!([]), "{evidence:?}");
 }
 
 /// One valid token below a quorum of two is under-quorum (the boundary: some
@@ -1305,4 +1385,302 @@ fn a_note_stored_seal_is_verified_from_the_note() {
     let line = first_line(&output);
     assert_eq!(output.status.code(), Some(0), "{line}");
     assert!(line.contains("SEALED"), "{line}");
+}
+
+// --- the --openssl audit script -----------------------------------------
+
+/// The flag prints a script, one `openssl ts -verify` per token, and runs
+/// nothing itself.
+#[test]
+fn openssl_prints_a_script_with_one_verify_per_token() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    repo.second_tsa();
+    let oid = repo.commit("two tokens");
+
+    let output = verify(&repo, &oid, &["--openssl"]);
+    let script = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{script}{}",
+        text(&output.stderr)
+    );
+    assert!(script.starts_with("#!/bin/sh\n"), "{script}");
+    assert!(script.contains("set -eu"), "{script}");
+    assert!(script.contains("mktemp -d"), "{script}");
+    assert!(script.contains("trap 'rm -rf \"$scratch\"'"), "{script}");
+    assert!(script.contains("-purpose timestampsign"), "{script}");
+    // The script is a document: the payload is embedded, so nothing here walks
+    // the repository or needs a decompressor.
+    assert!(
+        !script.contains("command git"),
+        "no git call in the script: {script}"
+    );
+    assert!(
+        !script.contains("zstd -d"),
+        "no zstd call in the script: {script}"
+    );
+    assert_eq!(
+        script.matches("<<'pre'").count(),
+        1,
+        "the pre-image is embedded once: {script}"
+    );
+
+    let token_lines = repo
+        .object(&oid)
+        .lines()
+        .filter(|line| line.starts_with("X-RFC3161-Token: "))
+        .count();
+    assert_eq!(token_lines, 2, "the commit carries two tokens");
+    assert_eq!(
+        script
+            .lines()
+            .filter(|line| line.trim_start().starts_with("if openssl ts -verify"))
+            .count(),
+        token_lines,
+        "one verification per token: {script}"
+    );
+    assert_eq!(
+        script.matches("<<'token'").count(),
+        token_lines,
+        "one embedded token per token: {script}"
+    );
+}
+
+/// The script re-verifies a sealed commit on its own.
+#[test]
+fn the_openssl_script_passes_a_sealed_commit() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.head();
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(0), "{all:?}");
+    assert!(
+        all.iter()
+            .any(|line| line == &format!("PASS {} stub", &oid[..7])),
+        "the token passes: {all:?}"
+    );
+    assert!(all.iter().any(|line| line == "OK"), "{all:?}");
+}
+
+/// A signed commit is rebuilt without its `gpgsig` header: the signature is
+/// not part of the pre-image, and the script has to drop it too.
+#[test]
+fn the_openssl_script_rebuilds_a_signed_pre_image() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    sign_here(&repo);
+    let oid = repo.commit("signed");
+    let object = repo.object(&oid);
+    assert!(object.contains("\ngpgsig "), "the commit is signed");
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(0), "{all:?}");
+    assert!(all.iter().any(|line| line.starts_with("PASS ")), "{all:?}");
+}
+
+/// A message edited after the seal breaks the imprint, and the script says so
+/// rather than trusting its own reconstruction.
+#[test]
+fn a_tampered_pre_image_fails_the_openssl_script() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.rewrite(&repo.head(), |object| {
+        object.replacen("\n\nbase\n", "\n\nbase, edited\n", 1)
+    });
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_ne!(run.status.code(), Some(0), "{all:?}");
+    assert!(
+        all.iter()
+            .any(|line| line.starts_with("FAIL ") && line.contains("imprint")),
+        "the imprint mismatch is named: {all:?}"
+    );
+    assert!(all.iter().any(|line| line == "FAILED"), "{all:?}");
+}
+
+/// A message line that spells the heredoc delimiter must not end the payload
+/// early: the delimiter is numbered until it cannot occur.
+#[test]
+fn a_message_line_equal_to_the_delimiter_is_kept() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.commit("first\n\npre\nmore");
+    let output = verify(&repo, &oid, &["--openssl"]);
+    let script = text(&output.stdout);
+    assert!(script.contains("<<'pre_1'"), "{script}");
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(0), "{all:?}");
+    assert!(
+        all.iter().any(|line| line == "OK"),
+        "the script passes: {all:?}"
+    );
+}
+
+/// A message that is not UTF-8 cannot be printed as text; the pre-image falls
+/// back to base64 and the script still verifies.
+#[test]
+fn a_message_that_is_not_utf8_falls_back_to_base64() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    // `git commit` would transcode a file to UTF-8, so the object is written by
+    // hand: only a commit built elsewhere carries bytes that are not text.
+    let repo = Repo::new();
+    let head = repo.head();
+    let tree = text(&git(
+        repo.path(),
+        &["rev-parse", &format!("{head}^{{tree}}")],
+    ))
+    .trim()
+    .to_owned();
+    let mut object = format!(
+        "tree {tree}\nparent {head}\nauthor a <a@b> 1577836800 +0000\n\
+         committer a <a@b> 1577836800 +0000\n\n"
+    )
+    .into_bytes();
+    object.extend_from_slice(b"raw\xff\xfe bytes\n");
+    let written = git_output(
+        repo.path(),
+        &["hash-object", "-t", "commit", "-w", "--stdin"],
+        &object,
+    );
+    let oid = text(&written.stdout).trim().to_owned();
+    git(repo.path(), &["update-ref", "HEAD", &oid]);
+    let sealed = run_time(repo.path(), &["seal"]);
+    assert!(sealed.status.success(), "{}", text(&sealed.stderr));
+    let oid = repo.head();
+
+    let output = verify(&repo, &oid, &["--openssl"]);
+    let script = text(&output.stdout);
+    assert!(script.contains("<<'pre'"), "a base64 pre-image: {script}");
+    assert!(script.contains("pre.b64"), "{script}");
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(0), "{all:?}");
+}
+
+/// A token whose authority has no anchor is a failure of its own.
+#[test]
+fn a_token_without_an_anchor_fails_the_openssl_script() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.head();
+    repo.drop_anchor();
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_ne!(run.status.code(), Some(0), "{all:?}");
+    assert!(
+        all.iter().any(|line| line.contains("no anchor pinned")),
+        "{all:?}"
+    );
+}
+
+/// A commit without a token is summarised, not silently left out.
+#[test]
+fn a_commit_without_a_token_is_summarised() {
+    let repo = Repo::new();
+    let oid = repo.commit_unsealed("plain");
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+
+    assert!(
+        script.contains(&format!("SKIP {} unsealed", &oid[..7])),
+        "{script}"
+    );
+    assert!(
+        !script
+            .lines()
+            .any(|line| line.trim_start().starts_with("if openssl ts -verify")),
+        "{script}"
+    );
+}
+
+/// The script is an artifact for one seal, so it takes exactly one commit and
+/// nothing that could select more: no default to HEAD, no range.
+#[test]
+fn openssl_needs_exactly_one_commit() {
+    let repo = Repo::new();
+    let head = repo.head();
+
+    let none = run_time(repo.path(), &["verify", "--openssl"]);
+    let stderr = text(&none.stderr);
+    assert_eq!(none.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("exactly one commit"), "{stderr}");
+
+    let two = run_time(repo.path(), &["verify", "--openssl", &head, &head]);
+    let stderr = text(&two.stderr);
+    assert_eq!(two.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("exactly one commit"), "{stderr}");
+
+    let ranged = run_time(repo.path(), &["verify", "--openssl", "--range", "HEAD"]);
+    let stderr = text(&ranged.stderr);
+    assert_eq!(ranged.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--range") && stderr.contains("--openssl"),
+        "{stderr}"
+    );
+}
+
+/// One named commit is one block: the script cannot quietly grow a second
+/// commit from somewhere else in the history.
+#[test]
+fn the_openssl_script_covers_only_the_named_commit() {
+    let repo = Repo::new();
+    let older = repo.head();
+    let newer = repo.commit_unsealed("later");
+    let script = text(&verify(&repo, &newer, &["--openssl"]).stdout);
+
+    assert_eq!(
+        script.matches("# ---- commit ").count(),
+        1,
+        "one commit block: {script}"
+    );
+    assert!(script.contains(&newer[..7]), "{script}");
+    assert!(!script.contains(&older[..7]), "{script}");
+}
+
+/// `--json` and `--openssl` are two whole documents, so they exclude each
+/// other.
+#[test]
+fn openssl_conflicts_with_json() {
+    let repo = Repo::new();
+    let output = verify(&repo, &repo.head(), &["--openssl", "--json"]);
+    let stderr = text(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(
+        stderr.contains("--json") && stderr.contains("--openssl"),
+        "{stderr}"
+    );
 }

@@ -275,7 +275,8 @@ A verifier MUST, in this order, and fail closed on any step:
      commit — the earlier of the committer time and now, minus one day, to the
      later of them plus one day.
 4. **Count** the distinct ids whose token verified and compare with the required
-   quorum.
+   quorum. A block with neither a `Token` nor a `Fail` line reports `none`: the
+   round trip asked nobody, which is not the same as a quorum that was missed.
 5. **Verify the signature** of the commit itself, once: evidence under a broken
    signature is not a pass.
 6. **Report** one verdict per commit:
@@ -283,7 +284,8 @@ A verifier MUST, in this order, and fail closed on any step:
 | Verdict | Meaning |
 |---|---|
 | `sealed` | Quorum met, signature acceptable. |
-| `under-quorum` | Some token verified, fewer than required. |
+| `under-quorum` | Some token verified, fewer than required, or a `Fail` line exists. |
+| `none` | A block, but no token and no `Fail` line: nothing was asked (no authority was configured). |
 | `unsealed` | No block (or a deliberate drop marker). |
 | `bad-imprint` | The pre-image does not hash to `Imprint`. |
 | `bad-token` | Tokens exist, none verified. |

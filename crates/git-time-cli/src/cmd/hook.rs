@@ -224,11 +224,21 @@ pub async fn run(directory: Option<std::path::PathBuf>, event: Event, squash: bo
         }
         Ok(SealOutcome::UnderQuorum { oid, failures }) => {
             let ok = policy.backends().len().saturating_sub(failures.len());
-            eprintln!(
-                "rfc3161: sealed {} under quorum ({ok} of {}) — see git time verify",
-                short(&oid),
-                policy.required
-            );
+            if policy.backends().is_empty() {
+                // Nothing was asked, so no authority stayed silent: "under
+                // quorum" would name the wrong cause.
+                eprintln!(
+                    "rfc3161: sealed {} with no TSA configured — `git time tsa select` picks \
+                     one; see git time verify",
+                    short(&oid)
+                );
+            } else {
+                eprintln!(
+                    "rfc3161: sealed {} under quorum ({ok} of {}) — see git time verify",
+                    short(&oid),
+                    policy.required
+                );
+            }
             if policy.on_failure == OnFailure::Fail {
                 Exit::with(3, String::new())
             } else {

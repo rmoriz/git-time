@@ -116,6 +116,11 @@ enum Command {
         /// Print the findings as one JSON document.
         #[arg(long)]
         json: bool,
+        /// Print a POSIX `sh` script that re-verifies the tokens of ONE commit
+        /// with `openssl` instead of this tool (needs `openssl` with `ts` and
+        /// `zstd`). Nothing is run.
+        #[arg(long, conflicts_with_all = ["json", "range"])]
+        openssl: bool,
         /// Commits to judge, on top of any range (HEAD when neither is given).
         #[arg(value_name = "COMMIT")]
         commits: Vec<String>,
@@ -209,6 +214,7 @@ async fn dispatch(cli: Cli) -> Exit {
             require_sealed,
             require_signed,
             json,
+            openssl,
             commits,
         } => cmd::verify::run(
             directory,
@@ -217,6 +223,7 @@ async fn dispatch(cli: Cli) -> Exit {
             require_signed,
             commits,
             json,
+            openssl,
         ),
         Command::Log {
             range,

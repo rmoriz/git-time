@@ -73,14 +73,56 @@ shell; `verify` reports `UNSEALED (dropped)`. Exits `0` or `2`.
 
 ### `git time verify [--range RANGE] [--require-sealed] [--require-signed] [--json] [<commit>…]`
 
+### `git time verify --openssl [--require-sealed] [--require-signed] <commit>`
+
 Judge each commit once, without calling a TSA. `PASS`/`FAIL`, the short oid, the verdict and the
 verified quorum, then one indented line per TSA answer — its verdict, genTime and signer serial,
 on a pass as much as on a failure — and one per failing gate. Records are separated by a blank
 line. The anchor fingerprint is left to `--json`: it is the same long string on every pass.
 `--require-sealed`
 fails an unsealed commit and `--require-signed` fails an unsigned one; both are gates, not
-verdicts. `--json` prints one document. Exits `0` only when every commit passes, `1` on any
+verdicts. The verdict vocabulary is `sealed`, `under-quorum`, `none`, `unsealed`, `bad-imprint`,
+`bad-token`, `untrusted`, `bad-sig` and `unsigned`; `none` is a block that asked nobody because no
+authority was configured when it was sealed, and it is reported with the two commands that set an
+authority up. `--json` prints one document. Exits `0` only when every commit passes, `1` on any
 evidence or gate failure, `2` on usage or config.
+
+#### `--openssl` audit script
+
+`--openssl` prints, and only prints, a POSIX `sh` script that re-verifies the tokens of one commit
+with the `openssl` command, so a third party can check the evidence without trusting this tool's
+crypto. The command runs nothing itself and exits `0` once the script is printed. The script needs
+`openssl` with its `ts` command and nothing else — no `git`, no `zstd` — and writes only into one
+`mktemp -d` directory that it removes again.
+
+The script carries its payload: the commit's pre-image is printed into it as clear text, with the
+tokens base64-encoded below it. It therefore reads no repository, and a reader sees the commit
+being judged — headers, message and all — before any token. Keep it next to the commit it names;
+it is tied to that history only by the bytes inside it. A message that is not UTF-8 cannot be
+printed as text and falls back to base64 for the whole pre-image (git warns on such commits).
+
+Exactly one commit has to be named and only that commit appears: the script is an artifact for a
+single seal, so `--range` is refused and no default to `HEAD` happens. A missing or second commit
+is a usage error (exit `2`). Run it once per commit to audit a series.
+
+Use an OpenSSL, not the LibreSSL that ships as `/usr/bin/openssl` on macOS: its `ts` command is
+older, has no `-purpose`, and refuses SHA-384/SHA-512 tokens. When such an `openssl` is found the
+script still runs, prints a `NOTE` naming the version, and skips the EKU check rather than passing
+it silently; tokens the older ESS check cannot handle then fail with LibreSSL's own reason.
+
+The embedded pre-image is hashed and compared with the block's `X-RFC3161-Imprint` before any
+token is trusted, so a payload edited by hand is caught. Each token is decoded and checked with
+`openssl ts -verify -purpose timestampsign`, with that same pre-image as its `-data`, against the
+anchor of the authority. The anchor is looked up at `$XDG_CONFIG_HOME/git-time/anchors/<id>.pem`
+(or `$HOME/.config/…`), then at the path the generating machine had; the bundle is passed whole as
+`-CAfile`, so its intermediates are trust material too. `PASS`/`FAIL` per token, a summary, and
+exit `1` when anything failed.
+
+A token whose authority has no anchor is a failure that names both paths it looked at. A commit with
+no token is summarised as `SKIP`, so an unsealed or dropped commit stays visible instead of
+vanishing. `--require-sealed` and `--require-signed` were applied when the script was generated and
+are named in it, but the script does not re-check them. Only tokens in the commit trailer are audited: a seal kept only in a note
+is not reached. `--json` and `--openssl` exclude each other, as do `--range` and `--openssl`.
 
 ### `git time log [--range RANGE] [--json] [<commit>…]`
 
