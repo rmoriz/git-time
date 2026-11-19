@@ -9,9 +9,11 @@
 //! `tsa list` and doctor can name them as unusable instead of as never fetched.
 //!
 //! `list` names each configured anchor with the fingerprint and `notAfter` of
-//! its first certificate. The first certificate is the trust anchor, so a
-//! `notAfter` in the past is a cheap stale signal. `--json` carries the same
-//! fields for a machine reader.
+//! its first certificate, then one line per root of the bundle. The first
+//! certificate is the trust anchor, so a `notAfter` in the past is a cheap stale
+//! signal; a chained bundle lists every root it holds, so an appended one shows
+//! up as a second line. `--json` carries the same fields for a machine reader,
+//! the roots as an array.
 //!
 //! `pin` writes `time.anchors-lock` in the repository root, one
 //! `<id> <sha256-fingerprint>` line per root of every authority; `--check`
@@ -241,27 +243,45 @@ pub(crate) fn keep_unparsed(staging: &Path, target: &Path) {
     }
 }
 
+/// One anchor as `anchor list` shows it.
+struct Row {
+    id: String,
+    path: PathBuf,
+    /// The fingerprint of the first certificate, when it parses.
+    fingerprint: Option<String>,
+    /// Its `notAfter` as `YYYY-MM-DD`.
+    not_after: Option<String>,
+    /// Every root of the bundle, in file order.
+    roots: Option<Vec<anchors::RootRow>>,
+}
+
 /// One line per configured anchor, or the same fields as JSON.
 fn list(repo: &Repo, json: bool) -> Exit {
     let configured = match anchors::configured(repo) {
         Ok(configured) => configured,
         Err(exit) => return exit,
     };
-    let rows: Vec<(&str, &Path, Option<String>, Option<String>)> = configured
+    // One instant for the whole listing: every date is judged as of one moment.
+    let now = jiff::Timestamp::now();
+    let rows: Vec<Row> = configured
         .iter()
         .map(|anchor| {
-            let certificate = first_certificate_at(&anchor.path).and_then(|der| {
+            let first = first_certificate_at(&anchor.path).and_then(|der| {
                 let certificate = Certificate::from_der(&der).ok()?;
                 Some((anchors::fingerprint(&der), certificate))
             });
-            match certificate {
-                Some((fingerprint, certificate)) => (
-                    anchor.id.as_str(),
-                    anchor.path.as_path(),
-                    Some(fingerprint),
-                    Some(certificate.tbs_certificate.validity.not_after.to_string()),
-                ),
-                None => (anchor.id.as_str(), anchor.path.as_path(), None, None),
+            let (fingerprint, not_after) = match first {
+                Some((fingerprint, certificate)) => {
+                    (Some(fingerprint), Some(anchors::not_after(&certificate)))
+                }
+                None => (None, None),
+            };
+            Row {
+                id: anchor.id.clone(),
+                path: anchor.path.clone(),
+                fingerprint,
+                not_after,
+                roots: anchors::roots(&anchor.path),
             }
         })
         .collect();
@@ -269,13 +289,26 @@ fn list(repo: &Repo, json: bool) -> Exit {
     if json {
         let rows: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(id, path, fingerprint, not_after)| {
+            .map(|row| {
+                let roots: Vec<serde_json::Value> = row
+                    .roots
+                    .iter()
+                    .flatten()
+                    .map(|root| {
+                        serde_json::json!({
+                            "fingerprint": root.fingerprint,
+                            "not_after": root.not_after,
+                            "expired": anchors::expired(&root.not_after, now),
+                        })
+                    })
+                    .collect();
                 serde_json::json!({
-                    "id": id,
-                    "path": path.to_string_lossy(),
-                    "fingerprint": fingerprint,
-                    "not_after": not_after,
-                    "pinned": fingerprint.is_some(),
+                    "id": row.id,
+                    "path": row.path.to_string_lossy(),
+                    "fingerprint": row.fingerprint,
+                    "not_after": row.not_after,
+                    "pinned": row.fingerprint.is_some(),
+                    "roots": roots,
                 })
             })
             .collect();
@@ -284,14 +317,23 @@ fn list(repo: &Repo, json: bool) -> Exit {
             Err(error) => return Exit::config(format!("cannot render JSON: {error}")),
         }
     } else {
-        for (id, path, fingerprint, not_after) in &rows {
+        for row in &rows {
+            let not_after = row.not_after.as_deref().unwrap_or("-");
             println!(
-                "{id} {} {} {} pinned:{}",
-                path.display(),
-                fingerprint.as_deref().unwrap_or("-"),
-                not_after.as_deref().unwrap_or("-"),
-                fingerprint.is_some(),
+                "{} {} {} {} pinned:{}",
+                row.id,
+                row.path.display(),
+                row.fingerprint.as_deref().unwrap_or("-"),
+                anchors::expiry_text(not_after, now),
+                row.fingerprint.is_some(),
             );
+            for root in row.roots.iter().flatten() {
+                println!(
+                    "  root {} {}",
+                    root.fingerprint,
+                    anchors::expiry_text(&root.not_after, now),
+                );
+            }
         }
     }
     Exit::ok()
@@ -449,7 +491,7 @@ fn check(repo: &Repo) -> Exit {
 /// A bundle only counts when [`AnchorStore`] accepts it whole, so a broken or
 /// root-less bundle is `None` rather than an empty list. Intermediates are not
 /// roots and stay out of the lock.
-fn root_certificates(path: &Path) -> Option<Vec<Vec<u8>>> {
+pub(crate) fn root_certificates(path: &Path) -> Option<Vec<Vec<u8>>> {
     let mut store = AnchorStore::default();
     store.insert("bundle", path).ok()?;
     let roots = store.anchor("bundle")?;

@@ -268,6 +268,20 @@ fn add(repo: &Repo, new: NewTsa<'_>) -> Exit {
     Exit::ok()
 }
 
+/// One authority as `tsa list` shows it.
+struct Row {
+    id: String,
+    url: String,
+    alg: String,
+    anchor: PathBuf,
+    anchored: bool,
+    /// The fingerprint of the bundle's first certificate, when it parses.
+    fingerprint: Option<String>,
+    insecure_http: bool,
+    /// Every root of the bundle, in file order.
+    roots: Option<Vec<anchors::RootRow>>,
+}
+
 /// One line per configured authority, or the same fields as JSON.
 fn list(repo: &Repo, json: bool) -> Exit {
     let ids = match anchors::tsa_ids(repo) {
@@ -280,6 +294,8 @@ fn list(repo: &Repo, json: bool) -> Exit {
     };
     configured.sort_by(|left, right| left.id.cmp(&right.id));
 
+    // One instant for the whole listing: every date is judged as of one moment.
+    let now = jiff::Timestamp::now();
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
         let url = match local_get(repo, &format!("time.tsa.{id}.url")) {
@@ -307,25 +323,50 @@ fn list(repo: &Repo, json: bool) -> Exit {
         let anchored = pinned(&id, &anchor);
         let fingerprint =
             crate::cmd::anchor::first_certificate_at(&anchor).map(|der| anchors::fingerprint(&der));
-        rows.push((id, url, alg, anchor, anchored, fingerprint, insecure_http));
+        let roots = anchors::roots(&anchor);
+        rows.push(Row {
+            id,
+            url,
+            alg,
+            anchor,
+            anchored,
+            fingerprint,
+            insecure_http,
+            roots,
+        });
     }
 
     if json {
         let rows: Vec<Value> = rows
             .iter()
-            .map(
-                |(id, url, alg, anchor, anchored, fingerprint, insecure_http)| {
-                    json!({
-                        "id": id,
-                        "url": url,
-                        "alg": alg,
-                        "anchor": anchor.to_string_lossy(),
-                        "anchored": anchored,
-                        "fingerprint": fingerprint,
-                        "insecure_http": insecure_http,
+            .map(|row| {
+                // The authority line speaks about its first root, as the text
+                // listing does; every root then gets a line of its own.
+                let first = row.roots.iter().flatten().next();
+                let roots: Vec<Value> = row
+                    .roots
+                    .iter()
+                    .flatten()
+                    .map(|root| {
+                        json!({
+                            "fingerprint": root.fingerprint,
+                            "not_after": root.not_after,
+                            "expired": anchors::expired(&root.not_after, now),
+                        })
                     })
-                },
-            )
+                    .collect();
+                json!({
+                    "id": row.id,
+                    "url": row.url,
+                    "alg": row.alg,
+                    "anchor": row.anchor.to_string_lossy(),
+                    "anchored": row.anchored,
+                    "fingerprint": row.fingerprint,
+                    "not_after": first.map(|root| root.not_after.as_str()),
+                    "insecure_http": row.insecure_http,
+                    "roots": roots,
+                })
+            })
             .collect();
         match serde_json::to_string_pretty(&rows) {
             Ok(text) => println!("{text}"),
@@ -334,14 +375,31 @@ fn list(repo: &Repo, json: bool) -> Exit {
             }
         }
     } else {
-        for (id, url, alg, anchor, anchored, fingerprint, insecure_http) in &rows {
+        for row in &rows {
+            let first = row.roots.iter().flatten().next();
+            let not_after = first.map_or("-", |root| root.not_after.as_str());
             println!(
-                "{id} {url} {alg} {} {} ({}){}",
-                anchor.display(),
-                fingerprint.as_deref().unwrap_or("-"),
-                if *anchored { "anchored" } else { "missing" },
-                if *insecure_http { " insecure-http" } else { "" },
+                "{} {} {} {} {} {} ({}){}",
+                row.id,
+                row.url,
+                row.alg,
+                row.anchor.display(),
+                row.fingerprint.as_deref().unwrap_or("-"),
+                anchors::expiry_text(not_after, now),
+                if row.anchored { "anchored" } else { "missing" },
+                if row.insecure_http {
+                    " insecure-http"
+                } else {
+                    ""
+                },
             );
+            for root in row.roots.iter().flatten() {
+                println!(
+                    "  root {} {}",
+                    root.fingerprint,
+                    anchors::expiry_text(&root.not_after, now),
+                );
+            }
         }
     }
     Exit::ok()
@@ -376,11 +434,27 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 }
 
 /// Print the built-in presets and whether their anchor is pinned here.
+///
+/// A preset without a published fingerprint says `not pinned`: there is no
+/// certificate to read a date from, and none is fetched for it.
 fn preset_list(_repo: &Repo) -> Exit {
+    // One instant for the whole listing: every date is judged as of one moment.
+    let now = jiff::Timestamp::now();
     for preset in &presets::PRESETS {
         let anchor = anchors::dir().join(format!("{}.pem", preset.name));
+        // The pinned bundle's first certificate is the newest root; only a
+        // local one can say when it expires, so nothing is fetched here.
+        let expiry = match preset.fingerprints.last() {
+            None => "not pinned".to_owned(),
+            Some(_) => anchors::roots(&anchor)
+                .and_then(|roots| roots.into_iter().next())
+                .map_or_else(
+                    || "-".to_owned(),
+                    |root| anchors::expiry_text(&root.not_after, now),
+                ),
+        };
         println!(
-            "{} {} {} {} {} ({})",
+            "{} {} {} {} {} {} ({})",
             preset.name,
             preset.url,
             preset.alg,
@@ -390,6 +464,7 @@ fn preset_list(_repo: &Repo) -> Exit {
             // trust on first use and say so here as well as at the pin. After a
             // rotation the newest value is the one shown, not the list.
             preset.fingerprints.last().copied().unwrap_or("tofu"),
+            expiry,
             if pinned(preset.name, &anchor) {
                 "anchored"
             } else {

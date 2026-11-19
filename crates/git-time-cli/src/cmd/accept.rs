@@ -22,10 +22,11 @@
 //! apply leaves the bundle byte for byte as it was.
 //!
 //! The fetched or accepted root goes **first** in a merged bundle, ahead of the
-//! pinned ones. Every listing, the lock and the closing line of a fetch report
-//! the bundle's first certificate, so that is the slot which has to mean "the
-//! root this run brought"; a retired root stays behind it and keeps verifying
-//! old commits.
+//! pinned ones. Every listing reports the bundle's first certificate as the
+//! authority line and then every root, so an appended one shows up as a second
+//! line; the lock records each of them on its own line too. That is the slot
+//! which has to mean "the root this run brought"; a retired root stays behind it
+//! and keeps verifying old commits.
 
 use std::collections::BTreeMap;
 use std::path::Path;

@@ -133,6 +133,40 @@ fn first_der(pem: &str) -> Vec<u8> {
     BASE64.decode(body).expect("base64")
 }
 
+/// A self-signed CA whose validity window closed in 2020, so every reader of the
+/// bundle finds a root that is not valid now.
+fn stale_ca(dir: &Path) -> PathBuf {
+    let key = dir.join("stale-key.pem");
+    let ca = dir.join("stale-ca.pem");
+    openssl(&[
+        "req",
+        "-x509",
+        "-sha256",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-pkeyopt",
+        "ec_param_enc:named_curve",
+        "-nodes",
+        "-keyout",
+        &pstr(&key),
+        "-out",
+        &pstr(&ca),
+        "-not_before",
+        "20200101000000Z",
+        "-not_after",
+        "20200201000000Z",
+        "-subj",
+        "/CN=stale-ca",
+        "-config",
+        &ca_config(dir),
+        "-extensions",
+        "v3_ca",
+    ]);
+    ca
+}
+
 // --- throwaway authority ------------------------------------------------
 
 /// A throwaway TSA: a CA, a timestamping leaf and the config `openssl ts
@@ -1172,6 +1206,92 @@ fn anchor_list_json_carries_the_five_fields() {
     );
 }
 
+/// A root that closed in 2020 is not only named: the authority listing says
+/// `expired` right where the next choice is made.
+#[test]
+fn tsa_list_marks_an_expired_root() {
+    let repo = Repo::new();
+    repo.init();
+    repo.add_tsa("stale", "https://stale.example/tsr");
+    let stale = stale_ca(repo.path());
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::copy(&stale, repo.anchors().join("stale.pem")).expect("pin the stale CA");
+
+    let listing = ok(&repo.run_time(&["tsa", "list"]));
+    let root = listing
+        .lines()
+        .find(|line| line.trim_start().starts_with("root "))
+        .unwrap_or_else(|| panic!("a root line: {listing}"));
+    assert!(root.contains("2020-02-01"), "the date: {listing}");
+    assert!(root.ends_with("expired"), "the verdict: {listing}");
+
+    // The authority line speaks about its first root, so it carries the date
+    // too: a reader who greps for the id sees it.
+    let authority = listing.lines().next().expect("the authority line");
+    assert!(authority.starts_with("stale "), "{listing}");
+    assert!(authority.contains("2020-02-01 expired"), "{listing}");
+}
+
+/// The date is a machine field of its own, day-only, next to the fingerprint.
+#[test]
+fn json_carries_not_after() {
+    let repo = Repo::with_pinned_stub();
+    let stdout = ok(&repo.run_time(&["tsa", "list", "--json"]));
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("list --json is JSON");
+    let date = value[0]["not_after"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a not_after field: {stdout}"));
+    assert_eq!(date.len(), 10, "a day, not an instant: {date}");
+    assert_eq!(date.as_bytes()[4], b'-', "{date}");
+    assert_eq!(date.as_bytes()[7], b'-', "{date}");
+    // The roots array carries the same date and says it is still ahead.
+    assert_eq!(value[0]["roots"][0]["not_after"], date, "{stdout}");
+    assert_eq!(value[0]["roots"][0]["expired"], false, "{stdout}");
+}
+
+/// Every root of a chained bundle gets a line, in file order; the authority
+/// line stays on the first certificate the lock names as the run's own root.
+#[test]
+fn anchor_list_names_every_root_with_its_date() {
+    let repo = Repo::with_pinned_stub();
+    let first = fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let fresh = Authority::new();
+    let second = fingerprint(&first_der(&text(&fresh.bytes())));
+    repo.append_anchor("stub", &fresh.bytes());
+
+    let listing = ok(&repo.run_time(&["anchor", "list"]));
+    let roots: Vec<&str> = listing
+        .lines()
+        .filter(|line| line.trim_start().starts_with("root "))
+        .collect();
+    assert_eq!(roots.len(), 2, "one line per root: {listing}");
+    assert!(roots[0].contains(&first), "file order: {listing}");
+    assert!(roots[1].contains(&second), "file order: {listing}");
+    for line in &roots {
+        assert_eq!(
+            line.split_whitespace().nth(2).map(str::len),
+            Some(10),
+            "a day-only date: {line}"
+        );
+    }
+    let authority = listing.lines().next().expect("the authority line");
+    assert!(authority.starts_with("stub "), "{listing}");
+    assert!(authority.contains(&first), "{listing}");
+
+    let json = ok(&repo.run_time(&["anchor", "list", "--json"]));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("list --json is JSON");
+    assert_eq!(
+        value[0]["fingerprint"], first,
+        "the top level stays the first"
+    );
+    assert_eq!(
+        value[0]["roots"].as_array().map(Vec::len),
+        Some(2),
+        "{json}"
+    );
+    assert_eq!(value[0]["roots"][1]["fingerprint"], second, "{json}");
+}
+
 #[test]
 fn check_and_pin_name_an_unparseable_anchor() {
     let repo = Repo::with_pinned_stub();
@@ -1487,6 +1607,37 @@ fn preset_list_names_every_preset_and_marks_the_trust_level() {
             .any(|line| line.starts_with("sectigo") && line.contains(" opt-in ")),
         "the rest is opt-in: {listing}"
     );
+}
+
+/// A preset that publishes no root has no certificate to read a date from, so
+/// it says `not pinned` rather than guessing — and needs no network for it.
+#[test]
+fn preset_list_says_not_pinned_without_an_anchor() {
+    let repo = Repo::new();
+    repo.init();
+
+    let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
+    let fields = |prefix: &str| -> Vec<String> {
+        listing
+            .lines()
+            .find(|line| line.starts_with(prefix))
+            .unwrap_or_else(|| panic!("`{prefix}` in {listing}"))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    };
+    let swisssign = fields("swisssign ");
+    assert_eq!(swisssign[4], "tofu", "still the TOFU spelling: {listing}");
+    assert_eq!(swisssign[5], "not", "{listing}");
+    assert_eq!(swisssign[6], "pinned", "{listing}");
+    // A published root has no local certificate to read a date from, so it
+    // says `-` rather than fetching one over the network.
+    let freetsa = fields("freetsa ");
+    assert_eq!(
+        freetsa[5], "-",
+        "a published root without a local pin has no date: {listing}"
+    );
+    assert_eq!(freetsa[6], "(missing)", "{listing}");
 }
 
 #[test]

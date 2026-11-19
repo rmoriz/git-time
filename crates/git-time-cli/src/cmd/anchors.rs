@@ -1,5 +1,6 @@
 //! Anchor bundles: where they live, how they are fetched, and how doctor names
-//! them.
+//! them. The listings here also carry each root's `notAfter` with an `expired`
+//! or soon marker, because a rotation is only noticed where the choice is made.
 //!
 //! An anchor is only useful once it is pinned locally, so a preset
 //! public` writes one bundle per authority and prints its SHA-256 fingerprint for
@@ -111,6 +112,18 @@ pub fn expiry_label(not_after: &str, now: jiff::Timestamp) -> &'static str {
 #[must_use]
 pub fn expired(not_after: &str, now: jiff::Timestamp) -> bool {
     expiry_label(not_after, now) == "expired"
+}
+
+/// The date for a listing, with its verdict when there is one.
+///
+/// The space is only there when something follows it, so a quiet line does not
+/// end in a blank.
+#[must_use]
+pub fn expiry_text(not_after: &str, now: jiff::Timestamp) -> String {
+    match expiry_label(not_after, now) {
+        "" => not_after.to_owned(),
+        label => format!("{not_after} {label}"),
+    }
 }
 
 /// One root of a pinned bundle, as the listings show it.
@@ -700,6 +713,48 @@ mod tests {
             certificate.tbs_certificate.subject, certificate.tbs_certificate.issuer,
             "the first certificate is the self-signed root"
         );
+    }
+
+    /// Midnight UTC of `year-month-day`, as the display sites take their `now`.
+    fn at(year: i16, month: i8, day: i8) -> jiff::Timestamp {
+        jiff::civil::date(year, month, day)
+            .at(0, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .expect("an instant")
+            .timestamp()
+    }
+
+    #[test]
+    fn a_date_before_now_is_expired() {
+        assert_eq!(expiry_label("2025-12-31", at(2026, 1, 1)), "expired");
+        // The expiration day itself is past at its own midnight.
+        assert_eq!(expiry_label("2026-01-01", at(2026, 1, 1)), "(expires soon)");
+    }
+
+    #[test]
+    fn eighty_nine_days_out_is_soon() {
+        assert_eq!(expiry_label("2026-03-31", at(2026, 1, 1)), "(expires soon)");
+        // Exactly the horizon still counts.
+        assert_eq!(expiry_label("2026-04-01", at(2026, 1, 1)), "(expires soon)");
+    }
+
+    #[test]
+    fn ninety_one_days_out_is_quiet() {
+        assert_eq!(expiry_label("2026-04-02", at(2026, 1, 1)), "");
+    }
+
+    #[test]
+    fn an_unparsable_date_has_no_verdict() {
+        assert_eq!(expiry_label("", at(2026, 1, 1)), "");
+        assert_eq!(expiry_label("soon", at(2026, 1, 1)), "");
+        // A malformed `to_string` of an ASN.1 time is short, and still quiet.
+        assert_eq!(not_after_of("20260101000000Z"), "");
+    }
+
+    /// `expiry_label` over a full instant string, to show the truncation that
+    /// [`not_after`] does is what makes a date parse.
+    fn not_after_of(text: &str) -> &'static str {
+        expiry_label(&text.chars().take(10).collect::<String>(), at(2026, 1, 1))
     }
 
     fn runtime() -> tokio::runtime::Runtime {

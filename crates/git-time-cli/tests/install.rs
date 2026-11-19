@@ -1143,6 +1143,32 @@ fn doctor_problems_no_root_valid_now() {
     assert_eq!(value["anchors"][0]["expired"], 1, "{value}");
 }
 
+/// The expiry sits next to the fingerprint, so a reader sees the stale root
+/// before they see the problem line further down.
+#[test]
+fn doctor_shows_when_the_anchor_expires() {
+    let repo = Repo::new();
+    let stale = stale_ca(repo.authority.dir.path());
+    repo.config("time.tsa.stub.anchor", &pstr(&stale));
+    assert!(repo.install().status.success());
+
+    let doctor = repo.run_time(&["doctor"]);
+    let stdout = text(&doctor.stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("anchor stub: "))
+        .unwrap_or_else(|| panic!("the anchor line: {stdout}"));
+    assert!(line.contains("sha256"), "the fingerprint: {line}");
+    assert!(line.contains("2020-02-01 expired"), "the verdict: {line}");
+
+    // A live anchor is only quiet about a distant date; these fixtures close in
+    // two days, so the warning is there as well.
+    let live = Repo::new();
+    assert!(live.install().status.success());
+    let stdout = text(&live.run_time(&["doctor"]).stdout);
+    assert!(stdout.contains("(expires soon)"), "{stdout}");
+}
+
 #[test]
 fn doctor_problems_a_head_anchoring_an_unpinned_root() {
     let repo = Repo::blank();

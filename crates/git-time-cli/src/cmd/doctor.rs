@@ -4,7 +4,8 @@
 //! binary is, which hooks directory git uses, the state of every hook this tool
 //! owns (`ours`, `chained`, `foreign`, `absent`, `not-executable`, `dangling`),
 //! whether `time.gate` agrees with each installed `pre-*` hook, how many
-//! authorities are configured, and each anchor's path and SHA-256 fingerprint.
+//! authorities are configured, and each anchor's path, SHA-256 fingerprint and
+//! first certificate's expiry.
 //!
 //! These things make it exit `1`: no authority at all, an anchor that is missing,
 //! unreadable or not a parseable certificate bundle, an anchor bundle with no
@@ -26,6 +27,7 @@ use git_time_core::store;
 use git_time_core::trust::{self, AnchorStore};
 use serde_json::{Map, Value, json};
 
+use crate::cmd::anchor::first_certificate;
 use crate::cmd::{Exit, anchors, hooks, open};
 
 /// Run `git time doctor`.
@@ -220,8 +222,17 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     // the next commit.
                     let parse = AnchorStore::load(&[(id.clone(), anchor.path.clone())]);
                     let fingerprint = anchors::fingerprint(&bytes);
+                    let expiry = first_certificate(&bytes)
+                        .and_then(|der| x509_cert::Certificate::from_der(&der).ok())
+                        .map(|certificate| {
+                            format!(
+                                " {}",
+                                anchors::expiry_text(&anchors::not_after(&certificate), now)
+                            )
+                        })
+                        .unwrap_or_default();
                     report.say(format!(
-                        "anchor {id}: {} sha256 {fingerprint}",
+                        "anchor {id}: {} sha256 {fingerprint}{expiry}",
                         anchor.path.display()
                     ));
                     let mut roots = 0;

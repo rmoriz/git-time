@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 
 use git_time_core::presets::Preset;
 
+use crate::cmd::anchors;
 use crate::cmd::tsa::parse_choice;
 
 /// The keys the selector understands.
@@ -198,10 +199,10 @@ const HELP: &str = "space toggle  a all  n none  j/k or arrows move  enter save 
 /// One screen frame for a `rows` x `cols` terminal.
 ///
 /// Narrow and windowed on purpose. The row itself carries only what a choice
-/// needs — cursor, tick, index, name, trust tier, transport — at fixed widths,
-/// so a wrapped line cannot push the table off the top of a default terminal.
-/// The endpoint of the cursor row is printed in full below the list instead of
-/// costing a column.
+/// needs — cursor, tick, index, name, trust tier with the pinned root's expiry,
+/// transport — at fixed widths, so a wrapped line cannot push the table off the
+/// top of a default terminal. The endpoint of the cursor row is printed in full
+/// below the list instead of costing a column.
 ///
 /// At most `rows - 1` lines, at most `cols - 1` columns, lines separated by
 /// `\r\n` and the last one not terminated. All three leave the bottom row and
@@ -215,6 +216,8 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
     let len = presets.len();
     let cursor = selection.cursor().min(len.saturating_sub(1));
     let url = presets.get(cursor).map_or("", |preset| preset.url);
+    // One instant for the whole frame, so a repaint cannot straddle midnight.
+    let now = jiff::Timestamp::now();
 
     // Footer: URL, help, count, prompt, and the error line when there is one.
     let footer = 4 + usize::from(selection.error().is_some());
@@ -242,7 +245,7 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
             lines.push("  …".to_owned());
         }
         for (index, preset) in presets.iter().enumerate().take(end).skip(start) {
-            lines.push(row(selection, index, preset));
+            lines.push(row(selection, index, preset, now));
         }
         if end < len {
             lines.push("  …".to_owned());
@@ -271,23 +274,48 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
 }
 
 /// One row, at the fixed widths, with the long fields fitted.
-fn row(selection: &Selection, index: usize, preset: &Preset) -> String {
+fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestamp) -> String {
     let cursor = if index == selection.cursor() {
         '>'
     } else {
         ' '
     };
     let tick = if selection.is_chosen(index) { 'x' } else { ' ' };
-    let trust = match preset.fingerprints.last() {
-        Some(fingerprint) => format!("pin {fingerprint}"),
-        None => "tofu".to_owned(),
-    };
+    // The default bundle path is what `install` writes; a configured path is not
+    // known here, and a preset that is pinned here is pinned there.
+    let anchor = anchors::dir().join(format!("{}.pem", preset.name));
+    let trust = trust(preset, anchors::roots(&anchor).as_deref(), now);
     format!(
         " {cursor} [{tick}] {:>2}  {:<NAME_WIDTH$} {:<TRUST_WIDTH$} {}",
         index + 1,
         fit(preset.name, NAME_WIDTH),
         fit(&trust, TRUST_WIDTH),
         if preset.insecure_http { "http" } else { "" },
+    )
+}
+
+/// The trust column: `pin <YYYY-MM-DD>` for a published root, `tofu` without
+/// one, and `EXPIRED` once none of the bundle's roots is valid at `now`.
+///
+/// A published root that is not pinned on this machine has no date to show and
+/// says `pin -`; the date is what a reader weighs a rotation by, so it sits
+/// where the choice is made.
+fn trust(preset: &Preset, roots: Option<&[anchors::RootRow]>, now: jiff::Timestamp) -> String {
+    if preset.fingerprints.is_empty() {
+        return "tofu".to_owned();
+    }
+    let Some(roots) = roots.filter(|roots| !roots.is_empty()) else {
+        return "pin -".to_owned();
+    };
+    if roots
+        .iter()
+        .all(|root| anchors::expired(&root.not_after, now))
+    {
+        return "EXPIRED".to_owned();
+    }
+    roots.first().map_or_else(
+        || "pin -".to_owned(),
+        |root| format!("pin {}", root.not_after),
     )
 }
 
@@ -699,14 +727,11 @@ mod tests {
                 .to_owned()
         };
 
-        // A 40-character name and a 59-character fingerprint, both cut.
+        // A 40-character name, cut. The trust column holds `pin <day>` or
+        // `EXPIRED`, which fit the width, so only the name needs the ellipsis.
         let long = row_of(&[long_preset()]);
         assert!(long.chars().count() < 60, "{long:?}");
-        assert_eq!(
-            long.matches('…').count(),
-            2,
-            "name and trust are cut: {long:?}"
-        );
+        assert_eq!(long.matches('…').count(), 1, "the name is cut: {long:?}");
 
         // The trust column starts at the same place whether the name was cut or not.
         let column = |line: &str, marker: &str| {
@@ -775,5 +800,68 @@ mod tests {
     fn a_short_fingerprint_is_not_abbreviated() {
         assert_eq!(super::fit("AB:CD", 16), "AB:CD");
         assert!(super::fit(&"A".repeat(40), 16).ends_with('…'));
+    }
+
+    /// Midnight UTC of `year-month-day`, as a frame takes its `now`.
+    fn at(year: i16, month: i8, day: i8) -> jiff::Timestamp {
+        jiff::civil::date(year, month, day)
+            .at(0, 0, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .expect("an instant")
+            .timestamp()
+    }
+
+    fn root(not_after: &str) -> super::anchors::RootRow {
+        super::anchors::RootRow {
+            fingerprint: "AB:CD".to_owned(),
+            not_after: not_after.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_trust_column_says_the_pin_and_its_date() {
+        let preset = presets::find("digicert").expect("a pinned preset");
+        assert_eq!(
+            super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
+            "pin 2030-01-01"
+        );
+    }
+
+    #[test]
+    fn an_authority_without_a_live_root_says_expired() {
+        let preset = presets::find("digicert").expect("a pinned preset");
+        assert_eq!(
+            super::trust(
+                preset,
+                Some(&[root("2020-01-01"), root("2020-02-01")]),
+                at(2026, 1, 1)
+            ),
+            "EXPIRED"
+        );
+        // One live root is enough, and the first root's day is the one shown.
+        assert_eq!(
+            super::trust(
+                preset,
+                Some(&[root("2020-01-01"), root("2030-01-01")]),
+                at(2026, 1, 1)
+            ),
+            "pin 2020-01-01"
+        );
+    }
+
+    #[test]
+    fn an_unpublished_preset_stays_tofu() {
+        let preset = presets::find("swisssign").expect("a TOFU preset");
+        assert_eq!(
+            super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
+            "tofu"
+        );
+        assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "tofu");
+    }
+
+    #[test]
+    fn a_published_root_that_is_not_pinned_here_has_no_date() {
+        let preset = presets::find("digicert").expect("a pinned preset");
+        assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "pin -");
     }
 }
