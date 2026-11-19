@@ -430,11 +430,17 @@ const OPENSSL_HEADER: &str = r##"#!/bin/sh
 # re-checked.
 #
 # Everything the script writes goes into one mktemp -d directory, removed on
-# exit.
+# exit. Only EXIT cleans up: the signals exit with their usual code and the EXIT
+# trap then runs once, so a Ctrl-C stops the script instead of leaving it
+# working against a deleted directory — and `rm -rf` can never widen past the
+# mktemp path, because an empty $scratch is spelled out.
 set -eu
 
-scratch=$(mktemp -d)
-trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+scratch=$(mktemp -d) || exit 1
+trap 'rm -rf "${scratch:-}"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 "##;
 
 /// The counters and the `-purpose` probe, before any commit block.

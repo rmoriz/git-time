@@ -1411,8 +1411,20 @@ fn openssl_prints_a_script_with_one_verify_per_token() {
     );
     assert!(script.starts_with("#!/bin/sh\n"), "{script}");
     assert!(script.contains("set -eu"), "{script}");
-    assert!(script.contains("mktemp -d"), "{script}");
-    assert!(script.contains("trap 'rm -rf \"$scratch\"'"), "{script}");
+    assert!(script.contains("mktemp -d) || exit 1"), "{script}");
+    // Cleanup hangs off EXIT only; the signals exit, so their trap runs it once.
+    assert!(
+        script.contains("trap 'rm -rf \"${scratch:-}\"' EXIT"),
+        "{script}"
+    );
+    assert!(!script.contains("EXIT HUP INT TERM"), "{script}");
+    for line in [
+        "trap 'exit 130' INT",
+        "trap 'exit 143' TERM",
+        "trap 'exit 129' HUP",
+    ] {
+        assert!(script.contains(line), "missing `{line}`: {script}");
+    }
     assert!(script.contains("-purpose timestampsign"), "{script}");
     // The script is a document: the payload is embedded, so nothing here walks
     // the repository or needs a decompressor.
@@ -1517,6 +1529,71 @@ fn a_tampered_pre_image_fails_the_openssl_script() {
         "the imprint mismatch is named: {all:?}"
     );
     assert!(all.iter().any(|line| line == "FAILED"), "{all:?}");
+}
+
+/// Exactly one directory is made, and it is gone again afterwards; an
+/// interrupt stops the script and still cleans up.
+#[test]
+fn the_openssl_script_cleans_its_scratch_directory() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.head();
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+    let path = repo.path().join(".git/time-audit.sh");
+    let tmp = TempDir::new().expect("TMPDIR");
+
+    fn run(path: &Path, dir: &Path, tmp: &Path) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .arg(path)
+            .current_dir(dir)
+            .env("TMPDIR", tmp)
+            .env("XDG_CONFIG_HOME", tmp)
+            .envs(insulated_env().iter().copied())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    std::fs::write(&path, &script).expect("write the script");
+    let output = run(&path, repo.path(), tmp.path())
+        .output()
+        .expect("runs sh");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).expect("read TMPDIR").count(),
+        0,
+        "the scratch directory is removed"
+    );
+
+    // A slow copy: the sleep leaves room to interrupt it mid-run.
+    let slow = script.replace("set -eu\n", "set -eu\nsleep 2\n");
+    std::fs::write(&path, &slow).expect("write the slow script");
+    let mut child = run(&path, repo.path(), tmp.path())
+        .spawn()
+        .expect("spawns sh");
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .expect("kills sh");
+    assert!(killed.success());
+    let status = child.wait().expect("waits for sh");
+    // A shell may report the trap's `exit 143` or die by the signal itself,
+    // depending on whether it defers the trap past the running command.
+    assert!(
+        status.code().is_none() || status.code() == Some(143),
+        "TERM stops the script: {status:?}"
+    );
+    assert_eq!(
+        std::fs::read_dir(tmp.path()).expect("read TMPDIR").count(),
+        0,
+        "the scratch directory is removed on TERM too"
+    );
 }
 
 /// A gate is decided when the script is generated: it is named, counted, and
