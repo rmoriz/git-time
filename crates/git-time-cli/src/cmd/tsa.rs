@@ -1338,7 +1338,8 @@ mod tests {
         preset.fingerprints = &["AA:BB"];
         assert_eq!(pin_state(&preset, None), "-");
 
-        let expiry = Some("expires 2026-12-02".to_owned());
-        assert_eq!(pin_state(&preset, expiry), "expires 2026-12-02");
+        // The shape `expiry_text` returns at the caller, short form included.
+        let expiry = Some("2026-12-02 (expires soon)".to_owned());
+        assert_eq!(pin_state(&preset, expiry), "2026-12-02 (expires soon)");
     }
 }

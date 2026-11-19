@@ -491,7 +491,11 @@ their
 .B pinned
 fingerprint or
 .BR tofu ,
-and whether the anchor is present.
+the newest root's expiry date, and whether the anchor is present.
+A published root that is not pinned here has no date and reads
+.BR \- ;
+so does a pinned bundle whose every root is past, which reads
+.BR EXPIRED .
 Exits 0.
 .PP
 .B git time tsa preset add \fIname\fR
@@ -542,6 +546,16 @@ Type a selection
 to override the ticks; an empty answer keeps them, and that is also what
 .B enter
 saves when nothing was typed.
+.PP
+The \fBpin\fR column is the trust tier and shows the newest root's expiry;
+one in its last 90 days reads
+.BR "pin expires date" ,
+a bundle whose every root is past reads
+.BR EXPIRED ,
+and a published root not pinned on this machine reads
+.BR "pin \-" ;
+.B enter
+pins it. A root that disagrees with the table is a mismatch and a refusal.
 .PP
 Without a terminal the command refuses rather than hanging.
 .TP

@@ -37,7 +37,8 @@ trust this tool's own crypto.
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
 everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`).
 Authorities already configured start ticked. The `pin` column is the trust tier: the root is checked
-against the table and a mismatch is a refusal.
+against the table and a mismatch is a refusal. `pin -` is a published root that is not pinned on this
+machine yet — what a fresh clone shows for every row — and `enter` pins it on the way out.
 `tofu` can only be reviewed by reading the fingerprint the command prints. `http` marks a plain-http
 endpoint; the full URL of the cursor row is printed below the list, so no column has to carry it.
 
@@ -45,7 +46,8 @@ endpoint; the full URL of the cursor row is printed below the list, so no column
  > [x]  1  freetsa            pin 2041-03-07 
    [x]  2  digicert           pin 2031-11-10 http
    [ ]  3  sectigo            pin 2045-10-04 
-   [ ]  4  izenpe             pin 2045-09-23 http
+   [ ]  4  certum             pin - http
+   [ ]  5  izenpe             pin 2045-09-23 http
   …
 url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
@@ -55,9 +57,10 @@ space toggle  a all  n none  j/k or arrows move  enter save  q abort
 
 `enter` saves and pins; `q`, `esc` or `ctrl-c` leave without writing. A change keeps the other
 configured authorities because they start ticked; `n` clears every tick, and saving that empty set is
-how preset sections are removed. The `pin` dates are the roots' expiry; one inside the window reads
-`expires <date>`, a bundle all past reads `EXPIRED`. `git time install` on a repository with no
-authority hands over to the same UI, so installing and choosing can be one step.
+how preset sections are removed. The `pin` dates are the roots' expiry; a root in its last 90 days
+reads `pin expires <date>`, a bundle all past reads `EXPIRED`, and `pin -` is a published root not
+pinned here yet, which `enter` pins. `git time install` on a repository with no authority hands over
+to the same UI, so installing and choosing can be one step.
 
 In a script, no prompt happens: `git time tsa preset add <id>` enables one preset and `git time
 tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without a terminal exits

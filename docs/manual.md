@@ -267,7 +267,8 @@ The list is a cursor UI on the alternate screen. `a` really is all 21.
  > [x]  1  freetsa            pin 2041-03-07 
    [x]  2  digicert           pin 2031-11-10 http
    [ ]  3  sectigo            pin 2045-10-04 
-   [ ]  4  izenpe             pin 2045-09-23 http
+   [ ]  4  certum             pin - http
+   [ ]  5  izenpe             pin 2045-09-23 http
   …
 url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
@@ -295,10 +296,11 @@ keeps the frame. A terminal that cannot be put into raw mode at all falls back t
 the early versions, saying so in one line.
 
 The `pin` column is the trust tier: the root is checked against the table when it is pinned and a
-mismatch is a refusal. The date is the newest live root's `notAfter`; a root inside the expiry
-window reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row
-is due a rotation before the answer refuses the fetch. `tofu` can only be reviewed by reading the
-fingerprint the command prints —
+mismatch is a refusal. The date is the newest live root's `notAfter`; a root in its last 90 days
+reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row is due
+a rotation before the answer refuses the fetch. `pin -` is a published root that is not pinned on
+this machine yet — the state of every row on a fresh clone — and `enter` pins it. `tofu` can only be
+reviewed by reading the fingerprint the command prints —
 `git time anchor pin` records the pinned bundle's fingerprint in `time.anchors-lock` so a later
 change is caught. `http` marks a plain-`http` endpoint; the endpoint of the cursor row is printed in
 full below the list.

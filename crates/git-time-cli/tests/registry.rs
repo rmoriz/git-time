@@ -2275,7 +2275,8 @@ fn select_checks_the_terminal_before_it_reads_the_config() {
     assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
     let stderr = text(&refused.stderr);
     assert!(stderr.contains("not a terminal"), "{stderr}");
-    assert!(!stderr.contains("git config"), "{stderr}");
+    // The repository open would have said this instead had it run first.
+    assert!(!stderr.contains("not a git repository"), "{stderr}");
 
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644))
         .expect("restore the config");

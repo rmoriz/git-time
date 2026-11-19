@@ -895,9 +895,11 @@ mod tests {
 
     /// A preset that publishes a root but has none pinned locally: the `pin -`
     /// tier. Constructed for the same reason as [`unpublished`], so the
-    /// assertion does not depend on what is pinned on the machine.
+    /// assertion does not depend on what is pinned on the machine. The name is
+    /// its own so `frame()` cannot find a stray `unpublished.pem` of a reader.
     fn published_without_bundle() -> presets::Preset {
         presets::Preset {
+            name: "published-but-local",
             fingerprints: &["AA:BB:CC"],
             ..unpublished()
         }
