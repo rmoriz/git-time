@@ -46,6 +46,9 @@ struct Gate {
 
 impl Gate {
     /// Whether the printer has left, for whatever reason.
+    ///
+    /// Relaxed, so the caller must hold `done`: every write is made under that
+    /// lock for exactly this reason.
     fn closed(&self) -> bool {
         self.closed.load(Ordering::Relaxed)
     }
@@ -112,6 +115,11 @@ where
     // worker: a head that is seconds slower than the rest would otherwise park
     // the pool and turn the tail into a second, serial run. Even at the cap the
     // window is a few hundred kept results, far below a long range.
+    //
+    // The trade has a residue: a head that is slow enough to dominate the whole
+    // run still holds the tail back by what is left of the range, because the
+    // window only covers commits, not time. On 2,001 commits behind a 40 s head
+    // that is +13 s; ordinary skew costs nothing.
     let window = workers * 32;
     let gate = Gate {
         done: Mutex::new(0),
@@ -238,6 +246,7 @@ mod tests {
     #[test]
     fn a_printing_panic_does_not_hang_the_pool() {
         let oids: Vec<String> = (0..600).map(|index| index.to_string()).collect();
+        let started = std::time::Instant::now();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             ordered(
                 &oids,
@@ -259,6 +268,9 @@ mod tests {
             );
         }));
         assert!(outcome.is_err());
+        // A hang would be caught by the harness eventually; the bound says so
+        // outright.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     /// A panicking commit is one error entry, not a lost index that stalls the
