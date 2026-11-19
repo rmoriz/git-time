@@ -20,6 +20,12 @@
 //! [`apply`] is the one write path: it parses before writing, refuses a root
 //! nobody expected, and appends only when the fingerprint matches. A refused
 //! apply leaves the bundle byte for byte as it was.
+//!
+//! The fetched or accepted root goes **first** in a merged bundle, ahead of the
+//! pinned ones. Every listing, the lock and the closing line of a fetch report
+//! the bundle's first certificate, so that is the slot which has to mean "the
+//! root this run brought"; a retired root stays behind it and keeps verifying
+//! old commits.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -107,8 +113,12 @@ pub(crate) enum Applied {
     FirstPin {
         /// The fetched root in the printed length.
         fingerprint: String,
+        /// Whether an `--accept` was what pinned it rather than trust on first
+        /// use.
+        accepted: bool,
     },
-    /// A human accepted the root: it was appended next to the pinned ones.
+    /// The root was accepted, by a human or by a block naming it: it was
+    /// appended ahead of the pinned ones.
     Appended {
         /// The fetched root in the printed length.
         fingerprint: String,
@@ -128,14 +138,29 @@ pub(crate) enum Applied {
     Unusable(String),
 }
 
+/// What a fetched bundle's first certificate matched.
+#[derive(Default)]
+struct Matched {
+    /// The published value that matched, when one did.
+    published: Option<&'static str>,
+    /// The root is one a trailer block named.
+    named: bool,
+    /// The certificate is already pinned, as a root or an intermediate.
+    pinned: bool,
+}
+
 /// Parse the fetched `bytes` as `id`'s bundle and place them at `path`.
 ///
 /// `published` are the fingerprints the authority publishes, `named` the roots
 /// a trailer block says the tokens were verified with, and `accept` the value a
-/// human passed. A root matching any of them replaces the bundle; a root
-/// matching none is refused unless `accept` names it, in which case it is
-/// appended instead. A match against the roots already in `path` is a match
-/// too: the retired root came back, and the fetch is only new chain material.
+/// human passed. A root matching any of them is taken without asking.
+///
+/// A match against the certificates already in `path` is a match too: the
+/// retired root came back, and the fetch is only new chain material, so the
+/// bundle is replaced. A root only a block names, on the other hand, is
+/// appended when a bundle is pinned: the served bundle may be narrower than
+/// what old commits still need. A root matching nothing is refused unless
+/// `accept` names it, in which case it is appended the same way.
 ///
 /// `tofu` says whether a root nothing describes may still be pinned when
 /// nothing is pinned yet. That is the rule of `anchor fetch`, which is what a
@@ -181,6 +206,20 @@ pub(crate) fn apply(
                 .collect()
         })
         .unwrap_or_default();
+    // A re-fetch of a leaf-first bundle repeats its leaves, which sit in the
+    // store as intermediates: every pinned certificate is an expectation, not
+    // only the roots.
+    let pinned_certificates: Vec<Vec<u8>> = store
+        .anchor(id)
+        .map(|anchor| {
+            anchor
+                .roots
+                .iter()
+                .chain(anchor.intermediates.iter())
+                .map(|certificate| certificate.as_bytes().to_vec())
+                .collect()
+        })
+        .unwrap_or_default();
 
     // The evidence of a block is the most specific expectation there is, the
     // publication of the authority the most general; a root already pinned is
@@ -196,16 +235,25 @@ pub(crate) fn apply(
         pinned_roots.iter().map(String::as_str).collect()
     };
     let found = digest_for(display.last().copied(), &der);
-    let published_match = fingerprint_matches(published, &der);
-    let expected = published_match.is_some()
-        || named.iter().any(|value| matches(value, &der))
-        || pinned_roots.iter().any(|value| matches(value, &der));
+    let matched = Matched {
+        published: fingerprint_matches(published, &der),
+        named: named.iter().any(|value| matches(value, &der)),
+        pinned: pinned_certificates
+            .iter()
+            .any(|value| value.as_slice() == der),
+    };
     let accepted = accept.is_some_and(|value| matches(value, &der));
 
-    if expected {
+    // A root a block names is appended, not replaced, whenever a bundle is
+    // already pinned: the served bundle may be narrower than what the evidence
+    // of older commits needs, and replacing would drop those roots.
+    if matched.named && pinned {
+        return append(&mut store, id, path, &staging, &found, matched.published);
+    }
+    if matched.named || matched.published.is_some() || matched.pinned {
         return match replace(&staging, path) {
             Ok(()) => Applied::Replaced {
-                matched: published_match,
+                matched: matched.published,
                 fingerprint: found,
             },
             Err(error) => Applied::Unusable(error),
@@ -215,7 +263,10 @@ pub(crate) fn apply(
         // Nothing is expected and nothing was pinned: trust on first use.
         if !pinned && (tofu || display.is_empty()) {
             return match replace(&staging, path) {
-                Ok(()) => Applied::FirstPin { fingerprint: found },
+                Ok(()) => Applied::FirstPin {
+                    fingerprint: found,
+                    accepted: false,
+                },
                 Err(error) => Applied::Unusable(error),
             };
         }
@@ -228,34 +279,74 @@ pub(crate) fn apply(
     if !pinned {
         // An accept with nothing to append to is a plain pin.
         return match replace(&staging, path) {
-            Ok(()) => Applied::FirstPin { fingerprint: found },
+            Ok(()) => Applied::FirstPin {
+                fingerprint: found,
+                accepted: true,
+            },
             Err(error) => Applied::Unusable(error),
         };
     }
-    let added = match store.append(id, &staging) {
+    append(&mut store, id, path, &staging, &found, matched.published)
+}
+
+/// Append the staged bundle to what is pinned at `path` and write the merge.
+///
+/// The new roots come first and the ones that were pinned follow, so the first
+/// certificate keeps meaning "the root this run brought" for every listing and
+/// for the lock. Nothing is added twice: [`AnchorStore::append`] collapses the
+/// roots and intermediates that were already there.
+fn append(
+    store: &mut AnchorStore,
+    id: &str,
+    path: &Path,
+    staging: &Path,
+    found: &str,
+    published: Option<&'static str>,
+) -> Applied {
+    let pinned_roots: Vec<Vec<u8>> = store
+        .anchor(id)
+        .map(|anchor| {
+            anchor
+                .roots
+                .iter()
+                .map(|root| root.as_bytes().to_vec())
+                .collect()
+        })
+        .unwrap_or_default();
+    let added = match store.append(id, staging) {
         Ok(added) => added,
         Err(error) => {
-            let _ = std::fs::remove_file(&staging);
+            let _ = std::fs::remove_file(staging);
             return Applied::Unusable(error.to_string());
         }
     };
     let Some(anchor) = store.anchor(id) else {
-        let _ = std::fs::remove_file(&staging);
+        let _ = std::fs::remove_file(staging);
         return Applied::Unusable(format!("`{id}` is not pinned"));
     };
     let roots = anchor.roots.len();
-    if let Err(error) = std::fs::write(&staging, bundle(anchor)) {
-        let _ = std::fs::remove_file(&staging);
+    // A root that was already pinned (only its chain material is new) is a
+    // refresh, not an append; the merge is written either way.
+    let outcome = if added == 0 {
+        Applied::Replaced {
+            matched: published,
+            fingerprint: found.to_owned(),
+        }
+    } else {
+        Applied::Appended {
+            fingerprint: found.to_owned(),
+            added,
+            roots,
+        }
+    };
+    if let Err(error) = std::fs::write(staging, bundle(anchor, &pinned_roots)) {
+        let _ = std::fs::remove_file(staging);
         return Applied::Unusable(format!("cannot write {}: {error}", staging.display()));
     }
     // The merged bundle is moved over the target like a fetch, so a failed
     // write cannot leave half a bundle behind.
-    match replace(&staging, path) {
-        Ok(()) => Applied::Appended {
-            fingerprint: found,
-            added,
-            roots,
-        },
+    match replace(staging, path) {
+        Ok(()) => outcome,
         Err(error) => Applied::Unusable(error),
     }
 }
@@ -268,11 +359,21 @@ fn replace(staging: &Path, path: &Path) -> Result<(), String> {
     })
 }
 
-/// `anchor` as a PEM bundle: its roots first, then its intermediates, duplicates
-/// collapsed by [`AnchorStore::append`].
-fn bundle(anchor: &Anchor) -> Vec<u8> {
+/// `anchor` as a PEM bundle: the roots `pinned` did not hold first, then the
+/// retired ones, then the intermediates. Duplicates are collapsed by
+/// [`AnchorStore::append`], so the order only decides which certificate is
+/// first — and the first one is what the listings report.
+fn bundle(anchor: &Anchor, pinned: &[Vec<u8>]) -> Vec<u8> {
+    let (fresh, retired): (Vec<_>, Vec<_>) = anchor
+        .roots
+        .iter()
+        .partition(|root| !pinned.iter().any(|value| value == root.as_bytes()));
     let mut body = String::new();
-    for certificate in anchor.roots.iter().chain(anchor.intermediates.iter()) {
+    for certificate in fresh
+        .into_iter()
+        .chain(retired)
+        .chain(anchor.intermediates.iter())
+    {
         let encoded = BASE64.encode(certificate.as_bytes());
         body.push_str("-----BEGIN CERTIFICATE-----\n");
         for chunk in encoded.as_bytes().chunks(64) {

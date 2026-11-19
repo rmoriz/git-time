@@ -160,7 +160,7 @@ pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool, accept: &[
                 unpinned.push((anchor.id, anchor.path));
                 continue;
             };
-            match pin(&repo, preset, &accept, &none).await {
+            match pin(&repo, preset, &accept, &none, "git time install").await {
                 Ok(pinned) if pinned.fingerprint_mismatch => mismatched += 1,
                 Ok(pinned) => match pinned.missing_anchor {
                     Some(path) => unpinned.push((pinned.id.to_owned(), path)),
@@ -171,7 +171,7 @@ pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool, accept: &[
         }
     }
     for authority in &authorities {
-        match pin(&repo, authority, &accept, &none).await {
+        match pin(&repo, authority, &accept, &none, "git time install").await {
             Ok(pinned) => {
                 kept += pinned.kept;
                 // A mismatch already said its loud line naming both values; the
@@ -247,12 +247,14 @@ pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool, accept: &[
 ///
 /// `accept` carries the fingerprints a human confirmed, `named` the roots a
 /// trailer block names for the id; both are keyed by id and empty on the paths
-/// that have neither.
+/// that have neither. `command` is how the caller is invoked, for the line that
+/// tells a reader how to accept a refused root — not every caller has the flag.
 pub(crate) async fn pin(
     repo: &Repo,
     authority: &Authority,
     accept: &BTreeMap<String, String>,
     named: &BTreeMap<String, Vec<String>>,
+    command: &str,
 ) -> Result<Pinned, Exit> {
     let base = format!("time.tsa.{}", authority.name);
     // Read before writing: the key may be set already and is then the target.
@@ -353,13 +355,33 @@ pub(crate) async fn pin(
                     fingerprint
                 );
             }
-            crate::cmd::accept::Applied::FirstPin { fingerprint } => {
+            crate::cmd::accept::Applied::FirstPin {
+                fingerprint,
+                accepted: false,
+            } => {
                 // Trust on first use: the printed value is the only thing that
                 // makes the first pin reviewable, so it is said loudly and in
                 // full.
                 println!(
                     "{}: no published root fingerprint (trust on first use); the fetched root is \
                      {fingerprint} — compare it with the authority's own publication",
+                    authority.name
+                );
+                println!(
+                    "anchor {}: {} fingerprint {}",
+                    authority.name,
+                    path.display(),
+                    fingerprint
+                );
+            }
+            crate::cmd::accept::Applied::FirstPin {
+                fingerprint,
+                accepted: true,
+            } => {
+                // The accept overrode a published value that did not match.
+                println!(
+                    "{}: the accepted root {fingerprint} was pinned, overriding the published \
+                     fingerprint",
                     authority.name
                 );
                 // The fingerprint of the first certificate, the same value
@@ -389,9 +411,15 @@ pub(crate) async fn pin(
                     }
                 );
                 eprintln!(
-                    "rfc3161: warning: tsa {}: pass `--accept {}={found}` to append it next to \
-                     the pinned root",
-                    authority.name, authority.name
+                    "rfc3161: warning: tsa {}: pass `{} --accept {}={found}` to {}",
+                    authority.name,
+                    command,
+                    authority.name,
+                    if path.exists() {
+                        "append it next to the pinned root"
+                    } else {
+                        "pin it"
+                    }
                 );
             }
             crate::cmd::accept::Applied::Unusable(reason) => {

@@ -186,10 +186,22 @@ async fn fetch(
         super::accept::Applied::Appended { added, roots, .. } => {
             println!("anchor {id}: {added} root(s) appended, {roots} now pinned");
         }
-        super::accept::Applied::FirstPin { fingerprint } => {
+        super::accept::Applied::FirstPin {
+            fingerprint,
+            accepted: false,
+        } => {
             println!(
                 "anchor {id}: no pinned root to compare (trust on first use); the fetched root is \
                  {fingerprint} — compare it with the authority's own publication"
+            );
+        }
+        super::accept::Applied::FirstPin {
+            fingerprint,
+            accepted: true,
+        } => {
+            println!(
+                "anchor {id}: the accepted root {fingerprint} was pinned; nothing was there to \
+                 compare it with"
             );
         }
         super::accept::Applied::Replaced { .. } => {

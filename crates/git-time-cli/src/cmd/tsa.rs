@@ -107,6 +107,9 @@ pub enum PresetCommand {
     Add {
         /// The preset name.
         name: String,
+        /// Accept a root that is not the published one, as `<id>=<fingerprint>`.
+        #[arg(long, value_name = "ID=FINGERPRINT")]
+        accept: Vec<String>,
     },
 }
 
@@ -159,7 +162,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
         Command::Remove { id } => remove(&repo, &id),
         Command::Preset { command } => match command {
             PresetCommand::List => preset_list(&repo),
-            PresetCommand::Add { name } => preset_add(&repo, &name).await,
+            PresetCommand::Add { name, accept } => preset_add(&repo, &name, &accept).await,
         },
         Command::Select {
             interactive,
@@ -398,14 +401,27 @@ fn preset_list(_repo: &Repo) -> Exit {
 }
 
 /// Configure one preset through the install fetch path.
-async fn preset_add(repo: &Repo, name: &str) -> Exit {
+async fn preset_add(repo: &Repo, name: &str, accept: &[String]) -> Exit {
     let Some(preset) = presets::find(name) else {
         return Exit::usage(format!(
             "git time tsa preset: unknown preset `{name}`; known: {}",
             presets::names().collect::<Vec<_>>().join(", ")
         ));
     };
-    match pin_preset(repo, preset, &BTreeMap::new(), &BTreeMap::new()).await {
+    // One preset names one id, so a bare fingerprint is unambiguous here.
+    let accept = match crate::cmd::accept::one_or_id(accept, &[preset.name]) {
+        Ok(accept) => accept,
+        Err(error) => return Exit::usage(format!("git time tsa preset: {error}")),
+    };
+    match pin_preset(
+        repo,
+        preset,
+        &accept,
+        &BTreeMap::new(),
+        &format!("git time tsa preset add {}", preset.name),
+    )
+    .await
+    {
         Ok(()) => Exit::ok(),
         // The lines already said what failed; a refused root and a missing
         // bundle both mean the pin did not do its job, which is the whole
@@ -424,8 +440,9 @@ async fn pin_preset(
     preset: &'static presets::Preset,
     accept: &BTreeMap<String, String>,
     named: &BTreeMap<String, Vec<String>>,
+    command: &str,
 ) -> Result<(), String> {
-    let pinned = install::pin(repo, preset, accept, named)
+    let pinned = install::pin(repo, preset, accept, named, command)
         .await
         .map_err(|exit| exit.message())?;
     println!("tsa {}: {} configured", preset.name, preset.url);
@@ -565,7 +582,7 @@ async fn restore(repo: &Repo, range: Option<&str>, accept: &[String], commits: &
     let mut restored = 0_usize;
     let mut refused: Vec<(&str, String)> = Vec::new();
     for preset in &todo {
-        match pin_preset(repo, preset, &accept, &named).await {
+        match pin_preset(repo, preset, &accept, &named, "git time tsa restore").await {
             Ok(()) => restored += 1,
             Err(reason) => refused.push((preset.name, reason)),
         }
@@ -781,7 +798,15 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
             );
             continue;
         }
-        match install::pin(repo, preset, &BTreeMap::new(), &BTreeMap::new()).await {
+        match install::pin(
+            repo,
+            preset,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "git time install",
+        )
+        .await
+        {
             Ok(pinned) => {
                 if pinned.fingerprint_mismatch || pinned.missing_anchor.is_some() {
                     failed = true;
@@ -861,12 +886,14 @@ pub(crate) fn pinned(id: &str, path: &std::path::Path) -> bool {
     AnchorStore::load(&[(id.to_owned(), path.to_path_buf())]).is_ok()
 }
 
-/// Whether the bundle at `path` already holds a root the blocks name.
+/// Whether the bundle at `path` already holds **every** root the blocks name.
 ///
 /// No named root at all leaves nothing to compare: a bundle that loads is
-/// enough, which is the case of a block from before roots were recorded. Both
-/// sides are compared in the length of the named value, so a SHA-1 and a SHA-256
-/// spelling of the same root both count.
+/// enough, which is the case of a block from before roots were recorded. A
+/// partial match is not enough — the missing root still has to be fetched, or
+/// the blocks naming it would stay unverifiable. Both sides are compared in the
+/// length of the named value, so a SHA-1 and a SHA-256 spelling of the same root
+/// both count.
 fn covers(id: &str, path: &std::path::Path, wanted: &[String]) -> bool {
     if !path.exists() {
         return false;
@@ -881,10 +908,11 @@ fn covers(id: &str, path: &std::path::Path, wanted: &[String]) -> bool {
     if wanted.is_empty() {
         return true;
     }
-    anchor.roots.iter().any(|root| {
-        wanted
+    wanted.iter().all(|value| {
+        anchor
+            .roots
             .iter()
-            .any(|value| crate::cmd::accept::matches(value, root.as_bytes()))
+            .any(|root| crate::cmd::accept::matches(value, root.as_bytes()))
     })
 }
 

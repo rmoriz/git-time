@@ -992,10 +992,12 @@ fn fetch_refuses_a_changed_root_and_appends_it_on_accept() {
     );
     let store = git_time_core::trust::AnchorStore::load(&[("stub".to_owned(), anchor.clone())])
         .expect("both roots load");
+    let roots = &store.anchor("stub").expect("an anchor").roots;
+    assert_eq!(roots.len(), 2, "the retired root stays next to the new one");
     assert_eq!(
-        store.anchor("stub").expect("an anchor").roots.len(),
-        2,
-        "the retired root stays next to the new one"
+        fingerprint_colon(roots[0].as_bytes()),
+        found,
+        "the accepted root is the first certificate every listing reports"
     );
 }
 
@@ -1788,6 +1790,42 @@ fn a_query_string_is_stored_verbatim() {
     assert_eq!(preset.anchor_url, url);
 }
 
+/// `tsa preset add` has the flag a refusal hints at, and a bare value is
+/// unambiguous because one preset names one id.
+#[test]
+fn preset_add_names_itself_in_the_hint_and_takes_a_bare_accept() {
+    let repo = Repo::new();
+    repo.init();
+    let ca = std::fs::read_to_string(&repo.authority.ca).expect("the CA");
+    let found = fingerprint_colon(&first_der(&ca));
+
+    let refused = repo.run_time_env(&["tsa", "preset", "add", "freetsa"], &repo.fetch_ca());
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "git time tsa preset add freetsa --accept freetsa={found}"
+        )),
+        "the hint names the command that has the flag: {stderr}"
+    );
+    assert!(
+        stderr.contains("to pin it"),
+        "nothing is pinned, so the value is pinned: {stderr}"
+    );
+    assert!(
+        !stderr.contains("next to the pinned root"),
+        "a first pin has no pinned root to append to: {stderr}"
+    );
+    assert!(!repo.anchors().join("freetsa.pem").exists());
+
+    let added = repo.run_time_env(
+        &["tsa", "preset", "add", "freetsa", "--accept", &found],
+        &repo.fetch_ca(),
+    );
+    assert_eq!(added.status.code(), Some(0), "{}", text(&added.stderr));
+    assert!(repo.anchors().join("freetsa.pem").exists());
+}
+
 #[test]
 fn preset_add_exits_one_when_the_fetch_leaves_no_anchor() {
     let repo = Repo::new();
@@ -2024,6 +2062,118 @@ fn restore_pins_a_named_root_without_an_accept() {
     assert_eq!(
         std::fs::read(repo.anchors().join("freetsa.pem")).expect("the anchor"),
         named.bytes()
+    );
+}
+
+/// A bundle an authority serves may be narrower than what is pinned. A root the
+/// block names is appended instead of replacing the bundle, so the roots older
+/// evidence still needs survive; the fresh root becomes the first certificate,
+/// which is the one every listing reports.
+#[test]
+fn restore_appends_a_named_root_instead_of_dropping_the_pinned_one() {
+    let repo = Repo::new();
+    repo.init();
+    let retired = Authority::new();
+    let named = Authority::new();
+    let anchor = repo.anchors().join("freetsa.pem");
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    let retired_bytes = retired.bytes();
+    std::fs::write(&anchor, &retired_bytes).expect("pin the retired root");
+    let retired_fp = fingerprint_colon(&first_der(&text(&retired_bytes)));
+    let named_fp = fingerprint_colon(&first_der(&text(&named.bytes())));
+    repo.commit_naming_roots(&[("freetsa", &named_fp)]);
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&named.ca)),
+    )];
+
+    let restored = repo.run_time_env(&["tsa", "restore"], &fetch);
+    let stdout = ok(&restored);
+    assert!(stdout.contains("1 root(s) appended"), "{stdout}");
+    let store = git_time_core::trust::AnchorStore::load(&[("freetsa".to_owned(), anchor)])
+        .expect("both roots load");
+    let roots = &store.anchor("freetsa").expect("an anchor").roots;
+    assert_eq!(roots.len(), 2, "nothing is dropped");
+    assert_eq!(
+        fingerprint_colon(roots[0].as_bytes()),
+        named_fp,
+        "the root this run brought is first"
+    );
+    assert_eq!(fingerprint_colon(roots[1].as_bytes()), retired_fp);
+}
+
+/// A block may name more than one root. One of them being pinned is not enough:
+/// the missing one still has to be fetched, or the blocks naming it stay
+/// unverifiable.
+#[test]
+fn restore_fetches_when_only_one_of_two_named_roots_is_pinned() {
+    let repo = Repo::new();
+    repo.init();
+    let kept = Authority::new();
+    let missing = Authority::new();
+    let anchor = repo.anchors().join("freetsa.pem");
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    let kept_bytes = kept.bytes();
+    std::fs::write(&anchor, &kept_bytes).expect("pin one of the two");
+    let kept_fp = fingerprint_colon(&first_der(&text(&kept_bytes)));
+    let missing_fp = fingerprint_colon(&first_der(&text(&missing.bytes())));
+    repo.commit_naming_roots(&[("freetsa", &kept_fp), ("freetsa", &missing_fp)]);
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&missing.ca)),
+    )];
+
+    let restored = repo.run_time_env(&["tsa", "restore"], &fetch);
+    let stdout = ok(&restored);
+    assert!(
+        !stdout.contains("authority(ies) already pinned"),
+        "the missing root is fetched: {stdout}"
+    );
+    let store = git_time_core::trust::AnchorStore::load(&[("freetsa".to_owned(), anchor)])
+        .expect("both roots load");
+    let roots = &store.anchor("freetsa").expect("an anchor").roots;
+    assert_eq!(roots.len(), 2, "the missing root is added");
+    assert_eq!(fingerprint_colon(roots[0].as_bytes()), missing_fp);
+    assert_eq!(fingerprint_colon(roots[1].as_bytes()), kept_fp);
+}
+
+/// An unchanged leaf-first bundle is the ordinary shape a TSA publishes. Its
+/// first certificate is a leaf, not a root, so only comparing every pinned
+/// certificate keeps the re-fetch from looking like a rotation.
+#[test]
+fn refetching_an_unchanged_leaf_first_bundle_is_not_a_rotation() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("stub", &repo.stub_url());
+    let authority = Authority::new();
+    let leaf = std::fs::read_to_string(authority.dir.path().join("leaf.pem")).expect("the leaf");
+    let bundle = authority.dir.path().join("bundle.pem");
+    std::fs::write(&bundle, format!("{leaf}{}", text(&authority.bytes()))).expect("the bundle");
+    let anchor = repo.anchors().join("stub.pem");
+    let served = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&bundle)),
+    )];
+    let args = [
+        "anchor",
+        "fetch",
+        &repo.stub_url(),
+        "--id",
+        "stub",
+        "--insecure-http",
+    ];
+
+    let first = repo.run_time_env(&args, &served);
+    assert!(first.status.success(), "{}", text(&first.stderr));
+
+    let again = repo.run_time_env(&args, &served);
+    let stdout = ok(&again);
+    assert!(stdout.contains("chain material updated"), "{stdout}");
+    assert_eq!(
+        std::fs::read(&anchor).expect("the anchor"),
+        std::fs::read(&bundle).expect("the bundle"),
+        "the re-fetch writes the same bytes"
     );
 }
 
