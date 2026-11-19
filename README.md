@@ -29,6 +29,11 @@ verify` reports `UNSEALED`.
 The same four commands print under `git time -h` and `git time --help`, so the binary carries its
 own onboarding.
 
+A seal should not depend on our verifier being the only witness: `git time verify --openssl
+<commit>` prints a POSIX `sh` script that carries the commit and its tokens and re-checks them with
+`openssl ts -verify` alone — no git, no zstd, no network. Hand it to someone who does not want to
+trust this tool's own crypto.
+
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
 everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`). The
 `pin` column is the trust tier: the root is checked against the table and a mismatch is a refusal.
