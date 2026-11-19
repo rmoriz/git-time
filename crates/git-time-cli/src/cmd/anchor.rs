@@ -14,13 +14,16 @@
 //! fields for a machine reader.
 //!
 //! `pin` writes `time.anchors-lock` in the repository root, one
-//! `<id> <sha256-fingerprint>` line per authority; `--check` compares the current
-//! anchors against it and names every id that changed. The lock is a **review
-//! artifact, not a trust store**: verification keeps judging tokens against the
-//! pinned bundles, so deleting the lock changes no verdict. A changed bundle is
-//! still caught by verification itself, one `UNTRUSTED` token at a time.
+//! `<id> <sha256-fingerprint>` line per root of every authority; `--check`
+//! compares the current anchors against it and names every root that appeared or
+//! disappeared. One line per root makes a rotation a pair of lines in the diff —
+//! one `removed`, one `added` — instead of an in-place update of a value nobody
+//! can review. The lock is a **review artifact, not a trust store**:
+//! verification keeps judging tokens against the pinned bundles, so deleting the
+//! lock changes no verdict. A changed bundle is still caught by verification
+//! itself, one `UNTRUSTED` token at a time.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use base64::Engine as _;
@@ -28,6 +31,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Subcommand;
 use der::Decode;
 use git_time_core::repo::Repo;
+use git_time_core::trust::AnchorStore;
 use x509_cert::Certificate;
 
 use crate::cmd::{Exit, anchors, open, tsa::validate_id};
@@ -293,16 +297,25 @@ fn list(repo: &Repo, json: bool) -> Exit {
     Exit::ok()
 }
 
-/// Write the lock: one `<id> <fingerprint>` line per configured authority.
+/// Write the lock: one `<id> <fingerprint>` line per root, of every configured
+/// authority.
+///
+/// The lines are sorted by id and then fingerprint, so the order the bundle
+/// happens to hold is not drift and a rotation only ever appends next to the
+/// retired root.
 fn pin(repo: &Repo) -> Exit {
-    let mut lines = Vec::new();
+    let mut lines: Vec<(String, String)> = Vec::new();
     let mut problems = Vec::new();
     for anchor in match anchors::configured(repo) {
         Ok(configured) => configured,
         Err(exit) => return exit,
     } {
-        match first_certificate_at(&anchor.path) {
-            Some(der) => lines.push(format!("{} {}", anchor.id, anchors::fingerprint(&der))),
+        match root_certificates(&anchor.path) {
+            Some(roots) => {
+                for der in roots {
+                    lines.push((anchor.id.clone(), anchors::fingerprint(&der)));
+                }
+            }
             None => problems.push(anchor.id),
         }
     }
@@ -312,20 +325,29 @@ fn pin(repo: &Repo) -> Exit {
         }
         return Exit::seal(String::new());
     }
+    lines.sort();
 
     let lock = repo.path().join(LOCK);
-    let mut body = lines.join("\n");
-    if !body.is_empty() {
+    let mut body = String::new();
+    for (id, fingerprint) in &lines {
+        body.push_str(id);
+        body.push(' ');
+        body.push_str(fingerprint);
         body.push('\n');
     }
     if let Err(error) = std::fs::write(&lock, body) {
         return Exit::config(format!("cannot write {}: {error}", lock.display()));
     }
-    println!("pinned {} anchor(s) in {LOCK}", lines.len());
+    println!("pinned {} root(s) in {LOCK}", lines.len());
     Exit::ok()
 }
 
-/// Compare the anchors against the lock and name every mismatch.
+/// Compare the roots of the anchors against the lock.
+///
+/// Both sides are sets of `(id, fingerprint)`, so a root the bundle gained is
+/// `added` and one it lost is `removed`; order is not part of it. A line the lock
+/// formats unusably, and a locked bundle that no longer parses, keep the
+/// existing `unparseable` wording, and an id with no bundle at all is `missing`.
 fn check(repo: &Repo) -> Exit {
     let lock = repo.path().join(LOCK);
     let body = match std::fs::read_to_string(&lock) {
@@ -337,48 +359,102 @@ fn check(repo: &Repo) -> Exit {
             ));
         }
     };
-    let recorded: BTreeMap<String, String> = body
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .map(|(id, fingerprint)| (id.to_owned(), fingerprint.trim().to_owned()))
-        .collect();
+    let mut recorded: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // A line with an id but no fingerprint: the id is named, the value is not.
+    let mut unparseable: BTreeSet<String> = BTreeSet::new();
+    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+        match line.split_once(' ') {
+            Some((id, fingerprint)) if !fingerprint.trim().is_empty() => {
+                recorded
+                    .entry(id.to_owned())
+                    .or_default()
+                    .insert(fingerprint.trim().to_owned());
+            }
+            Some((id, _)) => {
+                unparseable.insert(id.to_owned());
+            }
+            None => {
+                unparseable.insert(line.trim().to_owned());
+            }
+        }
+    }
 
-    let mut current = BTreeMap::new();
+    // A bundle that does not load is no expectation at all: the id is
+    // unparseable, exactly as a broken lock line.
+    let mut current: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
     for anchor in match anchors::configured(repo) {
         Ok(configured) => configured,
         Err(exit) => return exit,
     } {
-        // `first_certificate_at` parses the bytes as a certificate, exactly as
-        // `pin` does, so base64 garbage is "unparseable" rather than "changed".
-        let fingerprint = first_certificate_at(&anchor.path).map(|der| anchors::fingerprint(&der));
-        current.insert(anchor.id, fingerprint);
+        let fingerprints = root_certificates(&anchor.path)
+            .map(|roots| roots.iter().map(|der| anchors::fingerprint(der)).collect());
+        current.insert(anchor.id, fingerprints);
     }
 
-    let mut mismatches = Vec::new();
-    for (id, fingerprint) in &recorded {
-        match current.get(id.as_str()) {
-            None => mismatches.push(format!("mismatch {id}: anchor is missing")),
-            Some(None) => mismatches.push(format!("mismatch {id}: anchor is unparseable")),
-            Some(Some(now)) if now != fingerprint => {
-                mismatches.push(format!("mismatch {id}: anchor changed"));
+    let mut drift = Vec::new();
+    for (id, fingerprints) in &recorded {
+        if unparseable.contains(id) {
+            drift.push(format!("mismatch {id}: anchor is unparseable"));
+            continue;
+        }
+        match current.get(id) {
+            None => drift.push(format!("mismatch {id}: anchor is missing")),
+            Some(None) => drift.push(format!("mismatch {id}: anchor is unparseable")),
+            Some(Some(now)) => {
+                for fingerprint in now.difference(fingerprints) {
+                    drift.push(format!("added {id} {fingerprint}"));
+                }
+                for fingerprint in fingerprints.difference(now) {
+                    drift.push(format!("removed {id} {fingerprint}"));
+                }
             }
-            Some(Some(_)) => {}
         }
     }
-    for id in current.keys() {
-        if !recorded.contains_key(id.as_str()) {
-            mismatches.push(format!("mismatch {id}: not in the lock"));
+    for id in &unparseable {
+        if !recorded.contains_key(id) {
+            drift.push(format!("mismatch {id}: anchor is unparseable"));
+        }
+    }
+    for (id, fingerprints) in &current {
+        if recorded.contains_key(id) || unparseable.contains(id) {
+            continue;
+        }
+        match fingerprints {
+            Some(fingerprints) => {
+                for fingerprint in fingerprints {
+                    drift.push(format!("added {id} {fingerprint}"));
+                }
+            }
+            None => drift.push(format!("mismatch {id}: anchor is unparseable")),
         }
     }
 
-    if mismatches.is_empty() {
+    if drift.is_empty() {
         println!("anchors match the lock");
         return Exit::ok();
     }
-    for mismatch in &mismatches {
-        eprintln!("{mismatch}");
+    for line in &drift {
+        eprintln!("{line}");
     }
     Exit::seal(String::new())
+}
+
+/// The DER of every root in the bundle at `path`, when the bundle loads.
+///
+/// A bundle only counts when [`AnchorStore`] accepts it whole, so a broken or
+/// root-less bundle is `None` rather than an empty list. Intermediates are not
+/// roots and stay out of the lock.
+fn root_certificates(path: &Path) -> Option<Vec<Vec<u8>>> {
+    let mut store = AnchorStore::default();
+    store.insert("bundle", path).ok()?;
+    let roots = store.anchor("bundle")?;
+    Some(
+        roots
+            .roots
+            .iter()
+            .map(|root| root.as_bytes().to_vec())
+            .collect(),
+    )
 }
 
 /// The DER of `path`'s first certificate, when it parses as one.

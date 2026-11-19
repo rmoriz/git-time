@@ -468,6 +468,14 @@ impl Repo {
         )
     }
 
+    /// Append `bundle`'s certificates to `id`'s anchor, as an accept does.
+    fn append_anchor(&self, id: &str, bundle: &[u8]) {
+        let path = self.anchors().join(format!("{id}.pem"));
+        let mut bytes = std::fs::read(&path).expect("the pinned anchor");
+        bytes.extend_from_slice(bundle);
+        std::fs::write(&path, bytes).expect("append the root");
+    }
+
     /// Commit an empty change whose message names `ids` in a token trailer.
     ///
     /// The hook is skipped with `drop`, so the message reaches the object as
@@ -1250,6 +1258,125 @@ fn pin_writes_the_lock_and_check_names_a_changed_anchor() {
         text(&clean.stdout).contains("PASS"),
         "{}",
         text(&clean.stdout)
+    );
+}
+
+/// The lock records every root, so a rotation is a diff of two lines rather
+/// than an update of one value: the new root shows as `added`, a retired one as
+/// `removed`.
+#[test]
+fn check_reports_an_added_root_after_an_accept() {
+    let repo = Repo::with_pinned_stub();
+    assert!(
+        repo.run_time(&["anchor", "pin"]).status.success(),
+        "the lock starts with the pinned root"
+    );
+
+    let fresh = Authority::new();
+    let expected = fingerprint(&first_der(&text(&fresh.bytes())));
+    repo.append_anchor("stub", &fresh.bytes());
+
+    let checked = repo.run_time(&["anchor", "pin", "--check"]);
+    assert_eq!(checked.status.code(), Some(1), "{}", text(&checked.stderr));
+    let stderr = text(&checked.stderr);
+    assert!(
+        stderr.contains(&format!("added stub {expected}")),
+        "the appended root is named as added: {stderr}"
+    );
+    assert!(
+        !stderr.contains("mismatch stub"),
+        "the pinned root did not change: {stderr}"
+    );
+
+    // A re-pin records both roots, and the check passes until the next one.
+    assert!(repo.run_time(&["anchor", "pin"]).status.success());
+    let lock = std::fs::read_to_string(repo.lock()).expect("the lock");
+    assert_eq!(lock.lines().count(), 2, "{lock}");
+    assert!(
+        lock.lines().any(|line| line == format!("stub {expected}")),
+        "the new root gets its own line: {lock}"
+    );
+    assert!(
+        repo.run_time(&["anchor", "pin", "--check"])
+            .status
+            .success()
+    );
+}
+
+/// A root that was dropped from the bundle is still in the lock: it is reported
+/// as removed, not as a changed line.
+#[test]
+fn check_reports_a_removed_root() {
+    let repo = Repo::with_pinned_stub();
+    let pinned = std::fs::read(repo.anchors().join("stub.pem")).expect("the anchor");
+    let dropped = fingerprint(&first_der(&text(&pinned)));
+    assert!(repo.run_time(&["anchor", "pin"]).status.success());
+
+    // A bundle that keeps only the second root: the first is retired.
+    let fresh = Authority::new();
+    repo.append_anchor("stub", &fresh.bytes());
+    assert!(repo.run_time(&["anchor", "pin"]).status.success());
+    std::fs::write(repo.anchors().join("stub.pem"), fresh.bytes()).expect("drop the first root");
+
+    let checked = repo.run_time(&["anchor", "pin", "--check"]);
+    assert_eq!(checked.status.code(), Some(1), "{}", text(&checked.stderr));
+    let stderr = text(&checked.stderr);
+    assert!(
+        stderr.contains(&format!("removed stub {dropped}")),
+        "the dropped root is named: {stderr}"
+    );
+}
+
+/// The order of the lines is the sort order, not the file order: swapping two
+/// roots in the bundle is not drift.
+#[test]
+fn a_reordered_bundle_matches_the_lock() {
+    let repo = Repo::with_pinned_stub();
+    assert!(repo.run_time(&["anchor", "pin"]).status.success());
+
+    let fresh = Authority::new();
+    repo.append_anchor("stub", &fresh.bytes());
+    assert!(repo.run_time(&["anchor", "pin"]).status.success());
+    let lock = std::fs::read_to_string(repo.lock()).expect("the lock");
+    // The pinned root is the first certificate; put the appended one in front.
+    let bundle = std::fs::read_to_string(repo.anchors().join("stub.pem")).expect("the bundle");
+    let fresh_bytes = String::from_utf8(fresh.bytes()).expect("PEM is text");
+    let rest = bundle
+        .strip_suffix(&fresh_bytes)
+        .expect("the appended block is last");
+    std::fs::write(
+        repo.anchors().join("stub.pem"),
+        format!("{rest}{fresh_bytes}"),
+    )
+    .expect("swap the roots");
+
+    let checked = repo.run_time(&["anchor", "pin", "--check"]);
+    assert!(
+        checked.status.success(),
+        "a reorder is no drift: {}",
+        text(&checked.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(repo.lock()).expect("the lock"),
+        lock,
+        "the lock is untouched"
+    );
+}
+
+/// A lock line that cannot be parsed is drift, never silently dropped.
+#[test]
+fn check_refuses_an_unparseable_lock_line() {
+    let repo = Repo::with_pinned_stub();
+    assert!(repo.run_time(&["anchor", "pin"]).status.success());
+    let lock = std::fs::read_to_string(repo.lock()).expect("the lock");
+    std::fs::write(repo.lock(), format!("{lock}stub\n")).expect("write a broken line");
+
+    let checked = repo.run_time(&["anchor", "pin", "--check"]);
+    assert_eq!(checked.status.code(), Some(1), "{}", text(&checked.stderr));
+    assert!(
+        text(&checked.stderr).contains("mismatch stub: anchor is unparseable"),
+        "{}",
+        text(&checked.stderr)
     );
 }
 
