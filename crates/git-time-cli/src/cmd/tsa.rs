@@ -789,14 +789,14 @@ pub(crate) async fn select(
             }
         } else {
             // A terminal, but no raw mode to be had: the line prompt still asks.
-            match ask(&seed) {
+            match ask(&seed, command) {
                 Ok(chosen) => chosen,
                 Err(exit) => return exit,
             }
         }
     } else {
         // A piped answer: the line prompt reads it, one line.
-        match ask(&seed) {
+        match ask(&seed, command) {
             Ok(chosen) => chosen,
             Err(exit) => return exit,
         }
@@ -854,7 +854,7 @@ fn initial(seed: &[usize]) -> picker::Selection {
 /// `seed` marks the rows the configuration already enables. The table is the
 /// tick state the empty answer accepts; a typed answer overrides it, exactly as
 /// the picker's buffer does.
-fn ask(seed: &[usize]) -> Result<Vec<usize>, Exit> {
+fn ask(seed: &[usize], command: &str) -> Result<Vec<usize>, Exit> {
     for (index, preset) in presets::PRESETS.iter().enumerate() {
         println!(
             "{}) [{}] {} {} {} {}{}",
@@ -899,11 +899,11 @@ fn ask(seed: &[usize]) -> Result<Vec<usize>, Exit> {
         }
         match parse_choice(&line, presets::PRESETS.len()) {
             Ok(chosen) => return Ok(chosen),
-            Err(message) => eprintln!("git time tsa select: {message}"),
+            Err(message) => eprintln!("{command}: {message}"),
         }
     }
     Err(Exit::usage(format!(
-        "git time tsa select: no valid selection after {SELECT_ATTEMPTS} attempts"
+        "{command}: no valid selection after {SELECT_ATTEMPTS} attempts"
     )))
 }
 

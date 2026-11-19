@@ -368,7 +368,7 @@ reports it as a problem.
 .TP
 .B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
 Accept the root of a rotation. Repeatable. A bare fingerprint is taken
-only for one authority in play, configured or being written. Under
+only when exactly one authority is in play, configured or being written. Under
 .B \-\-no\-tsa
 nothing is fetched and the value is parsed but unused.
 .TP
@@ -377,8 +377,8 @@ Write no authority configuration; keep whatever is configured.
 .PP
 A mismatch or an unreachable authority on the keep path is only a warning, so
 the status stays 0 there. Exits 1 for an anchor that cannot be pinned in the
-handover, and 2 when no authority is configured and stdin is not a terminal,
-or on a configuration error.
+handover, and 2 on a usage or configuration error, including no authority
+configured while stdin is not a terminal.
 .SS uninstall
 .B git time uninstall [ \-\-force ]
 .PP
@@ -632,7 +632,7 @@ argument, every commit reachable from HEAD is read.
 .TP
 .B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
 Take a root the blocks do not name. Repeatable; a bare fingerprint is
-accepted only when one authority is in play.
+accepted only when exactly one authority is in play.
 .TP
 .I commit ...
 Commits to read; without a range they are the only source.

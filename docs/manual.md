@@ -154,7 +154,8 @@ does not use it). See [Surviving a TSA rotation](#surviving-a-tsa-rotation).
 
 A fetch that fails is a warning, not a failure; `doctor` names the gap, and under `time.gate =
 pre-commit` the summary says commits will be refused. Exits `0`, `1` when an anchor chosen in the
-handover cannot be pinned, and `2` when no authority is configured and stdin is not a terminal.
+handover cannot be pinned, and `2` on a usage or configuration error, including no authority
+configured while stdin is not a terminal.
 
 ### `git time uninstall [--force]`
 

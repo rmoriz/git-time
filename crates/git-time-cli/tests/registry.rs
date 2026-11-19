@@ -724,7 +724,8 @@ fn sh_quote(word: &str) -> String {
 ///
 /// The two `script`s disagree on how the command is named — util-linux wants one
 /// `-c` line, BSD/macOS wants it positionally — and `-e` makes the child's status
-/// the exit status on both.
+/// the exit status on both. Only macOS is built here; another BSD would need the
+/// positional branch too.
 fn run_time_pty(
     dir: &Path,
     xdg: &Path,
