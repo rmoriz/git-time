@@ -21,16 +21,72 @@
 //! threads.
 //!
 //! A panic in the work does not hang the pool: it is caught and comes back as an
-//! error entry for that commit, the same shape a read failure has.
+//! error entry for that commit, the same shape a read failure has. A panic in
+//! the printer does not hang it either — it leaves the printer through a guard,
+//! which wakes every parked worker so the scope can still join them.
 
 use std::collections::BTreeMap;
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, PoisonError, mpsc};
 
 /// The most workers a run uses. The per-commit work is process-bound, and past
 /// this the extra processes cost more than they win.
 const MAX_WORKERS: usize = 8;
+
+/// The printer's progress, and whether it is still there at all.
+struct Gate {
+    /// Results the printer has emitted, i.e. the index it is on.
+    done: Mutex<usize>,
+    /// Signalled when `done` advances or when the printer goes away.
+    room: Condvar,
+    /// Set once the printer is gone, so a parked worker stops waiting.
+    closed: AtomicBool,
+}
+
+impl Gate {
+    /// Whether the printer has left, for whatever reason.
+    fn closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
+    }
+
+    /// Claim the right to hand over `index`, waiting while it is too far ahead.
+    /// `false` means the printer is gone and the result is not worth sending.
+    fn enter(&self, index: usize, window: usize) -> bool {
+        let mut done = self.done.lock().unwrap_or_else(PoisonError::into_inner);
+        while !self.closed() && index >= *done + window {
+            done = self.room.wait(done).unwrap_or_else(PoisonError::into_inner);
+        }
+        !self.closed()
+    }
+
+    /// Note that `index` and everything below it have been printed.
+    fn advance(&self, done_to: usize) {
+        // The lock is released while `emit` runs, so printing is never held
+        // against a worker; it is taken only to move the count.
+        *self.done.lock().unwrap_or_else(PoisonError::into_inner) = done_to;
+        self.room.notify_all();
+    }
+}
+
+/// Tells the pool on the way out — normal or unwinding — that the printer is
+/// gone.
+///
+/// Without it a printer that panics (a failing `println!`, say) leaves its
+/// workers parked in [`Gate::enter`], and the scope join waits for them
+/// forever.
+struct Closer<'a>(&'a Gate);
+
+impl Drop for Closer<'_> {
+    fn drop(&mut self) {
+        // The flag is set while holding the lock, and `enter` checks it while
+        // holding it too: a worker that has decided to wait cannot miss the
+        // wake-up here.
+        let _held = self.0.done.lock();
+        self.0.closed.store(true, Ordering::Relaxed);
+        self.0.room.notify_all();
+    }
+}
 
 /// Run `work` for every oid on a bounded pool, calling `emit` in oid order.
 ///
@@ -52,14 +108,16 @@ where
         .min(oids.len())
         .max(1);
     let next = AtomicUsize::new(0);
-    // How far the pool may run ahead of the printer, in commits. Two per worker
-    // keeps every worker busy while a slow neighbour is out, and still caps the
-    // buffer far below the length of a range.
-    let window = workers * 2;
-    // Results the printer has emitted, i.e. the index it is on. A worker holds a
-    // finished result back while its index is `window` or more past it.
-    let emitted = Mutex::new(0_usize);
-    let room = Condvar::new();
+    // How far the pool may run ahead of the printer, in commits. Generous per
+    // worker: a head that is seconds slower than the rest would otherwise park
+    // the pool and turn the tail into a second, serial run. Even at the cap the
+    // window is a few hundred kept results, far below a long range.
+    let window = workers * 32;
+    let gate = Gate {
+        done: Mutex::new(0),
+        room: Condvar::new(),
+        closed: AtomicBool::new(false),
+    };
     let (sender, receiver) = mpsc::channel::<(usize, Result<T, String>)>();
     let work = &work;
 
@@ -67,8 +125,7 @@ where
         for _ in 0..workers {
             let sender = sender.clone();
             let next = &next;
-            let emitted = &emitted;
-            let room = &room;
+            let gate = &gate;
             scope.spawn(move || {
                 loop {
                     let index = next.fetch_add(1, Ordering::Relaxed);
@@ -80,13 +137,7 @@ where
                     // Wait for room only *after* the work: a worker that is still
                     // computing is never parked, and the lowest index can always
                     // go through, so the wait cannot deadlock.
-                    {
-                        let mut done = emitted.lock().unwrap_or_else(PoisonError::into_inner);
-                        while index >= *done + window {
-                            done = room.wait(done).unwrap_or_else(PoisonError::into_inner);
-                        }
-                    }
-                    if sender.send((index, outcome)).is_err() {
+                    if !gate.enter(index, window) || sender.send((index, outcome)).is_err() {
                         break;
                     }
                 }
@@ -97,18 +148,16 @@ where
         drop(sender);
 
         // Results can arrive out of order; the buffer holds the ones whose turn
-        // has not come. The wait above is what keeps that set at `window`.
+        // has not come. `enter` above is what keeps that set at `window`.
         let mut buffer: BTreeMap<usize, Result<T, String>> = BTreeMap::new();
         let mut next_emit = 0;
+        let _closer = Closer(&gate);
         for (index, outcome) in receiver {
             buffer.insert(index, outcome);
             while let Some(outcome) = buffer.remove(&next_emit) {
                 emit(next_emit, outcome);
                 next_emit += 1;
-                // The lock is released while `emit` runs, so printing is never
-                // held against a worker; it is taken only to advance the count.
-                *emitted.lock().unwrap_or_else(PoisonError::into_inner) = next_emit;
-                room.notify_all();
+                gate.advance(next_emit);
             }
         }
     });
@@ -156,7 +205,7 @@ mod tests {
     /// range out while the head is slow — the buffer cannot grow with `oids`.
     #[test]
     fn the_pool_does_not_run_away_from_a_slow_printer() {
-        let total = 400;
+        let total = 1200;
         let oids: Vec<String> = (0..total).map(|index| index.to_string()).collect();
         let finished = AtomicUsize::new(0);
         let peak = AtomicUsize::new(0);
@@ -176,12 +225,40 @@ mod tests {
                 peak.fetch_max(ahead, Ordering::Relaxed);
             },
         );
-        // A window of two per worker, plus up to one result each worker is
-        // holding before it can wait.
-        let bound = super::MAX_WORKERS * 3;
+        // The window per worker, plus up to one result each worker is holding
+        // before it can wait.
+        let bound = super::MAX_WORKERS * 33;
         let peak = peak.load(Ordering::Relaxed);
         assert!(peak <= bound, "{peak} results ran ahead, bound {bound}");
         assert!(peak > 1, "the head really did hold the others back: {peak}");
+    }
+
+    /// A printer that panics does not leave its workers parked in the gate: the
+    /// run fails promptly instead of hanging the join.
+    #[test]
+    fn a_printing_panic_does_not_hang_the_pool() {
+        let oids: Vec<String> = (0..600).map(|index| index.to_string()).collect();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ordered(
+                &oids,
+                |oid| {
+                    // Long enough that the others overtake and start to park.
+                    if oid == "0" {
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    Ok(())
+                },
+                |index, _| {
+                    // Slow printing, so the pool fills its window and parks while
+                    // the printer is still near the head.
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                    if index == 40 {
+                        panic!("printer died");
+                    }
+                },
+            );
+        }));
+        assert!(outcome.is_err());
     }
 
     /// A panicking commit is one error entry, not a lost index that stalls the

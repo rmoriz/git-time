@@ -89,9 +89,9 @@ authority was configured when it was sealed, and it is reported with the two com
 authority up. `--json` prints one document, so it collects what the pool judges rather than
 streaming. Exits `0` only when every commit passes, `1` on any evidence or gate failure, `2` on
 usage or config, and `141` when the reader of a streamed run stops early (`… | head`), because
-SIGPIPE keeps its default disposition rather than turning into a broken-pipe panic. The `141` lands
-in place of the status the run would have had, so a piped run that would have exited `1` or `2`
-exits `141` instead.
+SIGPIPE keeps its default disposition rather than turning into a broken-pipe panic. The `141` can
+land in place of the `1` the run would have had, and it is a race: a run that finishes before the
+reader closes still exits its own status, and a usage error exits `2` before anything is piped.
 
 #### `--openssl` audit script
 

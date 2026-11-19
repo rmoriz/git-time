@@ -280,6 +280,8 @@ An empty column is
 .BR \- .
 Lines are printed as a small worker pool judges the commits, still in walk
 order, so a long range shows progress instead of a blank screen.
+A record is one line, so nothing separates them and no empty line closes the
+run.
 .PP
 .B log
 is a record, not a judgement: it exits 0 whenever it could read everything
@@ -953,9 +955,9 @@ Only from a streamed run that stopped being read —
 does.
 SIGPIPE keeps its default disposition, so the process ends quietly instead of
 reporting a broken pipe.
-It lands in place of the status the run would have had, so a piped
-.B verify
-that would have exited 1 or 2 exits 141 instead.
+It can land in place of the 1 the run would have had, and it is a race: a run
+that finishes before the reader closes still exits its own status, and a usage
+error exits 2 before any output is piped.
 .SH EXAMPLES
 Set a repository up:
 .PP
