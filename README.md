@@ -35,14 +35,15 @@ A seal should not depend on our verifier being the only witness: `git time verif
 trust this tool's own crypto.
 
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
-everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`). The
-`pin` column is the trust tier: the root is checked against the table and a mismatch is a refusal.
+everything, and digits typed on the prompt line take that selection (`1,3-4`, `all`, `none`).
+Authorities already configured start ticked. The `pin` column is the trust tier: the root is checked
+against the table and a mismatch is a refusal.
 `tofu` can only be reviewed by reading the fingerprint the command prints. `http` marks a plain-http
 endpoint; the full URL of the cursor row is printed below the list, so no column has to carry it.
 
 ```console
-   [ ]  1  freetsa            pin A6:37:9E:7C… 
- > [x]  2  digicert           pin 05:63:B8:63… http
+ > [x]  1  freetsa            pin A6:37:9E:7C… 
+   [x]  2  digicert           pin 05:63:B8:63… http
    [ ]  3  sectigo            pin CB:73:94:4C… 
    [ ]  4  certum             pin 07:E0:32:E0… http
    [ ]  5  izenpe             pin 8E:5B:8B:AE… http
@@ -60,15 +61,16 @@ endpoint; the full URL of the cursor row is printed below the list, so no column
    [ ] 17  ssl-com            pin B7:AB:33:08… http
    [ ] 18  belgium            pin 98:98:9F:EE… http
   …
-url: http://timestamp.digicert.com
+url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
-1 selected
+2 selected
 > _
 ```
 
-`enter` saves and pins; `q`, `esc` or `ctrl-c` leave without writing. Nothing is preselected, so a
-fresh selection is yours to make. `git time install` on a repository with no authority hands over
-to the same UI, so installing and choosing can be one step.
+`enter` saves and pins; `q`, `esc` or `ctrl-c` leave without writing. A change keeps the other
+configured authorities because they start ticked; `n` clears every tick, and saving that empty set is
+how preset sections are removed. `git time install` on a repository with no authority hands over to
+the same UI, so installing and choosing can be one step.
 
 In a script, no prompt happens: `git time tsa preset add <id>` enables one preset and `git time
 tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without a terminal exits

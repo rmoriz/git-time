@@ -767,14 +767,17 @@ pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exi
 
 /// The preset indices the configuration already enables, for the seed.
 ///
-/// Only preset ids are known to the table; a hand-added section has a row
-/// nowhere and stays untouched either way.
+/// Only preset ids are known to the table; a hand-added section has no row and
+/// stays untouched either way. The result is in table order, like the picker's
+/// own state, so a piped answer enables in the order shown.
 fn already_enabled(repo: &Repo) -> Result<Vec<usize>, Exit> {
     let ids = anchors::tsa_ids(repo)?;
-    Ok(ids
+    let mut seed: Vec<usize> = ids
         .iter()
         .filter_map(|id| presets::PRESETS.iter().position(|preset| preset.name == id))
-        .collect())
+        .collect();
+    seed.sort_unstable();
+    Ok(seed)
 }
 
 /// Print the preset table and take the selection, re-asking on nonsense.
@@ -1223,4 +1226,46 @@ fn local_get(repo: &Repo, key: &str) -> Result<Option<String>, Exit> {
 /// Write one local config key.
 fn local_set(repo: &Repo, key: &str, value: &str) -> Result<(), Exit> {
     git_stdout(repo, &["config", "--local", key, value]).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::already_enabled;
+    use git_time_core::repo::Repo;
+
+    /// Write `time.tsa.<id>.url` in the local config of `dir`.
+    fn configure(dir: &std::path::Path, id: &str) {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args([
+                "config",
+                "--local",
+                &format!("time.tsa.{id}.url"),
+                &format!("https://tsa.example/{id}"),
+            ])
+            .status()
+            .expect("git config");
+        assert!(status.success(), "configure {id}");
+    }
+
+    /// The seed holds the configured preset rows in table order, not in the
+    /// alphabetical order `tsa_ids` answers in, and a hand-added id is no row.
+    #[test]
+    fn the_seed_is_the_configured_presets_in_table_order() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .expect("git init");
+        assert!(status.success(), "init");
+        let repo = Repo::open(dir.path()).expect("a repository");
+        // Reverse of the table, and a hand-added id with no row.
+        configure(dir.path(), "digicert");
+        configure(dir.path(), "freetsa");
+        configure(dir.path(), "acme");
+
+        assert_eq!(already_enabled(&repo).expect("the seed"), [0, 1]);
+    }
 }

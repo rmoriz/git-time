@@ -2154,13 +2154,15 @@ fn select_enter_keeps_the_configured_authorities_and_none_removes_them() {
 }
 
 /// The table marks the configured rows, so the start state is visible, and an
-/// empty answer keeps exactly them instead of disabling what was not touched.
+/// empty answer keeps exactly them instead of disabling what was not touched. A
+/// hand-added id has no row and is never touched.
 #[test]
 fn select_starts_from_the_configured_authorities() {
     let repo = Repo::new();
     repo.init();
     repo.add_tsa("freetsa", "https://freetsa.org/tsr");
     repo.add_tsa("digicert", "http://timestamp.digicert.com");
+    repo.add_tsa("acme", "http://tsa.example/tsr");
 
     let plan =
         repo.run_time_with_stdin(&["tsa", "select", "--interactive", "--dry-run"], &[], "\n");
@@ -2169,9 +2171,33 @@ fn select_starts_from_the_configured_authorities() {
     assert!(stdout.contains("1) [x] freetsa "), "{stdout}");
     assert!(stdout.contains("2) [x] digicert "), "{stdout}");
     assert!(stdout.contains("3) [ ] sectigo "), "{stdout}");
+    assert!(
+        !stdout.contains("acme"),
+        "a hand-added id has no row and no plan line: {stdout}"
+    );
     assert!(stdout.contains("would enable freetsa"), "{stdout}");
     assert!(stdout.contains("would enable digicert"), "{stdout}");
     assert!(!stdout.contains("would disable"), "{stdout}");
+
+    // The empty answer saves the ticks, so the hand-added section survives.
+    // freetsa pins against the fixture; digicert cannot match the stub root, so
+    // the run exits 1 while both stay configured.
+    let kept = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
+        &repo.fetch_known_root(),
+        "\n",
+    );
+    assert_eq!(kept.status.code(), Some(1), "{}", text(&kept.stderr));
+    assert_eq!(
+        repo.config("time.tsa.acme.url").as_deref(),
+        Some("http://tsa.example/tsr"),
+        "the hand-added section is not a preset's"
+    );
+    assert!(
+        !text(&kept.stdout).contains("disabled acme"),
+        "{}",
+        text(&kept.stdout)
+    );
 }
 
 #[test]
