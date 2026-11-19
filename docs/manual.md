@@ -77,15 +77,18 @@ shell; `verify` reports `UNSEALED (dropped)`. Exits `0` or `2`.
 
 Judge each commit once, without calling a TSA. `PASS`/`FAIL`, the short oid, the verdict and the
 verified quorum, then one indented line per TSA answer — its verdict, genTime and signer serial,
-on a pass as much as on a failure — and one per failing gate. Records are separated by a blank
-line. The anchor fingerprint is left to `--json`: it is the same long string on every pass.
+on a pass as much as on a failure — and one per failing gate. Records follow one another without a
+gap, and one empty line closes the output. Commits are judged on a small pool of workers but
+printed in walk order as they finish, so a long range shows progress instead of a blank screen; the
+anchor fingerprint is left to `--json`: it is the same long string on every pass.
 `--require-sealed`
 fails an unsealed commit and `--require-signed` fails an unsigned one; both are gates, not
 verdicts. The verdict vocabulary is `sealed`, `under-quorum`, `none`, `unsealed`, `bad-imprint`,
 `bad-token`, `untrusted`, `bad-sig` and `unsigned`; `none` is a block that asked nobody because no
 authority was configured when it was sealed, and it is reported with the two commands that set an
-authority up. `--json` prints one document. Exits `0` only when every commit passes, `1` on any
-evidence or gate failure, `2` on usage or config.
+authority up. `--json` prints one document, so it collects what the pool judges rather than
+streaming. Exits `0` only when every commit passes, `1` on any evidence or gate failure, `2` on
+usage or config.
 
 #### `--openssl` audit script
 
@@ -129,9 +132,10 @@ is not reached. `--json` and `--openssl` exclude each other, as do `--range` and
 
 ### `git time log [--range RANGE] [--json] [<commit>…]`
 
-The same evidence as one line per commit: short oid, TSA ids, genTimes, verdict. This is a record,
-not a judgement: it exits `0` whenever it could read everything, and `1` only for a commit it could
-not read. `--json` carries no `pass`, `gates` or `required`.
+The same evidence as one line per commit: short oid, TSA ids, genTimes, verdict. Lines stream as
+the pool judges the commits, still in walk order. This is a record, not a judgement: it exits `0`
+whenever it could read everything, and `1` only for a commit it could not read. `--json` carries no
+`pass`, `gates` or `required`, and collects instead of streaming.
 
 ### `git time install [--no-tsa] [--accept <id>=<fingerprint>]`
 

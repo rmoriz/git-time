@@ -11,6 +11,7 @@ pub mod install;
 pub mod log;
 pub mod picker;
 pub mod seal;
+pub mod stream;
 pub mod tsa;
 pub mod uninstall;
 pub mod verify;

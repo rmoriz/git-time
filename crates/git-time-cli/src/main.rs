@@ -177,7 +177,30 @@ enum Command {
     },
 }
 
+#[cfg(unix)]
+unsafe extern "C" {
+    /// `signal(2)`; the two constants below are all this needs of it.
+    fn signal(number: i32, handler: usize) -> usize;
+}
+
+/// `SIGPIPE`, which Rust masks by default.
+#[cfg(unix)]
+const SIGPIPE: i32 = 13;
+
+/// `SIG_DFL`.
+#[cfg(unix)]
+const SIG_DFL: usize = 0;
+
 fn main() -> ExitCode {
+    // `verify` and `log` stream, so `| head` is a normal way to read them. With
+    // Rust's ignored SIGPIPE the write past `head` panics with a broken pipe and
+    // exit 101; the default disposition ends the process quietly, and no caller
+    // of a streaming reader wants more than that.
+    #[cfg(unix)]
+    // SAFETY: `SIG_DFL` is always a valid handler for `SIGPIPE`.
+    unsafe {
+        signal(SIGPIPE, SIG_DFL);
+    }
     let cli = Cli::parse();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

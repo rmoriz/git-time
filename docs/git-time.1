@@ -155,8 +155,9 @@ PASS shows who answered and when instead of only that a quorum was reached.
 The anchor's SHA-256 is the one field left to `--json`, where it is there to be
 compared rather than read; in the plain output the same long fingerprint on
 every pass drowns the line.
-Records are separated by a blank line.
-Warnings are printed on a PASS too.
+Records follow one another without a gap, and one empty line closes the output.
+Commits are judged on a small worker pool and printed in walk order as they
+finish, so a long range shows progress; warnings are printed on a PASS too.
 .PP
 Read\-only, except that the signature check may leave one loose object behind
 with
@@ -277,6 +278,8 @@ List the evidence of each commit, newest first, as one positional line: short
 object id, authority ids, the genTime of every valid token, and the verdict.
 An empty column is
 .BR \- .
+Lines are printed as a small worker pool judges the commits, still in walk
+order, so a long range shows progress instead of a blank screen.
 .PP
 .B log
 is a record, not a judgement: it exits 0 whenever it could read everything
@@ -284,7 +287,7 @@ and 1 only for a commit it could not read.
 Use
 .B verify
 to gate CI.
-The JSON form carries no
+The JSON form is collected rather than streamed, and carries no
 .BR pass ,
 .B gates
 or

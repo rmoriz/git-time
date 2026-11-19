@@ -10,10 +10,10 @@
 //! names the command it ran, so a failure carries git's own words instead of a
 //! bare exit code.
 
-use std::cell::Cell;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use crate::object::CommitObject;
@@ -31,7 +31,7 @@ const CAS_ATTEMPTS: u32 = 3;
 const CAS_BACKOFF: Duration = Duration::from_millis(50);
 
 /// A repository, identified by its directory.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Repo {
     path: PathBuf,
     /// Waited `attempt` times between refused ref moves; see
@@ -39,7 +39,25 @@ pub struct Repo {
     retry_delay: Duration,
     /// `update-ref` invocations of the last `cas_update`, for diagnostics; see
     /// [`Repo::update_ref_attempts`].
-    update_ref_attempts: Cell<u32>,
+    ///
+    /// Atomic rather than a `Cell` so the handle is `Sync`: read-only callers
+    /// judge commits from several threads, and a diagnostic counter is the only
+    /// thing one of them could write.
+    update_ref_attempts: AtomicU32,
+}
+
+/// A clone is the same repository with its own attempt counter.
+///
+/// `AtomicU32` is not `Clone`, and a shared counter would make two handles
+/// report each other's `update-ref` attempts.
+impl Clone for Repo {
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            retry_delay: self.retry_delay,
+            update_ref_attempts: AtomicU32::new(self.update_ref_attempts.load(Ordering::Relaxed)),
+        }
+    }
 }
 
 /// Two handles are the same repository when they name the same directory.
@@ -143,7 +161,7 @@ impl Repo {
         Ok(Self {
             path: path.to_path_buf(),
             retry_delay: CAS_BACKOFF,
-            update_ref_attempts: Cell::new(0),
+            update_ref_attempts: AtomicU32::new(0),
         })
     }
 
@@ -168,7 +186,7 @@ impl Repo {
     /// Diagnostics only: the count is reset when the next `cas_update` starts.
     #[must_use]
     pub fn update_ref_attempts(&self) -> u32 {
-        self.update_ref_attempts.get()
+        self.update_ref_attempts.load(Ordering::Relaxed)
     }
 
     /// The last value of the config key `key`, or `None` when it is unset.
@@ -319,10 +337,10 @@ impl Repo {
         let refname = head.refname();
         let args = ["update-ref", "-m", REFLOG_MESSAGE, refname, new, old];
         let mut attempt: u32 = 1;
-        self.update_ref_attempts.set(0);
+        self.update_ref_attempts.store(0, Ordering::Relaxed);
         loop {
             let run = self.run(&args, None)?;
-            self.update_ref_attempts.set(attempt);
+            self.update_ref_attempts.store(attempt, Ordering::Relaxed);
             if run.succeeded() {
                 return Ok(CasOutcome::Moved);
             }

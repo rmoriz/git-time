@@ -140,10 +140,15 @@ pub fn run(
     }
     let required = policy.required;
     let mut failed = false;
-    let mut evidence = Vec::with_capacity(oids.len());
-    let mut errors = Vec::new();
-    for oid in &oids {
-        match commit(&repo, policy.anchors(), oid, &policy) {
+    let work = |oid: &str| {
+        commit(&repo, policy.anchors(), oid, &policy).map_err(|error| error.to_string())
+    };
+
+    if json_output {
+        // One JSON document, so this path collects what the pool judged.
+        let mut evidence = Vec::with_capacity(oids.len());
+        let mut errors = Vec::new();
+        super::stream::ordered(&oids, work, |index, outcome| match outcome {
             Ok(found) => {
                 if !passes(&found, &require) {
                     failed = true;
@@ -152,32 +157,33 @@ pub fn run(
             }
             Err(error) => {
                 failed = true;
-                errors.push((oid.clone(), error.to_string()));
+                errors.push((oids[index].clone(), error));
             }
-        }
-    }
-
-    if json_output {
+        });
         print_json(&evidence, &errors, &require, required);
     } else {
-        // One blank line between records: every record is more than one line,
-        // and without the gap the next `PASS` reads as part of the previous
-        // commit's answers.
-        let mut first = true;
-        for found in &evidence {
-            if !first {
-                println!();
+        // Records follow one another without a gap, so a run reads as one
+        // block; a committed record appears as soon as it is judged, in walk
+        // order. One empty line closes the output once anything was printed.
+        let mut wrote = false;
+        super::stream::ordered(&oids, work, |index, outcome| {
+            wrote = true;
+            match outcome {
+                Ok(found) => {
+                    if !passes(&found, &require) {
+                        failed = true;
+                    }
+                    print_human(&found, &require, required);
+                }
+                Err(error) => {
+                    failed = true;
+                    println!("FAIL {} ERROR 0/{required} TSA(s)", short(&oids[index]));
+                    println!("  {error}");
+                }
             }
-            first = false;
-            print_human(found, &require, required);
-        }
-        for (oid, error) in &errors {
-            if !first {
-                println!();
-            }
-            first = false;
-            println!("FAIL {} ERROR 0/{required} TSA(s)", short(oid));
-            println!("  {error}");
+        });
+        if wrote {
+            println!();
         }
     }
 
