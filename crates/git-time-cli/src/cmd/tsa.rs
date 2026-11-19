@@ -15,10 +15,11 @@
 //! `[a-z0-9-]`: it ends up in a config key, a trailer value and a file name, so
 //! anything else would need quoting somewhere.
 //!
-//! `select` is the cursor UI over the preset table: tick what this repository
-//! should use, save, and only then are anchors pinned and unchosen preset
-//! sections removed. It needs a terminal unless `--interactive` says an answer
-//! is being piped; a script otherwise uses `preset add` or `add`.
+//! `select` is the cursor UI over the preset table: the configured authorities
+//! start ticked, tick what this repository should use, save, and only then are
+//! anchors pinned and preset sections missing from the answer removed. It needs
+//! a terminal unless `--interactive` says an answer is being piped; a script
+//! otherwise uses `preset add` or `add`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
@@ -718,9 +719,20 @@ const SELECT_ATTEMPTS: usize = 3;
 /// The selection decides what is enabled *and* what is not: a preset section
 /// that is not chosen is removed, so the command can narrow a configuration as
 /// well as widen it. Sections whose id is not a preset are never touched.
+///
+/// It starts from what is configured, so an authority left out of the answer
+/// was unticked on purpose rather than forgotten by the start state.
 pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exit {
+    // The answer is the whole set: every preset section missing from it is
+    // removed. An empty start would therefore drop every authority the user did
+    // not mean to touch, and neither surface would show what is configured. The
+    // ticks begin at the configuration; the answer stays authoritative over it.
+    let seed = match already_enabled(repo) {
+        Ok(seed) => seed,
+        Err(exit) => return exit,
+    };
     let chosen = if std::io::stdin().is_terminal() {
-        let mut selection = picker::Selection::default();
+        let mut selection = picker::Selection::ticked(&seed);
         if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS) {
             match outcome {
                 picker::Outcome::Save(chosen) => chosen,
@@ -732,14 +744,14 @@ pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exi
             }
         } else {
             // A terminal, but no raw mode to be had: the line prompt still asks.
-            match ask() {
+            match ask(&seed) {
                 Ok(chosen) => chosen,
                 Err(exit) => return exit,
             }
         }
     } else if interactive {
         // A piped answer: the line prompt reads it, one line.
-        match ask() {
+        match ask(&seed) {
             Ok(chosen) => chosen,
             Err(exit) => return exit,
         }
@@ -753,12 +765,29 @@ pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exi
     apply(repo, &chosen, dry_run).await
 }
 
+/// The preset indices the configuration already enables, for the seed.
+///
+/// Only preset ids are known to the table; a hand-added section has a row
+/// nowhere and stays untouched either way.
+fn already_enabled(repo: &Repo) -> Result<Vec<usize>, Exit> {
+    let ids = anchors::tsa_ids(repo)?;
+    Ok(ids
+        .iter()
+        .filter_map(|id| presets::PRESETS.iter().position(|preset| preset.name == id))
+        .collect())
+}
+
 /// Print the preset table and take the selection, re-asking on nonsense.
-fn ask() -> Result<Vec<usize>, Exit> {
+///
+/// `seed` marks the rows the configuration already enables. The table is the
+/// tick state the empty answer accepts; a typed answer overrides it, exactly as
+/// the picker's buffer does.
+fn ask(seed: &[usize]) -> Result<Vec<usize>, Exit> {
     for (index, preset) in presets::PRESETS.iter().enumerate() {
         println!(
-            "{}) {} {} {} {}{}",
+            "{}) [{}] {} {} {} {}{}",
             index + 1,
+            if seed.contains(&index) { 'x' } else { ' ' },
             preset.name,
             preset.url,
             if preset.curated { "default" } else { "opt-in" },
@@ -780,8 +809,8 @@ fn ask() -> Result<Vec<usize>, Exit> {
         let _ = std::io::stdout().flush();
         let mut line = String::new();
         match std::io::stdin().lock().read_line(&mut line) {
-            // A terminal that closed is as good as an empty answer: nothing.
-            Ok(0) => return Ok(Vec::new()),
+            // A terminal that closed accepts the ticks, as an empty answer does.
+            Ok(0) => return Ok(seed.to_vec()),
             Ok(_) => {}
             Err(error) => {
                 return Err(Exit::config(format!("cannot read the selection: {error}")));
@@ -791,6 +820,10 @@ fn ask() -> Result<Vec<usize>, Exit> {
         // without this the next output would start on the prompt line.
         if !std::io::stdin().is_terminal() {
             println!();
+        }
+        // An empty answer takes the ticks; `none` still clears them.
+        if line.trim().is_empty() {
+            return Ok(seed.to_vec());
         }
         match parse_choice(&line, presets::PRESETS.len()) {
             Ok(chosen) => return Ok(chosen),

@@ -77,6 +77,22 @@ pub struct Selection {
 }
 
 impl Selection {
+    /// A selection that starts with `ticked` already ticked.
+    ///
+    /// The caller hands over whatever is configured, which can repeat an index;
+    /// the constructor sorts and dedupes so the rest of the state can assume the
+    /// invariant the toggle keeps.
+    #[must_use]
+    pub fn ticked(ticked: &[usize]) -> Self {
+        let mut chosen = ticked.to_vec();
+        chosen.sort_unstable();
+        chosen.dedup();
+        Self {
+            chosen,
+            ..Self::default()
+        }
+    }
+
     /// The row indices ticked so far, in ascending order.
     #[must_use]
     pub fn chosen(&self) -> &[usize] {
@@ -514,6 +530,27 @@ mod tests {
         assert_eq!(selection.chosen().len(), presets::PRESETS.len());
         press(&mut selection, Key::None);
         assert!(selection.chosen().is_empty());
+    }
+
+    #[test]
+    fn the_constructor_dedupes_and_sorts_a_seed() {
+        let mut selection = Selection::ticked(&[2, 0, 2]);
+        assert_eq!(selection.chosen(), [0, 2]);
+        // `a` still takes all and `n` still clears the seeded ticks.
+        press(&mut selection, Key::All);
+        assert_eq!(selection.chosen().len(), presets::PRESETS.len());
+        press(&mut selection, Key::None);
+        assert!(selection.chosen().is_empty());
+        assert_eq!(press(&mut selection, Key::Enter), Outcome::Save(Vec::new()));
+    }
+
+    #[test]
+    fn the_frame_marks_the_seeded_rows() {
+        let rendered = frame(&Selection::ticked(&[0, 2]), &presets::PRESETS, 24, 80);
+        assert!(rendered.contains("[x]  1"), "{rendered}");
+        assert!(rendered.contains("[x]  3"), "{rendered}");
+        assert!(rendered.contains("[ ]  2"), "{rendered}");
+        assert!(rendered.contains("2 selected"), "{rendered}");
     }
 
     #[test]

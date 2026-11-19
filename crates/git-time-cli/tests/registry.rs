@@ -2121,9 +2121,11 @@ fn select_typed_indices_enable_exactly_those() {
     assert_eq!(listing.lines().count(), 2, "{listing}");
 }
 
-/// Enter with nothing selected still saves: that is the removal path.
+/// Enter accepts the ticks, and the ticks start at what is configured: entering
+/// the selector to change one authority keeps the others. `n` then `enter` is
+/// still the removal path.
 #[test]
-fn select_enter_on_nothing_removes_the_preset_sections() {
+fn select_enter_keeps_the_configured_authorities_and_none_removes_them() {
     let repo = Repo::new();
     repo.init();
     let enabled = repo.run_time_with_stdin(
@@ -2133,9 +2135,43 @@ fn select_enter_on_nothing_removes_the_preset_sections() {
     );
     assert!(enabled.status.success(), "{}", text(&enabled.stderr));
 
-    let cleared = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "\n");
+    let kept = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "\n");
+    assert_eq!(kept.status.code(), Some(0), "{}", text(&kept.stderr));
+    assert_eq!(
+        repo.config("time.tsa.freetsa.url").as_deref(),
+        Some("https://freetsa.org/tsr"),
+        "the empty answer kept it"
+    );
+    assert!(
+        text(&kept.stdout).contains("enabled freetsa "),
+        "it was re-pinned, not dropped: {}",
+        text(&kept.stdout)
+    );
+
+    let cleared = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "none\n");
     assert_eq!(cleared.status.code(), Some(0), "{}", text(&cleared.stderr));
     assert_eq!(repo.config("time.tsa.freetsa.url"), None);
+}
+
+/// The table marks the configured rows, so the start state is visible, and an
+/// empty answer keeps exactly them instead of disabling what was not touched.
+#[test]
+fn select_starts_from_the_configured_authorities() {
+    let repo = Repo::new();
+    repo.init();
+    repo.add_tsa("freetsa", "https://freetsa.org/tsr");
+    repo.add_tsa("digicert", "http://timestamp.digicert.com");
+
+    let plan =
+        repo.run_time_with_stdin(&["tsa", "select", "--interactive", "--dry-run"], &[], "\n");
+    assert_eq!(plan.status.code(), Some(0), "{}", text(&plan.stderr));
+    let stdout = text(&plan.stdout);
+    assert!(stdout.contains("1) [x] freetsa "), "{stdout}");
+    assert!(stdout.contains("2) [x] digicert "), "{stdout}");
+    assert!(stdout.contains("3) [ ] sectigo "), "{stdout}");
+    assert!(stdout.contains("would enable freetsa"), "{stdout}");
+    assert!(stdout.contains("would enable digicert"), "{stdout}");
+    assert!(!stdout.contains("would disable"), "{stdout}");
 }
 
 #[test]

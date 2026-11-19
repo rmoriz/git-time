@@ -259,12 +259,15 @@ Choose which preset authorities this repository uses, then pin the chosen anchor
 preset sections that were not chosen. A section whose id is not a preset is untouched, and saving
 with nothing selected is therefore the removal path.
 
-The list is a cursor UI on the alternate screen. Nothing is preselected: the selection is the user's
-to make, and `a` really is all 22.
+The rows of the authorities already configured start ticked, so a change keeps the others that the
+user did not mean to touch; an unconfigured row starts clear. `n` clears every tick, and saving that
+empty selection is how the preset sections are removed.
+
+The list is a cursor UI on the alternate screen. `a` really is all 22.
 
 ```
-   [ ]  1  freetsa            pin A6:37:9E:7C… 
- > [x]  2  digicert           pin 05:63:B8:63… http
+ > [x]  1  freetsa            pin A6:37:9E:7C… 
+   [x]  2  digicert           pin 05:63:B8:63… http
    [ ]  3  sectigo            pin CB:73:94:4C… 
    [ ]  4  certum             pin 07:E0:32:E0… http
    [ ]  5  izenpe             pin 8E:5B:8B:AE… http
@@ -282,9 +285,9 @@ to make, and `a` really is all 22.
    [ ] 17  ssl-com            pin B7:AB:33:08… http
    [ ] 18  belgium            pin 98:98:9F:EE… http
   …
-url: http://timestamp.digicert.com
+url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
-1 selected
+2 selected
 > _
 ```
 
@@ -294,7 +297,7 @@ space toggle  a all  n none  j/k or arrows move  enter save  q abort
 | `Home`, `End`, `[H`, `[F` | Jump to the first, the last row |
 | `space` | Tick or untick the row under the cursor |
 | `a` | Tick every row |
-| `n` | Untick every row |
+| `n` | Untick every row; saving then removes the preset sections |
 | `enter` | Save and pin the ticks |
 | `q`, `esc`, `ctrl-c` | Leave without writing |
 | `0`–`9`, `,`, `-` | Append to the prompt line |
