@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The tag push also triggers CI, but nothing made the release wait for it:
-  # without this gate a failing suite still publishes.
+  # A tag triggers nothing else (CI skips tags), so nothing makes the publish
+  # wait for the suite: without this gate a failing suite still publishes.
   test:
     runs-on: ubuntu-latest
     steps:
@@ -37,6 +37,9 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+  # The only place the four targets are built. The macOS job runs the suite
+  # first and the publish below needs this job, so a tag tests macOS before it
+  # publishes anything.
   binaries:
     uses: ./.github/workflows/binaries.yml
     with:

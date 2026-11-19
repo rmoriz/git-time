@@ -124,27 +124,27 @@ operator section.
 ## Adoption (Task 15)
 
 `README.md` is the front door, `docs/manual.md` the operator manual. `.github/workflows/ci.yml`
-runs fmt, clippy and the suite on Ubuntu, and `.github/workflows/binaries.yml` builds all four
-targets in two jobs (one per OS) — the macOS job running the same suite before it builds, so a run
-needs a single macOS runner. That is deliberate: the account serves about two concurrent macOS
-runners and cancels a job that queues for more than fifteen minutes, which fails the run. A job so
-cancelled twice is what kept `v0.1.0` from publishing. `.github/workflows/release.yml` builds the
-tag and refuses to publish unless the suite is green. A release attaches the four bare binaries
-and nothing else — no archive, no checksum file — so a download is a `chmod +x` and a run. The musl targets
-build in separate target dirs, so no host-built build script crosses a container boundary.
+runs fmt, clippy and the suite on Ubuntu, for branches and pull requests. The four targets are built
+only on a tag, by `.github/workflows/release.yml`, in two jobs (one per OS); its macOS job runs the
+same suite before it packages, and the publish is refused unless the suite is green. That is
+deliberate: the account serves about two concurrent macOS runners and cancels a job that queues for
+more than fifteen minutes, which fails the run, so an ordinary push spends no slot on binaries
+nobody waits for. A job so cancelled twice is what kept `v0.1.0` from publishing. A release attaches
+the four bare binaries and nothing else — no archive, no checksum file — so a download is a
+`chmod +x` and a run. The musl targets build in separate target dirs, so no host-built build script
+crosses a container boundary.
 
-A job in `ci.yml` named `changes` decides whether anything but markdown was touched; the
-`binaries` job is gated on it, so a documentation-only push spends no macOS slot and produces no
-artifacts. The suites still run: `fmt`, `clippy` and the tests are cheap enough, and a skipped
-workflow would leave an empty check list on a pull request. No markdown file is compiled in, so a
-doc change cannot break a build.
+A tag is the only thing that reaches that build: a documentation-only push costs the Ubuntu suite
+and nothing more. The suite still runs on both, so an empty check list never appears on a pull
+request. No markdown file is compiled in, so a doc change cannot break a build either.
 
 GitHub reports capacity constraints on arm64 macOS runners, and a queued-out job is cancelled
 after fifteen minutes, so the darwin job targets the Intel pool (`macos-15-intel`) instead of
-`macos-latest` and fails itself at twelve. When it is cancelled anyway,
-`gh run rerun <run-id> --failed` retries only that job; `v0.1.0` published on the first retry.
-A tag is never force-pushed to work around it. `tests/live_tsa.rs` is the ignored
-smoke test against the public authorities:
+`macos-latest` and fails itself at thirty. When it is cancelled anyway,
+`.github/workflows/macos-retry.yml` reruns the failed jobs once — on a tag that means the macOS job
+and the publish that was waiting on it; `v0.1.0` published on the first retry. The retry is bounded
+by `run_attempt == 1`, so a genuinely broken job stays red. A tag is never force-pushed to work
+around it. `tests/live_tsa.rs` is the ignored smoke test against the public authorities:
 
 ```console
 $ cargo test -p git-time-cli --test live_tsa -- --ignored --nocapture

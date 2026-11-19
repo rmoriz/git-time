@@ -3,8 +3,8 @@ name: Debug (Intel macOS)
 # Probe for the Intel macOS runner: the suite meets a different `openssl` there
 # (Homebrew 1.1.1, ahead of /usr/bin), so this runs the token and seal tests with
 # the failure diagnostics turned on and names the binary it found. Kept because
-# the macOS binaries job is `continue-on-error` off tags and a dispatch like this
-# is how a red macOS leg gets a readable answer.
+# the macOS suite now only runs inside the tag build, so getting a readable red
+# leg otherwise costs a release attempt.
 on:
   workflow_dispatch:
 
