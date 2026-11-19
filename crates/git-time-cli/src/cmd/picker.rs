@@ -3,9 +3,14 @@
 //! Two pure pieces and one terminal driver. [`Selection`] is the state — where
 //! the cursor is, what is ticked, what was typed — and [`Selection::apply_key`]
 //! is the whole reducer: it maps one [`Key`] to the next state and to an
-//! [`Outcome`], with no I/O at all. [`frame`] renders a state to one string.
-//! That keeps the interesting part testable without a terminal; the driver
-//! below only reads bytes and paints.
+//! [`Outcome`], with no I/O at all. [`frame`] renders a state and a [`Probes`]
+//! snapshot to one string. That keeps the interesting part testable without a
+//! terminal; the driver below only reads bytes and paints.
+//!
+//! A [`Cell`] is display material only: what a probe served says what an
+//! authority currently publishes, while the local bundle stays what a seal is
+//! checked against. The two are never conflated — a served date reads `fetch`,
+//! a pinned one `pin`.
 //!
 //! Terminal control is `stty` and nothing else: no new runtime dependency.
 //! `-g` captures the current settings, `raw -echo min 0 time 1` makes reads
@@ -25,6 +30,7 @@ use std::process::{Command, Stdio};
 use git_time_core::presets::Preset;
 
 use crate::cmd::anchors;
+use crate::cmd::probe;
 use crate::cmd::tsa::{looming, parse_choice};
 
 /// The keys the selector understands.
@@ -46,6 +52,10 @@ pub enum Key {
     None,
     /// Save the selection.
     Enter,
+    /// Ask for every probe to be fetched again.
+    ///
+    /// The driver does the work; the reducer only has to not swallow the key.
+    Refresh,
     /// Abort without writing, or clear a non-empty buffer first.
     Escape,
     /// Abort without writing, buffer or not.
@@ -169,6 +179,8 @@ impl Selection {
                 self.typed.pop();
             }
             Key::Typed(character) => self.typed.push(character),
+            // The driver probes, the reducer only redraws.
+            Key::Refresh => {}
             // Escape clears a half-typed buffer before it leaves.
             Key::Escape if !self.typed.is_empty() => self.typed.clear(),
             Key::Escape | Key::Quit => return Outcome::Abort,
@@ -200,6 +212,7 @@ pub fn parse_key(bytes: &[u8]) -> Option<Key> {
         b"a" => Some(Key::All),
         b"n" => Some(Key::None),
         b"\r" | b"\n" => Some(Key::Enter),
+        b"r" => Some(Key::Refresh),
         b"\x7f" | b"\x08" => Some(Key::Backspace),
         [byte] if byte.is_ascii_digit() || *byte == b',' || *byte == b'-' => {
             Some(Key::Typed(char::from(*byte)))
@@ -209,36 +222,155 @@ pub fn parse_key(bytes: &[u8]) -> Option<Key> {
 }
 
 const NAME_WIDTH: usize = 18;
-// Wide enough for `pin expires <day>`: a near expiry keeps both the word and
-// the date instead of being cut inside its own column.
-const TRUST_WIDTH: usize = 22;
-const HELP: &str = "space toggle  a all  n none  j/k or arrows move  enter save  q abort";
+// Wide enough for `fetch expires <day>`, the longest trust text: a near expiry
+// keeps both the word and the date instead of being cut inside its own column.
+const TRUST_WIDTH: usize = 24;
+// Everything on a row outside the trust cell: the cursor, tick, index and the
+// separating spaces, then the space before the transport column and the column
+// itself. A narrow terminal cuts the cell to keep this room, so a served date
+// never costs the visible `http`.
+const ROW_PREFIX_WIDTH: usize = 12;
+const TRANSPORT_WIDTH: usize = 5;
+const HELP: &str =
+    "space toggle  a all  n none  j/k or arrows move  r refresh  enter save  q abort";
+
+/// What the probe said about one row, as the trust column shows it.
+///
+/// Display material only: a [`Cell::Known`] date never outranks the local pin,
+/// it only stands in for one while no root is pinned here — and marks a pin
+/// when the served root is one the bundle does not hold.
+// Only `Idle` is constructed outside the tests today: the driver that fills the
+// rest arrives in the next change.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Cell {
+    /// Nothing was asked: today's `pin`/`tofu` wording, unchanged.
+    Idle,
+    /// Queued or in flight.
+    Pending,
+    /// A served root this authority publishes, with its date and fingerprint.
+    Known(probe::Cached),
+    /// A reply whose roots are none this authority publishes.
+    Unpublished,
+    /// No reply, or one that could not be judged.
+    Failed,
+}
+
+/// The cells of a table, one per row, as the worker left them.
+///
+/// A snapshot the frame reads: the driver owns it, overwrites single cells from
+/// the worker's answers and hands the frame a `&Probes`. A repeat answer simply
+/// overwrites, so the newest reply for an index is the one shown.
+#[derive(Debug, Clone)]
+pub struct Probes {
+    cells: Vec<Cell>,
+}
+
+impl Probes {
+    /// A table where nothing was asked.
+    #[must_use]
+    pub fn idle(count: usize) -> Self {
+        Self {
+            cells: vec![Cell::Idle; count],
+        }
+    }
+
+    /// A table where every row is waiting for its first answer.
+    // The driver that seeds it arrives in the next change.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn pending(count: usize) -> Self {
+        Self {
+            cells: vec![Cell::Pending; count],
+        }
+    }
+
+    /// Set the cell of `index`; an index outside the table is ignored.
+    // The driver that writes cells arrives in the next change.
+    #[allow(dead_code)]
+    pub fn set(&mut self, index: usize, cell: Cell) {
+        if let Some(slot) = self.cells.get_mut(index) {
+            *slot = cell;
+        }
+    }
+
+    /// The cell of `index`, [`Cell::Idle`] outside the table.
+    #[must_use]
+    pub fn cell(&self, index: usize) -> Cell {
+        self.cells.get(index).cloned().unwrap_or(Cell::Idle)
+    }
+
+    /// How many rows answered a failure.
+    #[must_use]
+    pub fn failed(&self) -> usize {
+        self.cells
+            .iter()
+            .filter(|cell| matches!(cell, Cell::Failed))
+            .count()
+    }
+
+    /// The ids of the rows whose served root is not a published one.
+    ///
+    /// These are the rotation signal: the authority answers with a root the
+    /// preset does not name, so the pin (or its absence) is what it always was
+    /// while the authority has moved on.
+    #[must_use]
+    pub fn unpublished(&self, presets: &[Preset]) -> Vec<&'static str> {
+        self.cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| matches!(cell, Cell::Unpublished))
+            .filter_map(|(index, _)| presets.get(index).map(|preset| preset.name))
+            .collect()
+    }
+}
 
 /// One screen frame for a `rows` x `cols` terminal.
 ///
 /// Narrow and windowed on purpose. The row itself carries only what a choice
-/// needs — cursor, tick, index, name, trust tier with the pinned root's expiry,
-/// transport — at fixed widths, so a wrapped line cannot push the table off the
-/// top of a default terminal. The endpoint of the cursor row is printed in full
-/// below the list instead of costing a column.
+/// needs — cursor, tick, index, name, trust tier with the pinned root's expiry
+/// or the date a probe served, transport — at fixed widths, so a wrapped line
+/// cannot push the table off the top of a default terminal. The endpoint of the
+/// cursor row is printed in full below the list instead of costing a column.
+/// Where the terminal is too narrow for the whole row, the trust cell is what is
+/// cut, so the served date never hides the transport.
 ///
 /// At most `rows - 1` lines, at most `cols - 1` columns, lines separated by
 /// `\r\n` and the last one not terminated. All three leave the bottom row and
 /// the last column free: a line that fills the last column wraps, a trailing
 /// newline advances a line, and either scrolls a screen that is already full.
 /// The list is a window that keeps the cursor visible and marks a cut edge with
-/// `…`; the footer (URL, help, count, prompt, error) is always there. Below the
-/// room the footer needs, it degrades to the cursor row and the footer.
+/// `…`; the footer (URL, help, count, prompt, the probe tally, error) is always
+/// there. Below the room the footer needs, it degrades to the cursor row and the
+/// footer.
 #[must_use]
-pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize) -> String {
+pub fn frame(
+    selection: &Selection,
+    presets: &[Preset],
+    probes: &Probes,
+    rows: usize,
+    cols: usize,
+) -> String {
     let len = presets.len();
     let cursor = selection.cursor().min(len.saturating_sub(1));
     let url = presets.get(cursor).map_or("", |preset| preset.url);
     // One instant for the whole frame, so a repaint cannot straddle midnight.
     let now = jiff::Timestamp::now();
 
-    // Footer: URL, help, count, prompt, and the error line when there is one.
-    let footer = 4 + usize::from(selection.error().is_some());
+    // The room the trust cell may take at this width: everything else on the row
+    // keeps its place, so a cut lands inside the cell instead of on `http`.
+    let width = cols.saturating_sub(1).max(1);
+    let trust_width =
+        TRUST_WIDTH.min(width.saturating_sub(ROW_PREFIX_WIDTH + NAME_WIDTH + TRANSPORT_WIDTH));
+
+    // Footer: URL, help, count, prompt, the probe tally, and the error line when
+    // there is one.
+    let failed = probes.failed();
+    let unpublished = probes.unpublished(presets);
+    let footer = 4
+        + usize::from(selection.error().is_some())
+        + usize::from(failed > 0)
+        + usize::from(!unpublished.is_empty());
     let budget = rows.saturating_sub(footer).saturating_sub(1).max(1);
 
     let mut lines: Vec<String> = Vec::with_capacity(budget + footer);
@@ -263,7 +395,7 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
             lines.push("  …".to_owned());
         }
         for (index, preset) in presets.iter().enumerate().take(end).skip(start) {
-            lines.push(row(selection, index, preset, now));
+            lines.push(row(selection, index, preset, probes, trust_width, now));
         }
         if end < len {
             lines.push("  …".to_owned());
@@ -274,13 +406,32 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
     lines.push(HELP.to_owned());
     lines.push(format!("{} selected", selection.chosen().len()));
     lines.push(format!("> {}_", selection.typed()));
+    if failed > 0 {
+        lines.push(format!("probe failed: {failed}"));
+    }
+    if !unpublished.is_empty() {
+        lines.push(format!(
+            "served root not published: {}",
+            unpublished.join(", ")
+        ));
+    }
     if let Some(error) = selection.error() {
         lines.push(error.to_owned());
     }
 
+    // A tall footer (a probe tally, an error) can leave no room for a cut mark;
+    // the cursor row and the footer matter more, so the marks go.
+    while lines.len() > rows.saturating_sub(1).max(1) {
+        match lines.iter().position(|line| line == "  …") {
+            Some(index) => {
+                lines.remove(index);
+            }
+            None => break,
+        }
+    }
+
     // One column short of the edge, or the terminal wraps the row and the next
     // `\r\n` lands two lines down.
-    let width = cols.saturating_sub(1).max(1);
     let mut out = String::with_capacity((budget + footer) * 64);
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
@@ -292,7 +443,14 @@ pub fn frame(selection: &Selection, presets: &[Preset], rows: usize, cols: usize
 }
 
 /// One row, at the fixed widths, with the long fields fitted.
-fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestamp) -> String {
+fn row(
+    selection: &Selection,
+    index: usize,
+    preset: &Preset,
+    probes: &Probes,
+    trust_width: usize,
+    now: jiff::Timestamp,
+) -> String {
     let cursor = if index == selection.cursor() {
         '>'
     } else {
@@ -302,12 +460,17 @@ fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestam
     // The default bundle path is what `install` writes; a configured path is not
     // known here, and a preset that is pinned here is pinned there.
     let anchor = anchors::dir().join(format!("{}.pem", preset.name));
-    let trust = trust(preset, anchors::roots(&anchor).as_deref(), now);
+    let trust = trust(
+        preset,
+        anchors::roots(&anchor).as_deref(),
+        now,
+        probes.cell(index),
+    );
     format!(
-        " {cursor} [{tick}] {:>2}  {:<NAME_WIDTH$} {:<TRUST_WIDTH$} {}",
+        " {cursor} [{tick}] {:>2}  {:<NAME_WIDTH$} {:<trust_width$} {}",
         index + 1,
         fit(preset.name, NAME_WIDTH),
-        fit(&trust, TRUST_WIDTH),
+        fit(&trust, trust_width),
         if preset.insecure_http { "http" } else { "" },
     )
 }
@@ -316,6 +479,16 @@ fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestam
 /// <YYYY-MM-DD>` when that day is close, `EXPIRED` once none of the bundle's
 /// roots is valid at `now`, `tofu` without a published root, and `pin -` for one
 /// that is not pinned here.
+///
+/// A pin always wins over the probe, because the local bundle is what a seal is
+/// checked against. What the probe found is then a second fact: a served root
+/// the bundle does not hold appends ` !`, the rotation signal, instead of
+/// replacing the pinned date. A failed or unpublished probe marks nothing.
+///
+/// Only a row with no root in the bundle shows the cell: `fetch [expires ]
+/// <date>`, `fetch EXPIRED`, `?` for a failed or unpublished probe, and `…`
+/// while it is pending. `fetch` is a word of its own so a probed date is never
+/// mistaken for a pinned one.
 ///
 /// The verdict leads the date instead of trailing it in parentheses: the column
 /// is narrow and cut, and `expires 2027-01-01` keeps both the word and the day
@@ -326,25 +499,60 @@ fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestam
 /// The date is what a reader weighs a rotation by, so it sits where the choice
 /// is made — and it is the newest live root's, since a bundle's order is
 /// append order and not date order.
-fn trust(preset: &Preset, roots: Option<&[anchors::RootRow]>, now: jiff::Timestamp) -> String {
-    if let Some(roots) = roots.filter(|roots| !roots.is_empty()) {
-        if roots
+fn trust(
+    preset: &Preset,
+    roots: Option<&[anchors::RootRow]>,
+    now: jiff::Timestamp,
+    cell: Cell,
+) -> String {
+    let roots = roots.filter(|roots| !roots.is_empty());
+    if let Some(roots) = roots {
+        let mut pinned = if roots
             .iter()
             .all(|root| anchors::expired(&root.not_after, now))
         {
-            return "EXPIRED".to_owned();
+            "EXPIRED".to_owned()
+        } else {
+            match looming(roots, now) {
+                Some(root) => match anchors::expiry_label(&root.not_after, now) {
+                    "(expires soon)" => format!("pin expires {}", root.not_after),
+                    _ => format!("pin {date}", date = root.not_after),
+                },
+                None => "EXPIRED".to_owned(),
+            }
+        };
+        if let Cell::Known(cached) = cell
+            && !roots
+                .iter()
+                .any(|root| root.fingerprint == cached.fingerprint)
+        {
+            pinned.push_str(" !");
         }
-        if let Some(root) = looming(roots, now) {
-            return match anchors::expiry_label(&root.not_after, now) {
-                "(expires soon)" => format!("pin expires {}", root.not_after),
-                _ => format!("pin {date}", date = root.not_after),
-            };
+        return pinned;
+    }
+    match cell {
+        Cell::Known(cached) => served(&cached, now),
+        Cell::Unpublished | Cell::Failed => "?".to_owned(),
+        Cell::Pending => "…".to_owned(),
+        // Nothing was asked: the fallback keeps the line prompt's wording.
+        Cell::Idle => {
+            if preset.fingerprints.is_empty() {
+                "tofu".to_owned()
+            } else {
+                "pin -".to_owned()
+            }
         }
     }
-    if preset.fingerprints.is_empty() {
-        "tofu".to_owned()
-    } else {
-        "pin -".to_owned()
+}
+
+/// A served date, in the same verdict-leads-the-day shape as a pin.
+fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
+    if anchors::expired(&cached.not_after, now) {
+        return "fetch EXPIRED".to_owned();
+    }
+    match anchors::expiry_label(&cached.not_after, now) {
+        "(expires soon)" => format!("fetch expires {}", cached.not_after),
+        _ => format!("fetch {date}", date = cached.not_after),
     }
 }
 
@@ -458,8 +666,10 @@ pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
         eprintln!("rfc3161: note: no raw terminal; falling back to the line prompt");
         None
     })?;
+    // The driver wiring comes next; until then every row reads as today.
+    let probes = Probes::idle(presets.len());
     let (mut rows, mut cols) = size();
-    terminal.paint(&frame(selection, presets, rows, cols));
+    terminal.paint(&frame(selection, presets, &probes, rows, cols));
     loop {
         let bytes = terminal.read_key();
         let Some(key) = parse_key(&bytes) else {
@@ -468,13 +678,13 @@ pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
             if (next_rows, next_cols) != (rows, cols) {
                 rows = next_rows;
                 cols = next_cols;
-                terminal.paint(&frame(selection, presets, rows, cols));
+                terminal.paint(&frame(selection, presets, &probes, rows, cols));
             }
             continue;
         };
         (rows, cols) = size();
         match selection.apply_key(key, presets.len()) {
-            Outcome::Stay => terminal.paint(&frame(selection, presets, rows, cols)),
+            Outcome::Stay => terminal.paint(&frame(selection, presets, &probes, rows, cols)),
             outcome => return Some(outcome),
         }
     }
@@ -482,15 +692,88 @@ pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, Outcome, Selection, frame, parse_key};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    use super::{Cell, Key, Outcome, Probes, Selection, frame, parse_key};
+    use crate::cmd::probe::Cached;
     use git_time_core::presets;
+
+    /// The captured FreeTSA root, which is the one fixture a preset publishes.
+    const FREETSA_ROOT: &[u8] =
+        include_bytes!("../../../git-time-core/tests/fixtures/freetsa_root.pem");
 
     fn picked() -> Selection {
         Selection::default()
     }
 
+    /// A selection with the cursor pressed down `index` rows.
+    fn picked_at(index: usize) -> Selection {
+        let mut selection = picked();
+        for _ in 0..index {
+            press(&mut selection, Key::Down);
+        }
+        selection
+    }
+
     fn press(selection: &mut Selection, key: Key) -> Outcome {
         selection.apply_key(key, presets::PRESETS.len())
+    }
+
+    /// A served answer with a fingerprint no bundle here holds.
+    fn cached(not_after: &str) -> Cached {
+        cached_of(not_after, "aa".repeat(32))
+    }
+
+    fn cached_of(not_after: &str, fingerprint: impl ToString) -> Cached {
+        Cached {
+            not_after: not_after.to_owned(),
+            fingerprint: fingerprint.to_string(),
+        }
+    }
+
+    /// An idle table the given `cells` are set in, as the driver would.
+    fn probes_with(cells: &[(usize, Cell)]) -> Probes {
+        let mut probes = Probes::idle(presets::PRESETS.len());
+        for (index, cell) in cells {
+            probes.set(*index, cell.clone());
+        }
+        probes
+    }
+
+    /// The cursor row of a frame with the cursor on `index`, uncut.
+    fn rendered(probes: &Probes, index: usize) -> String {
+        frame(&picked_at(index), &presets::PRESETS, probes, 24, 80)
+            .lines()
+            .find(|line| line.trim_start().starts_with("> ["))
+            .expect("the cursor row")
+            .to_owned()
+    }
+
+    /// The FreeTSA root's fingerprint in `anchors::fingerprint` spelling.
+    fn freetsa_fp() -> String {
+        let text = std::str::from_utf8(FREETSA_ROOT).expect("PEM is text");
+        let body = text
+            .split_once("-----\n")
+            .and_then(|(_, rest)| rest.split_once("\n-----END"))
+            .map(|(body, _)| body.replace('\n', ""))
+            .expect("a PEM block");
+        super::anchors::fingerprint(&BASE64.decode(body).expect("base64"))
+    }
+
+    /// Pin the FreeTSA fixture here, probe freetsa with `cell` and return its
+    /// row. The caller holds the `XDG_CONFIG_HOME` lock across the frame.
+    fn pinned_and_probed(cell: Cell) -> String {
+        let xdg = tempfile::TempDir::new().expect("xdg dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
+        let anchors = xdg.path().join("git-time/anchors");
+        std::fs::create_dir_all(&anchors).expect("anchors dir");
+        std::fs::write(anchors.join("freetsa.pem"), FREETSA_ROOT).expect("pin a root");
+        let index = presets::PRESETS
+            .iter()
+            .position(|preset| preset.name == "freetsa")
+            .expect("the freetsa row");
+        rendered(&probes_with(&[(index, cell)]), index)
     }
 
     #[test]
@@ -546,7 +829,13 @@ mod tests {
 
     #[test]
     fn the_frame_marks_the_seeded_rows() {
-        let rendered = frame(&Selection::ticked(&[0, 2]), &presets::PRESETS, 24, 80);
+        let rendered = frame(
+            &Selection::ticked(&[0, 2]),
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            24,
+            80,
+        );
         assert!(rendered.contains("[x]  1"), "{rendered}");
         assert!(rendered.contains("[x]  3"), "{rendered}");
         assert!(rendered.contains("[ ]  2"), "{rendered}");
@@ -632,7 +921,13 @@ mod tests {
         let mut selection = picked();
         press(&mut selection, Key::Down);
         press(&mut selection, Key::Toggle);
-        let rendered = frame(&selection, &presets::PRESETS, 40, 80);
+        let rendered = frame(
+            &selection,
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            40,
+            80,
+        );
         let marked: Vec<&str> = rendered
             .lines()
             .filter(|line| line.trim_start().starts_with("> ["))
@@ -650,20 +945,41 @@ mod tests {
         let mut selection = picked();
         press(&mut selection, Key::Down);
         press(&mut selection, Key::Toggle);
-        eprint!("{}", frame(&selection, &presets::PRESETS, 24, 80));
+        eprint!(
+            "{}",
+            frame(
+                &selection,
+                &presets::PRESETS,
+                &Probes::idle(presets::PRESETS.len()),
+                24,
+                80
+            )
+        );
     }
 
     #[test]
     fn the_frame_shows_the_trust_tier_and_the_help() {
-        let rendered = frame(&picked(), &presets::PRESETS, 24, 80);
+        let rendered = frame(
+            &picked(),
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            24,
+            80,
+        );
         assert!(rendered.contains("pin "), "{rendered}");
         // No built-in row is TOFU now, so the table shows the published tier;
         // the other two tiers come from constructed presets, so this does not
         // depend on which anchors the machine running the suite happens to have.
         assert!(!rendered.contains("tofu"), "{rendered}");
-        let unpublished = frame(&picked(), &[unpublished()], 24, 80);
+        let unpublished = frame(&picked(), &[unpublished()], &Probes::idle(1), 24, 80);
         assert!(unpublished.contains("tofu"), "{unpublished}");
-        let missing = frame(&picked(), &[published_without_bundle()], 24, 80);
+        let missing = frame(
+            &picked(),
+            &[published_without_bundle()],
+            &Probes::idle(1),
+            24,
+            80,
+        );
         assert!(missing.contains("pin -"), "{missing}");
         assert!(rendered.contains(" http"), "{rendered}");
         assert!(rendered.contains("0 selected"), "{rendered}");
@@ -702,7 +1018,13 @@ mod tests {
                 for _ in 0..cursor {
                     press(&mut selection, Key::Down);
                 }
-                let rendered = frame(&selection, &presets::PRESETS, 24, cols);
+                let rendered = frame(
+                    &selection,
+                    &presets::PRESETS,
+                    &Probes::idle(presets::PRESETS.len()),
+                    24,
+                    cols,
+                );
                 assert!(
                     !rendered.ends_with('\n'),
                     "as {cols}/{cursor}: no trailing line"
@@ -732,7 +1054,13 @@ mod tests {
         for rows in [8, 24, 40] {
             let mut selection = picked();
             press(&mut selection, Key::End);
-            let rendered = frame(&selection, &presets::PRESETS, rows, 80);
+            let rendered = frame(
+                &selection,
+                &presets::PRESETS,
+                &Probes::idle(presets::PRESETS.len()),
+                rows,
+                80,
+            );
             // One line short of the bottom, or a full screen scrolls.
             assert!(
                 rendered.lines().count() < rows,
@@ -741,12 +1069,28 @@ mod tests {
             );
             assert!(!rendered.ends_with('\n'), "no trailing line at {rows} rows");
         }
+
+        // The probe tally is two more footer lines: a short screen still has to
+        // keep the frame one line short of the bottom.
+        let probes = probes_with(&[(0, Cell::Failed), (2, Cell::Unpublished)]);
+        let rendered = frame(&picked(), &presets::PRESETS, &probes, 8, 80);
+        assert!(
+            rendered.lines().count() < 8,
+            "{} lines for 8 rows with a tall footer",
+            rendered.lines().count()
+        );
     }
 
     #[test]
     fn the_cursor_row_and_the_footer_are_always_rendered() {
         // At the top nothing is cut above.
-        let rendered = frame(&picked(), &presets::PRESETS, 8, 80);
+        let rendered = frame(
+            &picked(),
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            8,
+            80,
+        );
         let lines = shards(&rendered);
         assert!(lines[0].contains("freetsa"), "{rendered}");
         // The fingerprint itself is abbreviated; the *row* is not cut off.
@@ -755,7 +1099,13 @@ mod tests {
         // At the last row the cursor row is there and a `…` marks the top cut.
         let mut selection = picked();
         press(&mut selection, Key::End);
-        let rendered = frame(&selection, &presets::PRESETS, 8, 80);
+        let rendered = frame(
+            &selection,
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            8,
+            80,
+        );
         let lines = shards(&rendered);
         assert_eq!(lines[0].trim(), "…", "the top cut is marked: {rendered}");
         assert!(
@@ -766,7 +1116,16 @@ mod tests {
         );
 
         // The footer is in both, the prompt unconditionally.
-        for rendered in [frame(&picked(), &presets::PRESETS, 8, 80), rendered] {
+        for rendered in [
+            frame(
+                &picked(),
+                &presets::PRESETS,
+                &Probes::idle(presets::PRESETS.len()),
+                8,
+                80,
+            ),
+            rendered,
+        ] {
             assert!(rendered.contains("selected"), "{rendered}");
             assert!(rendered.contains("> _"), "{rendered}");
             assert!(rendered.contains("url: "), "{rendered}");
@@ -776,7 +1135,7 @@ mod tests {
     #[test]
     fn long_fields_are_cut_with_an_ellipsis_and_keep_the_columns_aligned() {
         let row_of = |presets: &[presets::Preset]| {
-            let rendered = frame(&picked(), presets, 24, 60);
+            let rendered = frame(&picked(), presets, &Probes::idle(presets.len()), 24, 60);
             shards(&rendered)
                 .into_iter()
                 .find(|line| line.trim_start().starts_with("> ["))
@@ -819,7 +1178,13 @@ mod tests {
             for _ in 0..cursor {
                 press(&mut selection, Key::Down);
             }
-            let rendered = frame(&selection, &presets::PRESETS, 12, 40);
+            let rendered = frame(
+                &selection,
+                &presets::PRESETS,
+                &Probes::idle(presets::PRESETS.len()),
+                12,
+                40,
+            );
             assert!(rendered.lines().count() <= 11, "{rendered:?}");
             for line in rendered.lines() {
                 assert_ne!(line.chars().count(), 40, "a full line wraps: {line:?}");
@@ -830,7 +1195,13 @@ mod tests {
 
     #[test]
     fn the_last_line_is_not_terminated_and_nothing_doubles_the_carriage_return() {
-        let rendered = frame(&picked(), &presets::PRESETS, 24, 80);
+        let rendered = frame(
+            &picked(),
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            24,
+            80,
+        );
         assert!(!rendered.ends_with('\n'), "{rendered:?}");
         assert!(!rendered.contains("\r\r\n"), "{rendered:?}");
         assert!(rendered.ends_with("> _"), "{rendered:?}");
@@ -851,7 +1222,7 @@ mod tests {
         }
         let expected = selection.chosen().to_vec();
         assert_eq!(selection.apply_key(Key::Enter, 0), Outcome::Save(expected));
-        assert!(frame(&selection, &[], 24, 80).contains("url: "));
+        assert!(frame(&selection, &[], &Probes::idle(0), 24, 80).contains("url: "));
     }
 
     #[test]
@@ -915,12 +1286,22 @@ mod tests {
     fn the_trust_column_says_the_pin_and_its_date() {
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(
-            super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
+            super::trust(
+                preset,
+                Some(&[root("2030-01-01")]),
+                at(2026, 1, 1),
+                Cell::Idle
+            ),
             "pin 2030-01-01"
         );
         // The verdict leads the day, so a cut column keeps both readable.
         assert_eq!(
-            super::trust(preset, Some(&[root("2027-01-01")]), at(2026, 12, 1)),
+            super::trust(
+                preset,
+                Some(&[root("2027-01-01")]),
+                at(2026, 12, 1),
+                Cell::Idle
+            ),
             "pin expires 2027-01-01"
         );
     }
@@ -932,7 +1313,8 @@ mod tests {
             super::trust(
                 preset,
                 Some(&[root("2020-01-01"), root("2020-02-01")]),
-                at(2026, 1, 1)
+                at(2026, 1, 1),
+                Cell::Idle
             ),
             "EXPIRED"
         );
@@ -941,7 +1323,8 @@ mod tests {
             super::trust(
                 preset,
                 Some(&[root("2020-01-01"), root("2030-01-01")]),
-                at(2026, 1, 1)
+                at(2026, 1, 1),
+                Cell::Idle
             ),
             "pin 2030-01-01"
         );
@@ -951,7 +1334,8 @@ mod tests {
             super::trust(
                 preset,
                 Some(&[root("2030-01-01"), root("2020-02-01")]),
-                at(2026, 1, 1)
+                at(2026, 1, 1),
+                Cell::Idle
             ),
             "pin 2030-01-01"
         );
@@ -976,7 +1360,7 @@ mod tests {
         .expect("pin a root");
 
         let preset = &presets::PRESETS[1..2]; // digicert: published, pinned, http
-        let rendered = frame(&picked(), preset, 24, 80);
+        let rendered = frame(&picked(), preset, &Probes::idle(preset.len()), 24, 80);
         let line = shards(&rendered)
             .into_iter()
             .find(|line| line.trim_start().starts_with("> ["))
@@ -999,7 +1383,10 @@ mod tests {
     fn an_unpublished_preset_without_a_bundle_stays_tofu() {
         let preset = unpublished();
         assert!(preset.fingerprints.is_empty(), "the premise: no pin");
-        assert_eq!(super::trust(&preset, None, at(2026, 1, 1)), "tofu");
+        assert_eq!(
+            super::trust(&preset, None, at(2026, 1, 1), Cell::Idle),
+            "tofu"
+        );
     }
 
     /// The local bundle is the only copy of an unpublished root, so the date
@@ -1008,11 +1395,21 @@ mod tests {
     fn a_pinned_unpublished_preset_says_its_date() {
         let preset = unpublished();
         assert_eq!(
-            super::trust(&preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
+            super::trust(
+                &preset,
+                Some(&[root("2030-01-01")]),
+                at(2026, 1, 1),
+                Cell::Idle
+            ),
             "pin 2030-01-01"
         );
         assert_eq!(
-            super::trust(&preset, Some(&[root("2020-01-01")]), at(2026, 1, 1)),
+            super::trust(
+                &preset,
+                Some(&[root("2020-01-01")]),
+                at(2026, 1, 1),
+                Cell::Idle
+            ),
             "EXPIRED"
         );
     }
@@ -1020,7 +1417,100 @@ mod tests {
     #[test]
     fn a_published_root_that_is_not_pinned_here_has_no_date() {
         let preset = presets::find("digicert").expect("a pinned preset");
-        assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "pin -");
-        assert_eq!(super::trust(preset, Some(&[]), at(2026, 1, 1)), "pin -");
+        assert_eq!(
+            super::trust(preset, None, at(2026, 1, 1), Cell::Idle),
+            "pin -"
+        );
+        assert_eq!(
+            super::trust(preset, Some(&[]), at(2026, 1, 1), Cell::Idle),
+            "pin -"
+        );
+    }
+
+    #[test]
+    fn an_unpinned_row_shows_the_served_date() {
+        let probes = probes_with(&[(3, Cell::Known(cached("2035-02-09")))]);
+        let line = rendered(&probes, 3);
+        assert!(line.contains("fetch 2035-02-09"), "{line:?}");
+    }
+
+    #[test]
+    fn a_near_served_date_keeps_the_word_and_the_day() {
+        let probes = probes_with(&[(3, Cell::Known(cached("2027-01-01")))]);
+        let line = rendered(&probes, 3);
+        assert!(line.contains("fetch expires 2027-01-01"), "{line:?}");
+    }
+
+    #[test]
+    fn a_failed_or_unpublished_probe_is_a_question_mark() {
+        for cell in [Cell::Failed, Cell::Unpublished] {
+            let line = rendered(&probes_with(&[(3, cell)]), 3);
+            assert!(line.contains(" ? "), "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_pending_row_knows_nothing_yet() {
+        let line = rendered(&probes_with(&[(3, Cell::Pending)]), 3);
+        assert!(line.contains(" … "), "{line:?}");
+    }
+
+    #[test]
+    fn an_idle_row_keeps_the_old_wording() {
+        let line = rendered(&probes_with(&[(3, Cell::Idle)]), 3);
+        assert!(line.contains("pin -"), "{line:?}");
+    }
+
+    #[test]
+    fn a_served_root_the_bundle_lacks_marks_the_pin() {
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        // FreeTSA's root is pinned (2041-03-07); the probe names a root the
+        // bundle does not hold, so the pin is marked.
+        let line = pinned_and_probed(Cell::Known(cached_of("2035-02-09", "cc".repeat(32))));
+        assert!(line.contains("pin 2041-03-07 !"), "{line:?}");
+    }
+
+    #[test]
+    fn a_served_root_the_bundle_holds_stays_quiet() {
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        let line = pinned_and_probed(Cell::Known(cached_of("2041-03-07", freetsa_fp())));
+        assert!(!line.contains('!'), "{line:?}");
+    }
+
+    #[test]
+    fn a_failed_probe_does_not_mark_a_pin() {
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        let line = pinned_and_probed(Cell::Failed);
+        assert!(line.contains("pin 2041-03-07"), "{line:?}");
+        assert!(!line.contains('!'), "{line:?}");
+    }
+
+    #[test]
+    fn the_footer_counts_failures_and_names_unpublished_rows() {
+        let probes = probes_with(&[(3, Cell::Failed), (6, Cell::Unpublished)]);
+        let out = frame(&picked(), &presets::PRESETS, &probes, 24, 80);
+        assert!(out.contains("probe failed: 1"), "{out}");
+        assert!(out.contains("served root not published: "), "{out}");
+        assert!(out.contains("globalsign-r6"), "{out}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_cuts_the_cell_not_the_transport() {
+        let probes = probes_with(&[(1, Cell::Known(cached("2035-02-09")))]);
+        let out = frame(&picked_at(1), &presets::PRESETS, &probes, 24, 40);
+        for line in out.lines() {
+            assert!(line.chars().count() <= 39, "{line:?}");
+        }
+        let row = out
+            .lines()
+            .find(|line| line.contains("digicert"))
+            .expect("the cursor row");
+        assert!(row.ends_with("http"), "{row:?}");
+    }
+
+    #[test]
+    fn r_asks_for_a_refetch() {
+        assert_eq!(parse_key(b"r"), Some(Key::Refresh));
+        assert_eq!(press(&mut picked(), Key::Refresh), Outcome::Stay);
     }
 }
