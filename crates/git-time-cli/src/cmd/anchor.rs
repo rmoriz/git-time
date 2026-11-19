@@ -30,7 +30,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use base64::Engine as _;
+#[cfg(test)]
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Subcommand;
 use git_time_core::repo::Repo;
@@ -282,9 +284,10 @@ fn list(repo: &Repo, json: bool) -> Exit {
         Ok(configured) => configured,
         Err(exit) => return exit,
     };
-    // A section may carry a URL without an `anchor` key; the policy then reads
-    // the default path, so the listing does too — otherwise a bundle that is
-    // pinned and in use would be invisible here.
+    // A section may carry a `url` without an `anchor` key (hand-written or
+    // half-migrated). The policy then refuses it as `Missing anchor`, but the
+    // writers already fall back to the default path, so a bundle that was
+    // fetched there is shown instead of being made invisible.
     let mut targets: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
     for id in anchors::tsa_ids(repo).unwrap_or_default() {
         targets.insert(id.clone(), anchors::dir().join(format!("{id}.pem")));
@@ -373,23 +376,30 @@ fn list(repo: &Repo, json: bool) -> Exit {
 /// Write the lock: one `<id> <fingerprint>` line per root, of every configured
 /// authority.
 ///
+/// The ids come from the `time.tsa.<id>.url` keys, not from the `anchor` keys, so
+/// a section whose bundle resolves to the default path is locked like any other.
+///
 /// The lines are sorted by id and then fingerprint, so the order the bundle
-/// happens to hold is not drift: a rotation removes the retired root's line and
-/// adds the new one in its sorted place next to it.
+/// happens to hold is not drift: a rotation keeps a retired root's line only
+/// while the bundle still serves it, and adds the new one in its sorted place.
 fn pin(repo: &Repo) -> Exit {
     let mut lines: Vec<(String, String)> = Vec::new();
     let mut problems = Vec::new();
-    for anchor in match anchors::configured(repo) {
-        Ok(configured) => configured,
+    for id in match anchors::tsa_ids(repo) {
+        Ok(ids) => ids,
         Err(exit) => return exit,
     } {
-        match root_certificates(&anchor.path) {
+        let path = match anchors::target(repo, &id) {
+            Ok(path) => path,
+            Err(exit) => return exit,
+        };
+        match root_certificates(&path) {
             Some(roots) => {
                 for der in roots {
-                    lines.push((anchor.id.clone(), anchors::fingerprint(&der)));
+                    lines.push((id.clone(), anchors::fingerprint(&der)));
                 }
             }
-            None => problems.push(anchor.id),
+            None => problems.push(id),
         }
     }
     if !problems.is_empty() {
@@ -458,15 +468,21 @@ fn check(repo: &Repo) -> Exit {
     }
 
     // A bundle that does not load is no expectation at all: the id is
-    // unparseable, exactly as a broken lock line.
+    // unparseable, exactly as a broken lock line. Every configured id is
+    // resolved, url-only sections through their default path, so a lock line for
+    // a bundle that is in use is never reported missing.
     let mut current: BTreeMap<String, Option<BTreeSet<String>>> = BTreeMap::new();
-    for anchor in match anchors::configured(repo) {
-        Ok(configured) => configured,
+    for id in match anchors::tsa_ids(repo) {
+        Ok(ids) => ids,
         Err(exit) => return exit,
     } {
-        let fingerprints = root_certificates(&anchor.path)
+        let path = match anchors::target(repo, &id) {
+            Ok(path) => path,
+            Err(exit) => return exit,
+        };
+        let fingerprints = root_certificates(&path)
             .map(|roots| roots.iter().map(|der| anchors::fingerprint(der)).collect());
-        current.insert(anchor.id, fingerprints);
+        current.insert(id, fingerprints);
     }
 
     let mut drift = Vec::new();
@@ -537,7 +553,9 @@ pub(crate) fn root_certificates(path: &Path) -> Option<Vec<Vec<u8>>> {
 
 /// The DER of the first PEM certificate in `pem`.
 ///
-/// Shared with `install`, so both writer paths fingerprint the same bytes.
+/// The writer paths fingerprint whole bundles, so only the tests still need the
+/// first certificate.
+#[cfg(test)]
 pub(crate) fn first_certificate(pem: &[u8]) -> Option<Vec<u8>> {
     let text = String::from_utf8_lossy(pem);
     let mut body = String::new();

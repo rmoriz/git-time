@@ -27,7 +27,6 @@ use git_time_core::store;
 use git_time_core::trust::{self, AnchorStore};
 use serde_json::{Map, Value, json};
 
-use crate::cmd::anchor::first_certificate;
 use crate::cmd::{Exit, anchors, hooks, open};
 
 /// Run `git time doctor`.
@@ -46,8 +45,9 @@ pub fn run(directory: Option<std::path::PathBuf>, json_output: bool) -> Exit {
 ///
 /// `restore` can only fetch a preset (the evidence does not carry a URL) and its
 /// positional is a commit, so the accept is the only argument it takes. Any
-/// other configured id is fetched by its own URL — with `--insecure-http` when
-/// the URL is plain HTTP — and an id the config has lost is configured first.
+/// other configured id is fetched by its own URL — the same one a fetch reads,
+/// which the tests can stub — with `--insecure-http` when it is plain HTTP, and
+/// an id the config has lost is configured first.
 fn remedy(repo: &Repo, id: &str, fingerprint: &str) -> String {
     let url = repo
         .config_non_empty(&format!("time.tsa.{id}.url"))
@@ -207,15 +207,20 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
     // One instant for the whole run: every bundle is judged as of one moment.
     let now = jiff::Timestamp::now();
     for id in &ids {
-        match configured.iter().find(|anchor| &anchor.id == id) {
-            None => {
-                report.say(format!(
-                    "anchor {id}: missing (no `time.tsa.{id}.anchor` configured)"
+        // Resolve like every reader: an `anchor` key when there is one, the
+        // default path otherwise. Only the resolved file decides "missing", so a
+        // url-only section with a bundle is not called missing.
+        let path = anchors::target(repo, id)?;
+        match std::fs::read(&path) {
+            Err(error) => {
+                report.say(format!("anchor {id}: {} missing ({error})", path.display()));
+                report.problem(format!(
+                    "missing anchor for `{id}`: {} ({error})",
+                    path.display()
                 ));
-                report.problem(format!("missing anchor for `{id}`: not configured"));
                 anchor_reports.push(json!({
                     "id": id,
-                    "path": Value::Null,
+                    "path": path,
                     "fingerprint": Value::Null,
                     "missing": true,
                     "unparseable": false,
@@ -223,137 +228,114 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "expired": 0,
                 }));
             }
-            Some(anchor) => match std::fs::read(&anchor.path) {
-                Err(error) => {
-                    report.say(format!(
-                        "anchor {id}: {} missing ({error})",
-                        anchor.path.display()
-                    ));
+            Ok(bytes) => {
+                // The same load the policy does, so a bundle that is only
+                // PEM-shaped is a problem here rather than `Untrusted` at
+                // the next commit.
+                let parse = AnchorStore::load(&[(id.clone(), path.clone())]);
+                let fingerprint = anchors::fingerprint(&bytes);
+                // The first *root*'s date, never the first certificate: a
+                // leaf-first bundle would otherwise date a leaf.
+                let expiry = anchors::roots(&path)
+                    .as_deref()
+                    .and_then(|roots| roots.first())
+                    .map(|root| format!(" {}", anchors::expiry_text(&root.not_after, now)))
+                    .unwrap_or_default();
+                report.say(format!(
+                    "anchor {id}: {} sha256 {fingerprint}{expiry}",
+                    path.display()
+                ));
+                let mut roots = 0;
+                let mut expired = 0;
+                if let Err(ref error) = parse {
                     report.problem(format!(
-                        "missing anchor for `{id}`: {} ({error})",
-                        anchor.path.display()
+                        "unparseable anchor for `{id}` at {}: {error}",
+                        path.display()
                     ));
-                    anchor_reports.push(json!({
-                        "id": id,
-                        "path": anchor.path,
-                        "fingerprint": Value::Null,
-                        "missing": true,
-                        "unparseable": false,
-                        "roots": 0,
-                        "expired": 0,
-                    }));
-                }
-                Ok(bytes) => {
-                    // The same load the policy does, so a bundle that is only
-                    // PEM-shaped is a problem here rather than `Untrusted` at
-                    // the next commit.
-                    let parse = AnchorStore::load(&[(id.clone(), anchor.path.clone())]);
-                    let fingerprint = anchors::fingerprint(&bytes);
-                    let expiry = first_certificate(&bytes)
-                        .and_then(|der| x509_cert::Certificate::from_der(&der).ok())
-                        .map(|certificate| {
-                            format!(
-                                " {}",
-                                anchors::expiry_text(&anchors::not_after(&certificate), now)
-                            )
+                } else if let Ok(store) = &parse
+                    && let Some(entry) = store.anchor(id)
+                {
+                    let valid = entry.roots_at(now);
+                    roots = entry.roots.len();
+                    // `roots_at` filters both ends, so a root whose window
+                    // has not opened yet is not valid — but it is not
+                    // expired either. Only a `notAfter` that is past counts.
+                    expired = entry
+                        .roots
+                        .iter()
+                        .filter(|root| {
+                            x509_cert::Certificate::from_der(root.as_bytes())
+                                .ok()
+                                .is_some_and(|certificate| {
+                                    anchors::expired(&anchors::not_after(&certificate), now)
+                                })
                         })
-                        .unwrap_or_default();
-                    report.say(format!(
-                        "anchor {id}: {} sha256 {fingerprint}{expiry}",
-                        anchor.path.display()
-                    ));
-                    let mut roots = 0;
-                    let mut expired = 0;
-                    if let Err(ref error) = parse {
-                        report.problem(format!(
-                            "unparseable anchor for `{id}` at {}: {error}",
-                            anchor.path.display()
-                        ));
-                    } else if let Ok(store) = &parse
-                        && let Some(entry) = store.anchor(id)
-                    {
-                        let valid = entry.roots_at(now);
-                        roots = entry.roots.len();
-                        // `roots_at` filters both ends, so a root whose window
-                        // has not opened yet is not valid — but it is not
-                        // expired either. Only a `notAfter` that is past counts.
-                        expired = entry
+                        .count();
+                    pinned.insert(
+                        id.clone(),
+                        entry
                             .roots
                             .iter()
-                            .filter(|root| {
-                                x509_cert::Certificate::from_der(root.as_bytes())
-                                    .ok()
-                                    .is_some_and(|certificate| {
-                                        anchors::expired(&anchors::not_after(&certificate), now)
-                                    })
-                            })
-                            .count();
-                        pinned.insert(
-                            id.clone(),
-                            entry
-                                .roots
+                            .map(|root| trust::fingerprint(root.as_bytes()))
+                            .collect(),
+                    );
+                    if roots > 0 {
+                        if valid.is_empty() {
+                            // The fingerprint is the root a fetch is meant
+                            // to hand back (the newest one, as a listing
+                            // shows it), spelled out so the line can be
+                            // pasted. `restore`'s positional is a commit,
+                            // so the accept is the only argument.
+                            let newest = anchors::roots(&path)
+                                .as_deref()
+                                .and_then(|roots| crate::cmd::tsa::looming(roots, now))
+                                .map(|root| root.fingerprint.clone());
+                            report.problem(format!(
+                                "`anchor {id}` has no root valid now (accept a fresh one: {})",
+                                remedy(repo, id, newest.as_deref().unwrap_or("<fp>"))
+                            ));
+                        } else {
+                            // Only a root that is valid now can be the one
+                            // in use, so a future-dated root must not push
+                            // the deadline past it.
+                            let latest = valid
                                 .iter()
-                                .map(|root| trust::fingerprint(root.as_bytes()))
-                                .collect(),
-                        );
-                        if roots > 0 {
-                            if valid.is_empty() {
-                                // The fingerprint is the root a fetch is meant
-                                // to hand back (the newest one, as a listing
-                                // shows it), spelled out so the line can be
-                                // pasted. `restore`'s positional is a commit,
-                                // so the accept is the only argument.
-                                let newest = anchors::roots(&anchor.path)
-                                    .as_deref()
-                                    .and_then(|roots| crate::cmd::tsa::looming(roots, now))
-                                    .map(|root| root.fingerprint.clone());
-                                report.problem(format!(
-                                    "`anchor {id}` has no root valid now (accept a fresh one: {})",
-                                    remedy(repo, id, newest.as_deref().unwrap_or("<fp>"))
-                                ));
-                            } else {
-                                // Only a root that is valid now can be the one
-                                // in use, so a future-dated root must not push
-                                // the deadline past it.
-                                let latest = valid
-                                    .iter()
-                                    .filter_map(|root| {
-                                        x509_cert::Certificate::from_der(root.as_bytes()).ok()
-                                    })
-                                    .filter_map(|certificate| {
-                                        i64::try_from(
-                                            certificate
-                                                .tbs_certificate
-                                                .validity
-                                                .not_after
-                                                .to_unix_duration()
-                                                .as_secs(),
-                                        )
-                                        .ok()
-                                    })
-                                    .max()
-                                    .and_then(|second| jiff::Timestamp::from_second(second).ok())
-                                    .map_or_else(
-                                        || "-".to_owned(),
-                                        |at| at.strftime("%Y-%m-%d").to_string(),
-                                    );
-                                report.say(format!(
-                                    "anchor {id}: {roots} root(s), latest notAfter {latest}"
-                                ));
-                            }
+                                .filter_map(|root| {
+                                    x509_cert::Certificate::from_der(root.as_bytes()).ok()
+                                })
+                                .filter_map(|certificate| {
+                                    i64::try_from(
+                                        certificate
+                                            .tbs_certificate
+                                            .validity
+                                            .not_after
+                                            .to_unix_duration()
+                                            .as_secs(),
+                                    )
+                                    .ok()
+                                })
+                                .max()
+                                .and_then(|second| jiff::Timestamp::from_second(second).ok())
+                                .map_or_else(
+                                    || "-".to_owned(),
+                                    |at| at.strftime("%Y-%m-%d").to_string(),
+                                );
+                            report.say(format!(
+                                "anchor {id}: {roots} root(s), latest notAfter {latest}"
+                            ));
                         }
                     }
-                    anchor_reports.push(json!({
-                        "id": id,
-                        "path": anchor.path,
-                        "fingerprint": fingerprint,
-                        "missing": false,
-                        "unparseable": parse.is_err(),
-                        "roots": roots,
-                        "expired": expired,
-                    }));
                 }
-            },
+                anchor_reports.push(json!({
+                    "id": id,
+                    "path": path,
+                    "fingerprint": fingerprint,
+                    "missing": false,
+                    "unparseable": parse.is_err(),
+                    "roots": roots,
+                    "expired": expired,
+                }));
+            }
         }
     }
     // HEAD's own block names the roots its evidence was checked against. A

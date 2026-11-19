@@ -276,7 +276,8 @@ struct Row {
     alg: String,
     anchor: PathBuf,
     anchored: bool,
-    /// The fingerprint of the bundle's first root, when it loads.
+    /// The fingerprint of the newest root still valid, when the bundle loads:
+    /// the one the authority line speaks about, as `tsa preset list` chooses it.
     fingerprint: Option<String>,
     insecure_http: bool,
     /// Every root of the bundle, in file order.
@@ -1015,12 +1016,15 @@ pub(crate) fn pinned(id: &str, path: &std::path::Path) -> bool {
     AnchorStore::load(&[(id.to_owned(), path.to_path_buf())]).is_ok()
 }
 
-/// Whether the bundle at `path` already holds **every** root the blocks name.
+/// Whether the bundle at `path` already holds **every** root the blocks name,
+/// with at least one of them valid now.
 ///
-/// No named root at all leaves nothing to compare: a bundle that loads is
-/// enough, which is the case of a block from before roots were recorded. A
-/// partial match is not enough — the missing root still has to be fetched, or
-/// the blocks naming it would stay unverifiable. Both sides are compared in the
+/// No named root at all leaves nothing to compare, but any live root will do: a
+/// block from before roots were recorded only needs a bundle that can still
+/// vouch. Otherwise a partial match is not enough — the missing root still has
+/// to be fetched, or the blocks naming it would stay unverifiable — and an
+/// all-expired bundle is not enough either, or `restore` would skip a fetch whose
+/// whole point is a root that is valid now. Both sides are compared in the
 /// length of the named value, so a SHA-1 and a SHA-256 spelling of the same root
 /// both count.
 fn covers(id: &str, path: &std::path::Path, wanted: &[String]) -> bool {
@@ -1034,15 +1038,25 @@ fn covers(id: &str, path: &std::path::Path, wanted: &[String]) -> bool {
     let Some(anchor) = store.anchor(id) else {
         return false;
     };
+    // Bundle order is append order, so the live set is asked for by date.
+    let live = anchor.roots_at(jiff::Timestamp::now());
+    if live.is_empty() {
+        return false;
+    }
     if wanted.is_empty() {
         return true;
     }
-    wanted.iter().all(|value| {
+    let pinned = |value: &str| {
         anchor
             .roots
             .iter()
             .any(|root| crate::cmd::accept::matches(value, root.as_bytes()))
-    })
+    };
+    let live_named = |value: &str| {
+        live.iter()
+            .any(|root| crate::cmd::accept::matches(value, root.as_bytes()))
+    };
+    wanted.iter().all(|value| pinned(value)) && wanted.iter().any(|value| live_named(value))
 }
 
 /// Refuse a URL that is not `https`, unless plain `http` is accepted explicitly.

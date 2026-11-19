@@ -521,6 +521,44 @@ impl Repo {
             .expect("a commit count")
     }
 
+    /// Commit a block that names `id` under `fingerprint`, without a TSA: the
+    /// token bytes are not judged here, and `restore` reads the ids and roots the
+    /// way a clone would.
+    fn commit_naming(&self, id: &str, fingerprint: &str) {
+        let skip = self.run_time(&["drop"]);
+        assert!(skip.status.success(), "{}", text(&skip.stderr));
+        let mut anchors = std::collections::BTreeMap::new();
+        anchors.insert(id.to_owned(), vec![fingerprint.to_owned()]);
+        let block = git_time_core::store::TrailerBlock {
+            imprint: git_time_core::imprint::Digest {
+                alg: git_time_core::imprint::Alg::Sha256,
+                bytes: vec![0; 32],
+            },
+            object: None,
+            anchors,
+            tokens: vec![git_time_core::store::TokenRecord {
+                id: id.to_owned(),
+                alg: git_time_core::imprint::Alg::Sha256,
+                policy: None,
+                nonce: vec![0; 8],
+                token: vec![1, 2, 3],
+            }],
+            failures: Vec::new(),
+            extra: Vec::new(),
+        };
+        let encoded = git_time_core::store::encode(&block, 64 * 1024).expect("encode the block");
+        let mut message = String::from("sealed elsewhere\n\n");
+        message.push_str(&String::from_utf8(encoded).expect("the block is text"));
+        message.push('\n');
+        let path = self.path().join("message.txt");
+        std::fs::write(&path, message).expect("write message");
+        git(
+            self.path(),
+            &["commit", "-q", "--allow-empty", "-F", "message.txt"],
+        );
+        std::fs::remove_file(&path).expect("remove message");
+    }
+
     fn commit(&self, message: &str) -> String {
         let name = format!("{}.txt", message.replace(' ', "-"));
         std::fs::write(self.path().join(&name), message).expect("write file");
@@ -1199,6 +1237,63 @@ fn doctor_problems_no_root_valid_now() {
         serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
     assert_eq!(value["anchors"][0]["roots"], 1, "{value}");
     assert_eq!(value["anchors"][0]["expired"], 1, "{value}");
+}
+
+/// The same stale bundle on a *preset* id: the way out is `tsa restore`, and it
+/// only fetches because an all-expired bundle is not covered. A root that is
+/// pinned and named but expired used to make `restore` skip the fetch and exit 0,
+/// so the hint was inert and doctor kept failing.
+#[test]
+fn doctor_hint_for_a_preset_actually_restores() {
+    let repo = Repo::new();
+    let stale = stale_ca(repo.authority.dir.path());
+    let stale_fp = fingerprint_colon(&first_der(&read(&stale)));
+    repo.config("time.tsa.freetsa.url", "https://freetsa.org/tsr");
+    repo.config("time.tsa.freetsa.anchor", &pstr(&stale));
+    repo.commit_naming("freetsa", &stale_fp);
+    assert!(repo.install().status.success());
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    let stdout = text(&doctor.stdout);
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("accept a fresh one: "))
+        .unwrap_or_else(|| panic!("the hint: {stdout}"));
+    let command = hint
+        .split_once("git time ")
+        .map(|(_, command)| command.trim_end_matches(')').trim())
+        .unwrap_or_else(|| panic!("the command: {hint}"));
+    assert!(
+        command.starts_with("tsa restore --accept freetsa="),
+        "a preset is restored, not refetched by hand: {hint}"
+    );
+
+    // And it runs: the published root the preset names is served, so the fetch is
+    // verified rather than trusted and the expired bundle is repaired.
+    let served = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&freetsa_root())),
+    )];
+    let args: Vec<&str> = command.split_whitespace().collect();
+    let restored = repo.run_time_env(&args, &served);
+    assert!(restored.status.success(), "{}", text(&restored.stderr));
+    assert!(
+        text(&restored.stdout).contains("1 pinned"),
+        "{}",
+        text(&restored.stdout)
+    );
+
+    // The expired root stays beside the fresh one, so the block that named it
+    // stays backed by an anchor.
+    let store =
+        git_time_core::trust::AnchorStore::load(&[("freetsa".to_owned(), PathBuf::from(&stale))])
+            .expect("both roots load");
+    assert_eq!(
+        store.anchor("freetsa").expect("an anchor").roots.len(),
+        2,
+        "the retired root is not dropped"
+    );
 }
 
 /// A root that is not valid *yet* is not an expired root, and it must not

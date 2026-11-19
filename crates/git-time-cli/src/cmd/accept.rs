@@ -114,7 +114,8 @@ pub(crate) fn matches(accept: &str, der: &[u8]) -> bool {
 
 /// What applying a fetched bundle came to.
 pub(crate) enum Applied {
-    /// The root was expected: the fetched bundle replaced the old one.
+    /// The bundle was expected and nothing was pinned yet: the fetch is the
+    /// first pin, and what matched is named.
     Replaced {
         /// The published value that matched, when one did.
         matched: Option<&'static str>,
@@ -310,17 +311,22 @@ pub(crate) fn apply(
         pinned: served.iter().any(|root| pinned_roots.contains(root)),
     };
     let accepted = accept.is_some_and(|value| served.iter().any(|root| matches(value, root)));
-    // The root the run is about: the one that matched, else the first served
-    // one. It is always a root, so "the fetched root is ..." is true — a leaf
-    // first in the file would otherwise be printed as the root.
+    // The root the run is about: a served root that is **not** pinned yet, else
+    // the first root any expectation describes, else the first served one. A
+    // rotation is recorded from this value, so a re-fetch that brings a new root
+    // must print that root, not one the file already has. It is always a root, so
+    // "the fetched root is ..." stays true — a leaf first in the file is neither.
+    let is_pinned = |root: &[u8]| pinned_roots.iter().any(|pinned| pinned == root);
     let found_root = served
         .iter()
-        .find(|root| {
-            let root = root.as_slice();
-            named.iter().any(|value| matches(value, root))
-                || fingerprint_matches(published, root).is_some()
-                || pinned_roots.iter().any(|pinned| pinned == root)
-                || accept.is_some_and(|value| matches(value, root))
+        .find(|root| !is_pinned(root))
+        .or_else(|| {
+            served.iter().find(|root| {
+                let root = root.as_slice();
+                named.iter().any(|value| matches(value, root))
+                    || fingerprint_matches(published, root).is_some()
+                    || accept.is_some_and(|value| matches(value, root))
+            })
         })
         .cloned()
         .unwrap_or(served_first);
@@ -367,19 +373,17 @@ pub(crate) fn apply(
             found: found.fingerprint,
         };
     }
-    if !pinned {
-        // An accept with nothing to append to is a plain pin.
-        return match replace(&staging, path) {
-            Ok(()) => Applied::FirstPin {
-                fingerprint: found.fingerprint,
-                sha256: found.sha256,
-                accepted: true,
-                expires: found.expires,
-            },
-            Err(error) => Applied::Unusable(error),
-        };
+    // An accept with nothing to append to is a plain pin. A pinned bundle with
+    // an accept already went through `append` above.
+    match replace(&staging, path) {
+        Ok(()) => Applied::FirstPin {
+            fingerprint: found.fingerprint,
+            sha256: found.sha256,
+            accepted: true,
+            expires: found.expires,
+        },
+        Err(error) => Applied::Unusable(error),
     }
-    append(&mut store, id, path, &staging, &found, matched.published)
 }
 
 /// Append the staged bundle to what is pinned at `path` and write the merge.

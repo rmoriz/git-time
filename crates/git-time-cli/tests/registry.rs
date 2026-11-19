@@ -1256,9 +1256,15 @@ fn anchor_list_shows_a_bundle_of_a_url_only_section() {
     let mut repo = Repo::new();
     repo.init();
     repo.serve();
-    // `tsa add` without `--anchor` leaves the section url-only; the policy reads
-    // the default path, and the bundle fetched there is pinned and in use.
-    repo.add_tsa("stub", &repo.stub_url());
+    // Hand-written, because `tsa add` always writes an `anchor` key: the section
+    // carries a `url` alone, so the policy refuses it (`Missing anchor`) and only
+    // the fallback to the default path can find the bundle. Fetching there pins
+    // and uses it, so the listing must not make it invisible.
+    let url = repo.stub_url();
+    git(
+        repo.path(),
+        &["config", "--local", "time.tsa.stub.url", &url],
+    );
     let fetched = repo.fetch_anchor("stub");
     assert!(fetched.status.success(), "{}", text(&fetched.stderr));
     let anchor = repo.anchors().join("stub.pem");
@@ -2534,6 +2540,35 @@ fn restore_pins_a_named_root_without_an_accept() {
         std::fs::read(repo.anchors().join("freetsa.pem")).expect("the anchor"),
         named.bytes()
     );
+}
+
+/// A pinned bundle whose only root has expired is not "covered": the root is
+/// pinned and named, but nothing in it is valid now, so `restore` must fetch
+/// instead of skipping. That skip is what made doctor's hint inert.
+#[test]
+fn restore_refetches_a_pinned_bundle_with_no_root_valid_now() {
+    let repo = Repo::new();
+    repo.init();
+    let stale = stale_ca(repo.path());
+    let stale_bytes = std::fs::read(&stale).expect("the stale bundle");
+    let anchor = repo.anchors().join("freetsa.pem");
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::write(&anchor, &stale_bytes).expect("pin the expired root");
+    let stale_fp = fingerprint_colon(&first_der(&text(&stale_bytes)));
+    repo.commit_naming_roots(&[("freetsa", &stale_fp)]);
+    let fetch = [("GIT_TIME_ANCHOR_FETCH_CMD", format!("cat {}", pstr(&stale)))];
+
+    let restored = repo.run_time_env(&["tsa", "restore"], &fetch);
+    let stdout = ok(&restored);
+    assert!(
+        stdout.contains("1 pinned, 0 refused, 0 without a preset, 0 already pinned"),
+        "the fetch is not skipped: {stdout}"
+    );
+    // The named root is the one served, so the merge adds nothing and the pinned
+    // bundle is left as it was rather than replaced.
+    let store = git_time_core::trust::AnchorStore::load(&[("freetsa".to_owned(), anchor)])
+        .expect("the root still loads");
+    assert_eq!(store.anchor("freetsa").expect("an anchor").roots.len(), 1);
 }
 
 /// A bundle an authority serves may be narrower than what is pinned. A root the
