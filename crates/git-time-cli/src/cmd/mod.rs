@@ -10,6 +10,7 @@ pub mod hooks;
 pub mod install;
 pub mod log;
 pub mod picker;
+pub mod probe;
 pub mod seal;
 pub mod stream;
 pub mod tsa;
