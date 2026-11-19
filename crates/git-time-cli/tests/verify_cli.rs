@@ -1530,7 +1530,7 @@ fn a_tampered_pre_image_fails_the_openssl_script() {
 
 /// Exactly one directory is made, and it is gone again afterwards; an
 /// interrupt stops the script and still cleans up, and a path that is not the
-/// `mktemp` shape is never handed to `rm -rf`.
+/// `mktemp` shape is never handed to anything destructive.
 #[test]
 fn the_openssl_script_cleans_its_scratch_directory() {
     if !script_tools() {
@@ -1607,7 +1607,15 @@ fn the_openssl_script_cleans_its_scratch_directory() {
     let output = run(&path, repo.path(), tmp.path())
         .output()
         .expect("runs sh");
-    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    // The shells differ in which status a failed redirect yields (dash 2, sh 1);
+    // that the run ends at all, and above all that nothing is deleted, is the
+    // point here.
+    assert!(
+        matches!(output.status.code(), Some(1 | 2)),
+        "the run ends: {:?} {}",
+        output.status.code(),
+        text(&output.stderr)
+    );
     assert!(canary.exists(), "a stray `rm -rf` would take this");
     assert!(tmp.path().exists());
 }
