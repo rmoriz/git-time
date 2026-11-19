@@ -47,7 +47,7 @@ pub fn cached(id: &str, now: jiff::Timestamp) -> Option<Cached> {
     let not_after = fields.next()?;
     let at = fields.next()?.parse::<i64>().ok()?;
     let fingerprint = fields.next()?;
-    if fields.next().is_some() || now.as_second() - at > TTL {
+    if fields.next().is_some() || now.as_second().saturating_sub(at) > TTL {
         return None;
     }
     Some(Cached {
@@ -59,14 +59,15 @@ pub fn cached(id: &str, now: jiff::Timestamp) -> Option<Cached> {
 /// Remember `served` for `id`, answering whether it was written.
 #[must_use]
 pub fn store(id: &str, served: &Cached, now: jiff::Timestamp) -> bool {
-    let _ = fs::create_dir_all(dir());
+    let dir = dir();
+    let _ = fs::create_dir_all(&dir);
     let line = format!(
         "{}\t{}\t{}\n",
         served.not_after,
         now.as_second(),
         served.fingerprint
     );
-    fs::write(dir().join(id), line).is_ok()
+    fs::write(dir.join(id), line).is_ok()
 }
 
 /// Drop the entry for `id`, answering whether there was one.
@@ -76,7 +77,7 @@ pub fn forget(id: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::path::Path;
 
     use super::{Cached, TTL, cached, forget, store};
@@ -85,16 +86,16 @@ mod tests {
     ///
     /// The variable is read at every `dir()` call, so it is re-asserted here in
     /// case another test in this process moved it.
-    fn xdg() -> &'static Path {
+    pub(crate) fn xdg() -> &'static Path {
         static XDG: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let dir = XDG.get_or_init(|| tempfile::TempDir::new().expect("xdg dir"));
         unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
         dir.path()
     }
 
-    /// The environment variable is process-wide and several tests share the id
-    /// `x`, so the probe tests take turns.
-    fn lock() -> std::sync::MutexGuard<'static, ()> {
+    /// The `XDG_CONFIG_HOME` variable is process-wide and several tests share the
+    /// id `x`, so the tests that move or use it take turns — across modules too.
+    pub(crate) fn xdg_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -112,7 +113,7 @@ mod tests {
 
     #[test]
     fn a_stored_entry_reads_back_within_the_ttl() {
-        let _guard = lock();
+        let _guard = xdg_lock();
         xdg();
         let _ = store("x", &served(), at(1_000));
         let entry = cached("x", at(1_000 + TTL - 1)).expect("still fresh");
@@ -122,7 +123,7 @@ mod tests {
 
     #[test]
     fn an_entry_older_than_the_ttl_is_stale() {
-        let _guard = lock();
+        let _guard = xdg_lock();
         xdg();
         let _ = store("x", &served(), at(1_000));
         assert!(cached("x", at(1_000 + TTL + 1)).is_none());
@@ -130,7 +131,7 @@ mod tests {
 
     #[test]
     fn a_rewritten_entry_replaces_the_date() {
-        let _guard = lock();
+        let _guard = xdg_lock();
         xdg();
         let _ = store("x", &served(), at(1_000));
         let newer = Cached {
@@ -144,7 +145,7 @@ mod tests {
 
     #[test]
     fn a_malformed_entry_is_stale_not_an_error() {
-        let _guard = lock();
+        let _guard = xdg_lock();
         xdg();
         let path = super::dir().join("x");
         std::fs::create_dir_all(super::dir()).expect("dir");
@@ -154,7 +155,7 @@ mod tests {
 
     #[test]
     fn forgetting_removes_the_entry() {
-        let _guard = lock();
+        let _guard = xdg_lock();
         xdg();
         let _ = store("x", &served(), at(1_000));
         assert!(forget("x"));
@@ -167,7 +168,7 @@ mod tests {
     // it only has to leave a writable parent behind for `TempDir`'s cleanup.
     #[allow(clippy::permissions_set_readonly_false)]
     fn a_write_under_a_read_only_parent_does_not_panic() {
-        let _guard = lock();
+        let _guard = xdg_lock();
         xdg();
         let root = super::dir().join("ro");
         std::fs::create_dir_all(&root).expect("dir");
@@ -179,8 +180,11 @@ mod tests {
             fingerprint: "aa".repeat(32),
         };
         // A root-owned sandbox can still write into the read-only directory, so
-        // only the answer type is asserted, not that the entry is missing.
-        let _: bool = store("ro/x", &entry, at(1_000));
+        // the write's answer has to agree with what a read then finds.
+        assert_eq!(
+            store("ro/x", &entry, at(1_000)),
+            cached("ro/x", at(1_000)).is_some()
+        );
         let mut permissions = std::fs::metadata(&root).expect("metadata").permissions();
         permissions.set_readonly(false);
         std::fs::set_permissions(&root, permissions).expect("chmod");

@@ -961,6 +961,9 @@ mod tests {
     /// column keeps the width `TRUST_WIDTH` gives it.
     #[test]
     fn the_frame_prints_a_pinned_date_in_the_trust_column() {
+        // `XDG_CONFIG_HOME` is process-wide: an unlocked test elsewhere could
+        // repoint it between `set_var` and `frame()`.
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
         let xdg = tempfile::TempDir::new().expect("xdg dir");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let anchors = xdg.path().join("git-time/anchors");
