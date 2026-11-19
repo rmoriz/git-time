@@ -120,6 +120,27 @@ fn commit(repo: &Repo, message: &str) -> String {
         .to_owned()
 }
 
+/// Make an empty commit whose committer date is `date` (`@<seconds> +0000`).
+fn commit_dated(repo: &Repo, date: &str) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo.path())
+        .args(["commit", "-q", "--allow-empty", "-m", MESSAGE])
+        .env("GIT_COMMITTER_DATE", date)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawns git");
+    assert!(
+        output.status.success(),
+        "git commit with GIT_COMMITTER_DATE={date} failed: {}",
+        text(&output.stderr)
+    );
+    text(&git(repo.path(), &["rev-parse", "HEAD"]))
+        .trim()
+        .to_owned()
+}
+
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
@@ -593,6 +614,13 @@ async fn two_healthy_tsas_seal_and_preserve_the_object() {
     assert!(block.failures.is_empty(), "{:?}", block.failures);
     let ids: Vec<&str> = block.tokens.iter().map(|token| token.id.as_str()).collect();
     assert_eq!(ids, ["one", "two"]);
+    // Each id carries the root of its own authority, and the two roots are
+    // distinct: one line per id, not one shared or missing line.
+    let first_root = root_fingerprint(&first);
+    let second_root = root_fingerprint(&second);
+    assert_ne!(first_root, second_root);
+    assert_eq!(block.anchors.get("one"), Some(&vec![first_root]));
+    assert_eq!(block.anchors.get("two"), Some(&vec![second_root]));
     assert_eq!(block.tokens[0].alg, Alg::Sha256);
     assert_eq!(block.tokens[1].alg, Alg::Sha512);
     assert!(after_bytes.len() > before_bytes.len());
@@ -651,6 +679,50 @@ async fn a_sealed_block_names_the_roots_valid_at_the_tokens_time() {
     assert_eq!(evidence.verdict, Verdict::Sealed, "{:?}", evidence.per_tsa);
 }
 
+/// A backfilled commit is stamped now, so the line has to name the root valid at
+/// the token's genTime — the one at the committer time has not started yet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_line_names_the_root_at_the_gen_time_not_the_committer_time() {
+    let (_dir, repo, _first) = repo_with_commit();
+    // Mint the root first, so its validity starts now...
+    let authority = Arc::new(Authority::new());
+    // ...and date the commit two hours into the past, before that start. The
+    // seal's day-wide genTime window still takes the token.
+    let committer = jiff::Timestamp::now().as_second() - 2 * 60 * 60;
+    let oid = commit_dated(&repo, &format!("@{committer} +0000"));
+
+    // Prove the fixture diverges: the root is valid now, not at the commit.
+    let pinned = AnchorStore::load(&[("stub".to_owned(), authority.bundle())]).expect("loads");
+    let anchor = pinned.anchor("stub").expect("pinned");
+    assert_eq!(
+        anchor.roots_at(jiff::Timestamp::now()).len(),
+        1,
+        "the root is valid now"
+    );
+    assert!(
+        anchor
+            .roots_at(jiff::Timestamp::from_second(committer).expect("a second"))
+            .is_empty(),
+        "the root must not be valid at the committer time"
+    );
+
+    let stub = Stub::spawn(Mode::Grant, Some(Arc::clone(&authority))).await;
+    configure_tsa(&repo, "stub", &stub, &authority.bundle());
+    let policy = policy(&repo);
+    let outcome = run(&repo, &policy, &oid).await.expect("seals");
+    let SealOutcome::Sealed { oid: sealed, .. } = outcome else {
+        panic!("expected a seal, got {outcome:?}");
+    };
+
+    let (after, _) = read(&repo, &sealed);
+    let expected = root_fingerprint(&authority);
+    assert_eq!(block(&after).anchors.get("stub"), Some(&vec![expected]));
+
+    // The written root is inside the token's window, so verification holds.
+    let evidence = verify::commit(&repo, &pinned, &sealed, &policy).expect("verifies");
+    assert_eq!(evidence.verdict, Verdict::Sealed, "{:?}", evidence.per_tsa);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_short_quorum_stores_the_failures_and_stays_under_quorum() {
     let (_dir, repo, oid) = repo_with_commit();
@@ -682,6 +754,13 @@ async fn a_short_quorum_stores_the_failures_and_stays_under_quorum() {
     assert_eq!(block.tokens.len(), 1);
     assert_eq!(block.failures.len(), 1);
     assert_eq!(block.failures[0].id, "bad");
+    // Only the id that produced a verified token is named: the rejecting
+    // authority has no root to vouch for, so it gets no line.
+    assert_eq!(
+        block.anchors.get("good"),
+        Some(&vec![root_fingerprint(&healthy)])
+    );
+    assert!(!block.anchors.contains_key("bad"), "{:?}", block.anchors);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1253,8 +1332,9 @@ async fn a_token_older_than_every_pinned_root_is_untrusted() {
         u64::try_from(1_000_000_000 - now.subsec_nanosecond()).expect("a fraction of a second"),
     ));
     let later = Authority::new();
-    // The sealed block names no anchor, so nothing narrows the set: every
-    // pinned root is outside the token's window.
+    // The block names the root that sealed, but the store pins only the later
+    // one: no candidate exists at the token's genTime, so `NoRootAtGenTime`
+    // short-circuits before the named filter can report `AnchorNotPinned`.
     let anchors =
         AnchorStore::load(&[("one".to_owned(), later.bundle())]).expect("the later CA loads");
 
