@@ -118,6 +118,21 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-darwin-
 
+      # macOS ships LibreSSL at /usr/bin/openssl, and LibreSSL's `cms` has
+      # neither `-cades` nor `-econtent_type`: the fixture tokens in the core
+      # suite are built with both. Homebrew's OpenSSL is on the image, so put it
+      # first for the steps below and fail loudly if it is not an OpenSSL.
+      - name: Use OpenSSL 3 for the suite
+        if: inputs.test
+        run: |
+          set -eu
+          if ! prefix="$(brew --prefix openssl@3 2>/dev/null)"; then
+            brew install openssl@3 >/dev/null
+            prefix="$(brew --prefix openssl@3)"
+          fi
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+          "$prefix/bin/openssl" version | grep -q '^OpenSSL 3'
+
       - name: Suite
         if: inputs.test
         run: |

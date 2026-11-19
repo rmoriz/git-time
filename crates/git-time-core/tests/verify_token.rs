@@ -792,13 +792,17 @@ fn throwaway_tsa_token_under(
     let config = ca_config(dir);
 
     let openssl = |args: &[&std::ffi::OsStr]| {
-        let status = Command::new("openssl")
+        let output = Command::new("openssl")
             .args(args)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
+            .stderr(std::process::Stdio::piped())
+            .output()
             .expect("openssl is available");
-        assert!(status.success(), "openssl {args:?} failed");
+        assert!(
+            output.status.success(),
+            "openssl {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     };
 
     openssl(&[

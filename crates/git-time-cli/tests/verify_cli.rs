@@ -23,7 +23,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, Mutex, Once, OnceLock};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -153,6 +153,9 @@ struct Authority {
     ca: PathBuf,
     config: PathBuf,
     counter: AtomicUsize,
+    /// `openssl ts -reply` updates the one serial file, so two replies at once
+    /// (the two-TSA cases serve both ids from one stub) race on it.
+    mint: Mutex<()>,
 }
 
 impl Authority {
@@ -259,11 +262,16 @@ impl Authority {
             ca,
             config,
             counter: AtomicUsize::new(0),
+            mint: Mutex::new(()),
         }
     }
 
     /// A granted `TimeStampResp` for the DER `query`.
     fn mint(&self, query: &[u8]) -> Vec<u8> {
+        // Held across the openssl call: the serial file is the one piece of
+        // shared state between two replies, and a collision makes the reply
+        // fail (which shows up much later as a missing token).
+        let _guard = self.mint.lock().unwrap_or_else(|error| error.into_inner());
         let index = self.counter.fetch_add(1, Ordering::SeqCst);
         let stem = self.dir.path().join(format!("q{index}"));
         let query_file = stem.with_extension("tsq");
