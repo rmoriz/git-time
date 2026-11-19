@@ -6,9 +6,10 @@ produce a conforming one. It is the format, not the pitch: for usage see the
 [README](../README.md), for the configuration and failure modes the
 [manual](manual.md).
 
-The block is *evidence, not trust*: it records what was hashed and one RFC 3161
-token per authority that answered. Whether the evidence is worth anything is
-decided by verification against pinned anchor certificates (§8).
+The block is *evidence, not trust*: it records what was hashed, which anchor
+roots each token was verified with, and one RFC 3161 token per authority that
+answered. Whether the evidence is worth anything is decided by verification
+against pinned anchor certificates (§8).
 
 ## 0. Conventions
 
@@ -37,6 +38,7 @@ readme: say which roots are pinned now
 The table still called … why.
                                      <- the separating empty line
 X-RFC3161-Imprint: sha256:be7de724…
+X-RFC3161-Anchor: id=freetsa; sha256=…
 X-RFC3161-Token: ver=1; id=freetsa; …
 ```
 
@@ -60,14 +62,18 @@ ABNF per RFC 5234; `UTF8-octets` and `pct-encoded` are from RFC 3629/3986.
 ```abnf
 block        = line *( LF line )            ; no trailing LF inside the block
 line         = "X-RFC3161-" name ": " value
-name         = "Imprint" / "Object" / "Token" / "Fail" / extra-name
+name         = "Imprint" / "Object" / "Anchor" / "Token" / "Fail" / extra-name
 extra-name   = 1*( UTF8-octets )            ; but no ":", SP, CR, LF
-value        = imprint-value / object-value / token-value / fail-value / extra-value
+value        = imprint-value / object-value / anchor-value / token-value
+               / fail-value / extra-value
 
 imprint-value = alg ":" hexdig
 object-value  = 40hexdig / 64hexdig
 alg           = "sha256" / "sha512"
-hexdig        = 2HEXDIG                     ; 32 bytes for sha256, 64 for sha512
+hexdig        = 2HEXDIG                     ; one byte; 32 of them for sha256, 64 for sha512
+
+anchor-value  = "id=" label "; " "sha256=" fingerprint 1*( "," fingerprint )
+fingerprint   = hexdig 31( ":" hexdig )     ; 32 octets, colon separated
 
 token-value  = "ver=1; " "id=" label "; " "alg=" alg "; "
                [ "policy=" label "; " ] "nonce=" hexdig+ "tst=" tst
@@ -88,7 +94,8 @@ Decoding of numbers and case is lenient where re-encoding is strict:
 | `Imprint` hex | any case, exact algorithm width | lowercase |
 | `nonce` hex | any case, even length | lowercase |
 | `Object` | exactly 40 or 64 lowercase hex | lowercase |
-| field order inside `Token` | fixed, see §3 | fixed |
+| `Anchor` fingerprint | either case, exactly 32 colon-separated octets | uppercase |
+| field order inside `Anchor`, `Token`, `Fail` | fixed, see §3 | fixed |
 | line order inside the block | any, see §3 | canonical, see §3 |
 
 `nonce` is 1 to 64 bytes. Every `name`, `id`, `policy` and `reason` is UTF-8;
@@ -96,11 +103,13 @@ Decoding of numbers and case is lenient where re-encoding is strict:
 
 ## 3. Fields
 
-The canonical rendering order is `Imprint`, `Object`, `Token*`, `Fail*`, then
-unknown fields. A reader MUST accept any order of lines, and MUST re-emit
-unknown fields verbatim and last. Inside a `Token` or `Fail` value the order is
-fixed and a reader MUST reject an out-of-order, missing or trailing field: the
-value is a record, not a bag.
+The canonical rendering order is `Imprint`, `Object`, `Anchor*`, `Token*`,
+`Fail*`, then unknown fields. `Anchor` lines go before the first `Token` so that
+a reader knows which roots the evidence claims before it judges any of it. A
+reader MUST accept any order of lines, and MUST re-emit unknown fields verbatim
+and last. Inside an `Anchor`, `Token` or `Fail` value the order is fixed and a
+reader MUST reject an out-of-order, missing or trailing field: the value is a
+record, not a bag.
 
 ### `Imprint` — exactly once
 
@@ -114,11 +123,34 @@ one.
 
 ### `Object` — at most once
 
-The object id the tokens were taken over: `git hash-object` of the pre-image
-bytes, 40 hex for SHA-1 repositories, 64 for SHA-256. Provenance only — a
-verifier MUST NOT trust it and MUST recompute the imprint instead. It exists so
-that a replayed commit (`format-patch` → `am`) can be told apart from a
-tampered one.
+The object id the tokens were taken over: `git hash-object -t commit` of the
+pre-image bytes, 40 hex for SHA-1 repositories, 64 for SHA-256. Provenance only —
+a verifier MUST NOT trust it and MUST recompute the imprint instead. It exists so
+that a replayed commit (`format-patch` → `am`) can be told apart from a tampered
+one.
+
+### `Anchor` — at most one per id
+
+The anchor roots the authority's tokens were verified with, as `id` and a
+`sha256` list of fingerprints. Both fields are required and in that order; a
+fingerprint is 32 colon-separated hex octets in uppercase, the spelling §8 and
+`git time anchor list` use.
+
+- `id` MUST also occur in a `Token` or a `Fail` line of the same block. An
+  `Anchor` naming neither belongs to no authority.
+- A repeated `id` is a duplicate, not a continuation: one line carries every
+  fingerprint of one authority. A fingerprint repeated inside the line collapses
+  to its first occurrence.
+- The list names the pinned roots valid at the `genTime` of that id's tokens, so
+  it says what has to be pinned rather than what happens to be pinned here.
+
+The line is a filter on the pinned roots, never a trust decision (§8): the
+fingerprints only narrow the candidates and each still has to be pinned. It
+exists so a reader can tell a missing root from a forgery, and so a swapped
+anchor bundle cannot silently re-point history.
+
+A block without the line — every block written before it — has no filter and is
+read as before. It is not an error to omit it.
 
 ### `Token` — zero or more
 
@@ -151,7 +183,7 @@ which is what makes a quorum shortfall legible.
 | Reason | Meaning |
 |---|---|
 | `timeout`, `http-503`, … | Transport or protocol failure, sanitised: ASCII alphanumerics and `-.:/_()` kept, everything else collapsed to `-`, at most 200 characters. |
-| `invalid-<kind>` | A token arrived and verification refused it. `<kind>` is one of `imprint`, `nonce`, `untrusted`, `cert-not-valid-at-gen-time`, `policy`, `malformed`, `expired`. |
+| `invalid-<kind>` | A token arrived and verification refused it. `<kind>` is one of `imprint`, `nonce`, `untrusted`, `cert-not-valid-at-gen-time`, `policy`, `malformed`, `expired`, `ess-missing`, `ess-mismatch`, `ess-malformed`, `tsa-name`, `no-root-at-gen-time`, `anchor-not-pinned`. The last six are §8's signer-identifier, `tsa`-name and unnamed-root refusals. |
 | `oversized` | The token was over the 1 MiB cap or the block budget, and was dropped (§5). |
 | `no-anchor-pinned` | The authority is configured but has no anchor, so it was not asked. |
 
@@ -263,14 +295,34 @@ A verifier MUST, in this order, and fail closed on any step:
      digest, and `hashAlgorithm` MUST equal `alg`;
    - `nonce` MUST equal the token's `nonce`, and `policy` the token's `policy`
      when one is present;
+   - at least one of `SigningCertificate` (RFC 2634, `ESSCertID`, SHA-1) and
+     `SigningCertificateV2` (RFC 5035, `ESSCertIDv2`, whose `hashAlgorithm`
+     defaults to `sha256` when the field is absent) MUST be a signed attribute;
+     none is `ess-missing`. Every present one is evaluated on its own: its first
+     identifier, `certs[0]`, is hashed over the signer's whole DER and MUST
+     match, or the token is `ess-mismatch` — also when both attributes are
+     present and disagree. An identifier after `certs[0]` only limits the path
+     and is not required to be the signer. Two instances of one attribute, more
+     than one value in one attribute, an empty `certs` or an unsupported hash
+     algorithm is `ess-malformed`. The attribute is the only signed link to the
+     certificate, because the `sid` is not covered by the signature; it is
+     therefore judged before the signature, so a token whose binding was patched
+     reports that rather than a broken signature;
+   - the TSTInfo `tsa` hint, when present, MUST name the signer: its
+     `directoryName` is the signer's subject, or its `dNSName` is one of the
+     signer's subject alternative names. Anything else is `tsa-name`;
+   - the candidates are the roots pinned under `id` whose `notBefore <= genTime
+     <= notAfter`, intersected with the fingerprints the block names for `id`.
+     No candidate at all is `no-root-at-gen-time`; named fingerprints of which
+     none is pinned is `anchor-not-pinned`. A named line is a filter, not a
+     wider search: without one every pinned root in its window is a candidate;
    - the CMS signature MUST verify under the signer's key;
-   - the signer's certificate MUST chain to the anchor pinned under `id`, with
+   - the signer's certificate MUST chain to one of the candidates, with
      every certificate valid at the token's `genTime` (a certificate may omit
      the EKU if it is not the signer; any that carries it MUST carry
      `id-kp-timeStamping`);
    - the signer MUST have a critical extended key usage of exactly
      `id-kp-timeStamping` and nothing else (RFC 3161 §2.3);
-   - the ESS signing certificate attribute, when present, MUST name the signer;
    - `genTime` MUST lie in the accepted window: half-open, 24 hours around the
      commit — the earlier of the committer time and now, minus one day, to the
      later of them plus one day.
@@ -311,6 +363,9 @@ principle; `ver=1` is the only one today. Changes are:
 
 - **Additive** (no version bump): a new `X-RFC3161-<Name>` line, a new `reason`
   value, a new `alg`. Old readers preserve or refuse the token and keep working.
+  An `Anchor` line is such an addition: a reader that predates it ignores the
+  line and the block still verifies, because a block that names no root has no
+  filter (§8). Only a reader that knows the line narrows its candidates by it.
 - **Breaking** (new `ver`): anything inside a `Token` value, the meaning of an
   existing field, or the pre-image rules.
 
@@ -321,8 +376,9 @@ unreadable and keep the block; it MUST NOT drop the other tokens.
 
 A real sealed commit, byte for byte: `tests/fixtures/format_example.commit`.
 Its message body is followed by the separating empty line and the block, and the
-block begins on its own line. `tst` is shown elided here; the appendix is the
-complete object.
+block begins on its own line. The `Anchor` line names the freetsa root the token
+was judged against, before the token itself; `tst` is shown elided here. The
+appendix is the complete object.
 
 ```
 tree 4500086a5dcaa93ad6c9eb0b719ba57c67ffae21
@@ -338,12 +394,14 @@ TOFU row left and now says why.
 
 X-RFC3161-Imprint: sha256:be7de7244f3a555901e9f2c79bf594dce3cd5eb255c3c04aac40e67ce4146e35
 X-RFC3161-Object: 9535462acdff0c2e98ff53c0d17a8b87a44ff64f
-X-RFC3161-Token: ver=1; id=freetsa; alg=sha256; policy=1.2.3.4.1; nonce=e25e7f7181682511; tst=…
+X-RFC3161-Anchor: id=freetsa; sha256=A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC
+X-RFC3161-Token: ver=1; id=freetsa; alg=sha256; policy=1.2.3.4.1; nonce=2c6d49f02c59aedf; tst=…
 ```
 
 The pre-image of that object is the same header section and message with the
 block and the separating empty line removed, and it hashes to the `Imprint`. The
-`Object` value is `git hash-object` of exactly those bytes.
+`Object` value is `git hash-object -t commit` of exactly those bytes. Adding the
+`Anchor` line moves neither: the pre-image ends before the block.
 
 ## 11. Staying true
 
@@ -371,7 +429,8 @@ TOFU row left and now says why.
 
 X-RFC3161-Imprint: sha256:be7de7244f3a555901e9f2c79bf594dce3cd5eb255c3c04aac40e67ce4146e35
 X-RFC3161-Object: 9535462acdff0c2e98ff53c0d17a8b87a44ff64f
-X-RFC3161-Token: ver=1; id=freetsa; alg=sha256; policy=1.2.3.4.1; nonce=e25e7f7181682511; tst=KLUv_QBofVwAVKUwghIWBgkqhkiG9w0BBwKgghIHAwIBAzEPMA0GCWCGSAFlAwQCAwUAMIIBjwYLCRABBKCCAX4EggF6dgIBAQYEKgMEATAvMAsBBCC-feckTzpVWQHp8seb9ZTc481eslXDwEqsQOZ85BRuNQIECi352BgPMjAyNjExMTgyMjEzMzJaAQH_AgkA4l5_cYFoJRETpIIBDwsxETAPBgNVBAoMCEZyZWUgVFNBMQwwCgsMA3YwdA0MbVRoaXMgY2VydGlmaWNhdGUgZGlnaXRhbGx5IHNpZ25zIGRvY3VtZW50cyBhbmQgdGltZSBzdGFtcCByZXF1ZXNtYWRlIHVzaW5nIHRoZSBmdHNhLm9yZyBvbmxpbmVydmljZXMxGDAWAwwPd3d3LjEkMCIJARYVYmxlemFzQG1haWxib3gSMBAHDAlXdWVyemJ1CzAJBhMCREUIDAZCYXllcm6ggg5nMIIGYDCCBEigAwIBAsLphhYNqOnNMA0BDYGVExAwDhMHUm9vdCBDQRMiMCATZy5jb20TEzAeFw0yNjAyMTUxOTQ0MjJaFw00MDAyMDIwdgfOPQIBBgUrgQQAIgNiAASiFeGhstbLhxix0o4UAumNSwHUUlOe3DBvs8fYs580wADW59oqGSCx15bp61TSmXkwLm1JW48XnbLLizP6ZtjcvshV3H9uz2bS53sgDXhg1wLbIhAtraC-fHCytHeuVaujggHmMIIB4h0TBAIwADAdDgQWBBQVwL0m69RdgtFdkyYxL-9wsotGXjAfIwSAFPpVDYw0ZlFDTPfns6dsla965qSXMAsPBAQDAgbAMBYlBAgrBgEFBQcDCDBsAQEEYDBeMDMwAoYnaHR0cDovLy9mcy9jYS5wZW0wJwGGGzoyNTYwMDcfBDAwLjAsoCqgKIYmY3JsL3JfY2EuMIHIIASBwDCBvTCBugYDKwUIMIGyAgEWX2Nwcy5odG1sMDImcGRmMEcCMDsaOSB0cnVzdGVTb2Z0d2FyZSBhIFMgKFNhYVMpA4ICAQBrMVS_YfnfMr0ziZnesBUOrDNRrNNgt3IgMNDwNhwl6oKWHVIhlYnM_5boljfbpZTAbqvxHI3ztT0_swxQOqTat5qBJRAY_VH1n_T4M9uDjSuu3qfh0ZH5PL9ENqoVW44i5NT_znQev2MGXOAHwz9kZwwzz9MFX6hbGhBqWa-nlAqb7Y72KFzj33m1OVHxV2Wl4YD9f91bZTFpUEGW4Ktbkmxpf_iGIPaf4WHpoBW_O6EzofMKYlz4yXyEBh0wRRVyXltLrj-MFHqhe-PsMBllq_dCaO4W_F-AuHElu7aUYWMASelphWAJiUsNMr5HAoeCSSgilqf1CSoWC-k6e4334Fym-Iy4csMex-PG4rSdqXJVQ-AWEdRajSPKh7yDfpNkdnO6yqQJ_tSd11XQ5cL0M9jWuCD1zHlgA-u-R2cry3yo23jD7qTGLhZqUvXCyWigH30_Q_RXjjDwrc4DJiQ-gRY0FhdTYqlvgMBPr4LcJKnNksivdj-kbz7bVSbrBAzRiazK9l841_5XMtP9BvD0hKCpQFvP9PSgCC8EQnKqgSe26FSJBaAQcA5TnK8NF4jkbElBxf_zyh7P3IjHso35jtgUWD1_itg9BJWbYUwJ4tfILpB2F0wbk1GcZDCDZoyW3Xf3trApz_Zd93gF3joc9Hh9RFveKRzWQ7ddUt3egTCCB_8wggXnwYAxNjAzMTMwMTUyMTMxMDMwN4ICIgEPAAoCtgKODjAy8REQ2WTNqUudAnjhlCrpE6qlmQfNppeTmVvZrH4zutn-NwTaHAGpjSGv4_WRpZ1wZ3BRZ5mPUBZyLgq0YrIfQ5Fx0s_MRZPzc1r3lKWrMR9sAQx4mN4z11xFEO529L0dFJjPF9MD8Gpd2feWzGyptlelb-PqT---fOa2oY0-NaMM7l_xcNHPOaMz0_2olk0i22hbKeVhvokPCqhFhzsuhKsmq4Of_o-t6dI7sx5h0nPMm4gGSRhfq-z6BTRgCrqQG2FOLoVFgt6iIm_BnNffUr7VDYd3zZmIwFOj_H3DKHoGik_xK3E82YA2ZulVOFRW_zj4ApjPa5OFbpIkd0pmzxzdEcL479hSA9dFiyVmSxPtY5ze1P-BE9bMU1PScpRzw8MHFXxyKqW13Qv7LWw4sbk3SciB7GACbQiVGzgkvXG6y85HOuvWNvC5GLSiyP9GlPB0V68tbxz4JVTRdw_Xn_XTFNzRBM3cq8lBOAVt_PAX5-uFcv1S9wFE8YjaBfWCP1jdBil-c4e-0tdywT2oJmYBBF_kEt1wmGwMmHunNEuQNzh1FtJY54hbUfiWi38mASE7xMtMhfj_C4SvapiDN837gYaPfs8x3KZxbX7C3YAsFnJinlwAUss1fdKar8Q_YVs7H_nU4c4Ixxxz4f67fcVqM2ITKentbCMCAwEAAaOCAk4wggJKMAwFMAMwDg8BxoHKgcIwgb-hgZukgZiCMywwKjAooCagJIYiz8cwgcQwgcEGCgQBgfIkAQE3KzApaK9-v5OFYu9M6ztYC-L69sw1omdyli89lZAfpWMMh9CRmJhM6KBqM_ipwoLtnxyxGsbCPhcQjuTvzm-ylN6VwTMmIlVyVSLKYZcdSjt_eCUN-41K7sD7GVmxZBAFILnBDmTGJmLkrU0KuuIpj8lI_E6Z6NnmuP2-RAQSHsfBQi6sssnXMo4HOW5gtPO7gDrUpVXID--1P4XndkoKn7Svw5n0zS9fv1hxBcYIHPPQUze2u30bAQt0n0iIyRLzaWuhtpAtd7ffwEbASgzB7E-NGF4tpV37e8KiA2xiGSRqT5ndu28fgpOY87gD3ArZDctZvvTCfHdAS5kEO3gnGGeZEVLDmfEsv8TGJa3AljVa5E40IQDsUXpQLi8G-UC41DWZu8EVT4rnYaCw1VX7ShOR1PNCCvjb8S8tfdudd9zhU3gEB0rxdeTy1tVbNLXW99y90xcwr1ZIDUwM_xQ_noO8FRhm0LoPC73Ef-J4ZBdrvWwauF3zJe33d4ibxEcb8_pz5WzFkeixYM2nsHhqHsBKw7JPouKNXRnl5IAE1eFmqDyC7G_VT7OF669xM6hbUt5G21JE4cNK6NNucS-fzg1JPX0-3VhsYZjj7D5uljRvQXrJ8iHgr_M6j2oLHvTAI2MLdq2qjZFDOCXsxBxJpbmLGBx9ow6ZerlUxzws2AWv2pkxggHtMIIB6QKjoIG4MBoDMQ0wHAUxDxcNMCsCDDEcMBowBBRIH9U8U004QYDAKGUZoDb5iFRHZjBPBDFCBEDy73H0NTJMdri5NrQNGGWvMG2euK5mzeC_tVZNW3eoFN43Ibo0jm9iQyEU46mt3tNjZwdk-WKPPjE6ufgeN68dBAMEBGgwZgIxAKKHYM72rJJ4UFse3CDAtdALEa3l4EYfWguQNNAOVPoN2sx7n5dDl_rsZybSJz3Aiu5tTPJOpdCZ5IoJLf1sYSo_6p4PhAB-4zjOJ5aiUvtg9JYPobntVwdu6S_30iAhv3goUEQghYiIugEi2o7jIEmdIaFAIglKyo-S8nhqDaC-QhQT3TA4AnfhbWgkhoSEfgXwM8QHnZ0GQ_YYuBIqCFiuBBAxkQaQkaWQ3fnJ5p01f8zUh7v_jDcJZle-yTTpFBWYooX2Jy37GUJ-DrE_JPsX3TcOVrpheOB5SZt1W7QmGa0wqzKW3QlIrOGJQjhMtsGZVNIO1B0txglh1KYFMgDsEJYFLMH6tqYOMWxyMLqunNmzneY-55rAaGb6E48GNjChKMCkrSL-2-UndP7RuzfLHwn4B9IOk9EWNNhj8f6c2CarrWuG-rVNgs0Va17OueyAGV8mwcyuKG4AFwlxHFO8PBwHl-JaI23ogLCWrbZxIhrSh-Q_tdBpNUizZt8e7T5b7rDZIBeRwwJGD3GnSFfFKNPOjPYJdg
+X-RFC3161-Anchor: id=freetsa; sha256=A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC
+X-RFC3161-Token: ver=1; id=freetsa; alg=sha256; policy=1.2.3.4.1; nonce=2c6d49f02c59aedf; tst=KLUv_WQbEXVcAHSlMIISFwYJKoZIhvcNAQcCoIISCAQCAQMxDzANBglghkgBZQMEAgMFADCCAZAGCwkQAQSgggF_BIIBe3cCAQEGBCoDBAEwMQEFAAQgvn3nJE86VVkB6fLHm_WU3OPNXrJVw8BKrEDmfOQUbjUCBAoxhAIYDzIwMjYxMTE5MDQyODA0WgEB_wIILG1J8CxZrt8TpIIBDwsxETAPBgNVBAoMCEZyZWUgVFNBMQwwCgsMA3YwdA0MbVRoaXMgY2VydGlmaWNhdGUgZGlnaXRhbGx5IHNpZ25zIGRvY3VtZW50cyBhbmQgdGltZSBzdGFtcCByZXF1ZXNtYWRlIHVzaW5nIHRoZSBmdHNhLm9yZyBvbmxpbmVydmljZXMxGDAWAwwPd3d3LjEkMCIJARYVYmxlemFzQG1haWxib3gSMBAHDAlXdWVyemJ1CzAJBhMCREUIDAZCYXllcm6ggg5nMIIGYDCCBEigAwIBAgIJAMLphhYNqOnNMA0BDYGVExAwDhMHUm9vdCBDQRMiMCATZy5jb20TEzAeFw0yNjAyMTUxOTQ0MjJaFw00MDAyMDIwdgfOPQIBBgUrgQQAIgNiAASiFeGhstbLhxix0o4UAumNSwHUUlOe3DBvs8fYs580wADW59oqGSCx15bp61TSmXkwLm1JW48XnbLLizP6ZtjcvshV3H9uz2bS53sgDXhg1wLbIhAtraC-fHCytHeuVaujggHmMIIB4h0TBAIwADAdDgQWBBQVwL0m69RdgtFdkyYxL-9wsotGXjAfIwSAFPpVDYw0ZlFDTPfns6dsla965qSXMAsPBAQDAgbAMBYlBAgrBgEFBQcDCDBsAQEEYDBeMDMwAoYnaHR0cDovLy9mcy9jYS5wZW0wJwGGGzoyNTYwMDcfBDAwLjAsoCqgKIYmY3JsL3JfY2EuMIHIIASBwDCBvTCBugYDKwUIMIGyAgEWX2Nwcy5odG1sMDImcGRmMEcCMDsaOSB0cnVzdGVTb2Z0d2FyZSBhIFMgKFNhYVMpA4ICAQBrMVS_YfnfMr0ziZnesBUOrDNRrNNgt3IgMNDwNhwl6oKWHVIhlYnM_5boljfbpZTAbqvxHI3ztT0_swxQOqTat5qBJRAY_VH1n_T4M9uDjSuu3qfh0ZH5PL9ENqoVW44i5NT_znQev2MGXOAHwz9kZwwzz9MFX6hbGhBqWa-nlAqb7Y72KFzj33m1OVHxV2Wl4YD9f91bZTFpUEGW4Ktbkmxpf_iGIPaf4WHpoBW_O6EzofMKYlz4yXyEBh0wRRVyXltLrj-MFHqhe-PsMBllq_dCaO4W_F-AuHElu7aUYWMASelphWAJiUsNMr5HAoeCSSgilqf1CSoWC-k6e4334Fym-Iy4csMex-PG4rSdqXJVQ-AWEdRajSPKh7yDfpNkdnO6yqQJ_tSd11XQ5cL0M9jWuCD1zHlgA-u-R2cry3yo23jD7qTGLhZqUvXCyWigH30_Q_RXjjDwrc4DJiQ-gRY0FhdTYqlvgMBPr4LcJKnNksivdj-kbz7bVSbrBAzRiazK9l841_5XMtP9BvD0hKCpQFvP9PSgCC8EQnKqgSe26FSJBaAQcA5TnK8NF4jkbElBxf_zyh7P3IjHso35jtgUWD1_itg9BJWbYUwJ4tfILpB2F0wbk1GcZDCDZoyW3Xf3trApz_Zd93gF3joc9Hh9RFveKRzWQ7ddUt3egTCCB_8wggXnwYAxNjAzMTMwMTUyMTMxMDMwN4ICIgEPAAoCtgKODjAy8REQ2WTNqUudAnjhlCrpE6qlmQfNppeTmVvZrH4zutn-NwTaHAGpjSGv4_WRpZ1wZ3BRZ5mPUBZyLgq0YrIfQ5Fx0s_MRZPzc1r3lKWrMR9sAQx4mN4z11xFEO529L0dFJjPF9MD8Gpd2feWzGyptlelb-PqT---fOa2oY0-NaMM7l_xcNHPOaMz0_2olk0i22hbKeVhvokPCqhFhzsuhKsmq4Of_o-t6dI7sx5h0nPMm4gGSRhfq-z6BTRgCrqQG2FOLoVFgt6iIm_BnNffUr7VDYd3zZmIwFOj_H3DKHoGik_xK3E82YA2ZulVOFRW_zj4ApjPa5OFbpIkd0pmzxzdEcL479hSA9dFiyVmSxPtY5ze1P-BE9bMU1PScpRzw8MHFXxyKqW13Qv7LWw4sbk3SciB7GACbQiVGzgkvXG6y85HOuvWNvC5GLSiyP9GlPB0V68tbxz4JVTRdw_Xn_XTFNzRBM3cq8lBOAVt_PAX5-uFcv1S9wFE8YjaBfWCP1jdBil-c4e-0tdywT2oJmYBBF_kEt1wmGwMmHunNEuQNzh1FtJY54hbUfiWi38mASE7xMtMhfj_C4SvapiDN837gYaPfs8x3KZxbX7C3YAsFnJinlwAUss1fdKar8Q_YVs7H_nU4c4Ixxxz4f67fcVqM2ITKentbCMCAwEAAaOCAk4wggJKMAwFMAMwDg8BxoHKgcIwgb-hgZukgZiCMywwKjAooCagJIYiz8cwgcQwgcEGCgQBgfIkAQE3KzApaK9-v5OFYu9M6ztYC-L69sw1omdyli89lZAfpWMMh9CRmJhM6KBqM_ipwoLtnxyxGsbCPhcQjuTvzm-ylN6VwTMmIlVyVSLKYZcdSjt_eCUN-41K7sD7GVmxZBAFILnBDmTGJmLkrU0KuuIpj8lI_E6Z6NnmuP2-RAQSHsfBQi6sssnXMo4HOW5gtPO7gDrUpVXID--1P4XndkoKn7Svw5n0zS9fv1hxBcYIHPPQUze2u30bAQt0n0iIyRLzaWuhtpAtd7ffwEbASgzB7E-NGF4tpV37e8KiA2xiGSRqT5ndu28fgpOY87gD3ArZDctZvvTCfHdAS5kEO3gnGGeZEVLDmfEsv8TGJa3AljVa5E40IQDsUXpQLi8G-UC41DWZu8EVT4rnYaCw1VX7ShOR1PNCCvjb8S8tfdudd9zhU3gEB0rxdeTy1tVbNLXW99y90xcwr1ZIDUwM_xQ_noO8FRhm0LoPC73Ef-J4ZBdrvWwauF3zJe33d4ibxEcb8_pz5WzFkeixYM2nsHhqHsBKw7JPouKNXRnl5IAE1eFmqDyC7G_VT7OF669xM6hbUt5G21JE4cNK6NNucS-fzg1JPX0-3VhsYZjj7D5uljRvQXrJ8iHgr_M6j2oLHvTAI2MLdq2qjZFDOCXsxBxJpbmLGBx9ow6ZerlUxzws2AWv2pkxggHtMIIB6QKjoIG4MBoDMQ0wHAUxDxcNMCsCDDEcMBowBBRIH9U8U004QYDAKGUZoDb5iFRHZjBPBDFCBEAU8jDirkQDeYUvC6VU5f-BrxbtOChfYkwX42X6awiiMkrIvSTFoUEckeGUYCdrYElZtO3UGFtb-txPH7iBnYqgBAMEBGgwZgIxAJm8rS26De4DSKp7hlgDquS1dlss2-p9RGWfqaFeyQ0XLM5E_1-lGwQpK6nLosHITez7I66a0E-D028-NxnL5tDlE8-ggaR2tfEbAIlpQsAWJPH611zHMxfjsFrD4aEimHcoYCSQQkRTdbIRHcdBUjqEhAKJJCgpP0rK4wFqF0B9JVFMVNrgSNytueHK-BES-o3D0BAfdKZUGJLGwMWggoC5EkDUszSAHFkKkTs_0byz5o2Z2v1aOOMhgezKL5kmm6IC87TQvqRlH0PIxyH2gWRvo_KGxUqzDA88J2kzamtrkrEVZpOx7BqAHE1J1O8q2QZn8k47UHc0HCdM1KY_XAB2-nYBS319B1dADFMYw66WMytsX7rLXDOQmil_ot00B-ZFgUbaeMV_U37Cza9592b4sQB_IPQw4W3RxdaK98eNTbJK62aoZ9vE2Fy71uVcy-rMWGXyYXTC5QFcZMUphu_ycFh4jV_Dhwdcnn7HHRpyD2l9KlGrcZDWmV14lP5sdYet-S6OwwxmXvLKR80mvqZdH-2J7fFIJqA
 X-RFC3161-Fail: id=dfn; reason=invalid-untrusted
 X-RFC3161-Fail: id=belgium; reason=invalid-untrusted
 ```
