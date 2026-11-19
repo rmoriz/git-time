@@ -1733,13 +1733,12 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     let stdout = text(&install.stdout);
     assert_eq!(
         stdout.matches("enabled ").count() + stdout.matches("failed ").count(),
-        22,
+        21,
         "every preset is written: {stdout}"
     );
-    // The only matching root is FreeTSA's; the one TOFU preset takes whatever is
-    // fetched, so two anchors pin. Every other published root is measured
-    // against the throwaway CA and refused.
-    assert_eq!(stdout.matches("enabled ").count(), 2, "{stdout}");
+    // The only matching root is FreeTSA's, so only it pins. Every other
+    // published root is measured against the throwaway CA and refused.
+    assert_eq!(stdout.matches("enabled ").count(), 1, "{stdout}");
     assert!(
         stdout.contains("freetsa: root fingerprint matches"),
         "the match is said out loud: {stdout}"
@@ -1751,31 +1750,12 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     );
 
     // FreeTSA's own fixture root is the one a published fingerprint can match.
-    assert!(stdout.contains("trust on first use"), "{stdout}");
-    for (id, source) in [
-        ("freetsa", freetsa_root()),
-        ("swisssign", repo.authority.ca.clone()),
-    ] {
-        let anchor = repo.anchors().join(format!("{id}.pem"));
-        assert_eq!(
-            read(&anchor),
-            read(&source),
-            "the fetched anchor is stored: {id}"
-        );
-    }
-    for id in ["freetsa", "swisssign"] {
-        let anchor = repo.anchors().join(format!("{id}.pem"));
-        let configured = text(&git(
-            repo.path(),
-            &["config", &format!("time.tsa.{id}.anchor")],
-        ));
-        assert_eq!(configured.trim(), pstr(&anchor), "{id} anchor is absolute");
-        let alg = text(&git(
-            repo.path(),
-            &["config", &format!("time.tsa.{id}.alg")],
-        ));
-        assert_eq!(alg.trim(), "sha256");
-    }
+    let anchor = repo.anchors().join("freetsa.pem");
+    assert_eq!(read(&anchor), read(&freetsa_root()), "the anchor is stored");
+    let configured = text(&git(repo.path(), &["config", "time.tsa.freetsa.anchor"]));
+    assert_eq!(configured.trim(), pstr(&anchor), "the anchor is absolute");
+    let alg = text(&git(repo.path(), &["config", "time.tsa.freetsa.alg"]));
+    assert_eq!(alg.trim(), "sha256");
 }
 
 /// A rotation leaves two legitimate values in the wild. Fetching the retired

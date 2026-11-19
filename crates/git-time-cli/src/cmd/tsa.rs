@@ -723,6 +723,13 @@ const SELECT_ATTEMPTS: usize = 3;
 /// It starts from what is configured, so an authority left out of the answer
 /// was unticked on purpose rather than forgotten by the start state.
 pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exit {
+    // A prompt nobody answers hangs a script; say so before any work.
+    if !std::io::stdin().is_terminal() && !interactive {
+        return Exit::usage(
+            "git time tsa select: stdin is not a terminal; use `git time tsa preset add <id>`, \
+             `git time tsa add <url>`, or `--interactive` with a piped answer",
+        );
+    }
     // The answer is the whole set: every preset section missing from it is
     // removed. An empty start would therefore drop every authority the user did
     // not mean to touch, and neither surface would show what is configured. The
@@ -732,7 +739,7 @@ pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exi
         Err(exit) => return exit,
     };
     let chosen = if std::io::stdin().is_terminal() {
-        let mut selection = picker::Selection::ticked(&seed);
+        let mut selection = initial(&seed);
         if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS) {
             match outcome {
                 picker::Outcome::Save(chosen) => chosen,
@@ -749,18 +756,12 @@ pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exi
                 Err(exit) => return exit,
             }
         }
-    } else if interactive {
+    } else {
         // A piped answer: the line prompt reads it, one line.
         match ask(&seed) {
             Ok(chosen) => chosen,
             Err(exit) => return exit,
         }
-    } else {
-        // A prompt nobody answers hangs a script; say so instead.
-        return Exit::usage(
-            "git time tsa select: stdin is not a terminal; use `git time tsa preset add <id>`, \
-             `git time tsa add <url>`, or `--interactive` with a piped answer",
-        );
     };
     apply(repo, &chosen, dry_run).await
 }
@@ -778,6 +779,14 @@ fn already_enabled(repo: &Repo) -> Result<Vec<usize>, Exit> {
         .collect();
     seed.sort_unstable();
     Ok(seed)
+}
+
+/// The picker's opening state.
+///
+/// A separate call so the seed reaches the cursor UI through one named place the
+/// tests can exercise; the registry tests all pipe and so only ever see [`ask`].
+fn initial(seed: &[usize]) -> picker::Selection {
+    picker::Selection::ticked(seed)
 }
 
 /// Print the preset table and take the selection, re-asking on nonsense.
@@ -1230,7 +1239,7 @@ fn local_set(repo: &Repo, key: &str, value: &str) -> Result<(), Exit> {
 
 #[cfg(test)]
 mod tests {
-    use super::already_enabled;
+    use super::{already_enabled, initial};
     use git_time_core::repo::Repo;
 
     /// Write `time.tsa.<id>.url` in the local config of `dir`.
@@ -1267,5 +1276,14 @@ mod tests {
         configure(dir.path(), "acme");
 
         assert_eq!(already_enabled(&repo).expect("the seed"), [0, 1]);
+    }
+
+    /// The cursor UI opens on the seed. No pty exists in the suite, so the
+    /// call site is pinned here instead: `tsa.rs`'s picker branch is this call.
+    #[test]
+    fn the_picker_opens_on_the_seed() {
+        let selection = initial(&[0, 1]);
+        assert_eq!(selection.chosen(), [0, 1]);
+        assert!(selection.is_chosen(1));
     }
 }

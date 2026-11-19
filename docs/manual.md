@@ -211,7 +211,6 @@ change is visible.
 | `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `aped` | `https://timestamp.aped.gov.gr/qtss` | opt-in | pinned SHA-1 fingerprint |
 | `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | pinned SHA-1 fingerprint, plain http, anchor at the state PKI |
-| `swisssign` | `http://tsa.swisssign.net` | opt-in | TOFU, plain http, answers `400` since 11/2026 |
 | `apple` | `http://timestamp.apple.com/ts01` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `dfn` | `http://zeitstempel.dfn.de` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | opt-in | pinned SHA-1 fingerprint, plain http |
@@ -247,11 +246,10 @@ row exists. A query string belongs to the endpoint and is stored and posted verb
 The pinned values were measured by querying the endpoint and walking the chain (the reply's
 certificates, plus the AIA `caIssuers` pointer where the root was not embedded). `izenpe` is the
 one exception: its value is supplied, and the walk now reaches the same root, so a live run
-compares against it. `swisssign` is the only TOFU row left: every query is answered with a `400`.
-Two earlier values
-were wrong for their endpoint and are replaced by the measured ones — `sectigo` and `certum` now
-carry the fingerprint of the root their endpoint actually chains to. Without that, a pinned preset
-would refuse its own authority forever.
+compares against it. Every built-in row is pinned today, so trust on first use is what a
+hand-added, unpublished authority gets. Two earlier values were wrong for their endpoint and are
+replaced by the measured ones — `sectigo` and `certum` now carry the fingerprint of the root their
+endpoint actually chains to. Without that, a pinned preset would refuse its own authority forever.
 
 ### `git time tsa select [--interactive] [--dry-run]`
 
@@ -263,27 +261,14 @@ The rows of the authorities already configured start ticked, so a change keeps t
 user did not mean to touch; an unconfigured row starts clear. `n` clears every tick, and saving that
 empty selection is how the preset sections are removed.
 
-The list is a cursor UI on the alternate screen. `a` really is all 22.
+The list is a cursor UI on the alternate screen. `a` really is all 21.
 
 ```
- > [x]  1  freetsa            pin A6:37:9E:7C… 
-   [x]  2  digicert           pin 05:63:B8:63… http
-   [ ]  3  sectigo            pin CB:73:94:4C… 
-   [ ]  4  certum             pin 07:E0:32:E0… http
-   [ ]  5  izenpe             pin 8E:5B:8B:AE… http
-   [ ]  6  acs-microsoft      pin F4:00:42:E2… http
-   [ ]  7  globalsign-r6      pin 13:9B:1C:71… http
-   [ ]  8  aped               pin 44:4D:AE:31… 
-   [ ]  9  cartaodecidadao    pin E8:9D:08:31… http
-   [ ] 10  swisssign          tofu             http
-   [ ] 11  apple              pin 61:1E:5B:66… http
-   [ ] 12  dfn                pin 58:81:54:65… http
-   [ ] 13  globalsign-advanc… pin 13:9B:1C:71… http
-   [ ] 14  comodoca           pin 52:42:1A:EA… http
-   [ ] 15  identrust          pin BA:29:41:60… http
-   [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
-   [ ] 17  ssl-com            pin B7:AB:33:08… http
-   [ ] 18  belgium            pin 98:98:9F:EE… http
+ > [x]  1  freetsa            pin 2041-03-07 
+   [x]  2  digicert           pin expires 2026-12-02 http
+   [ ]  3  sectigo            pin 2027-05-18 
+   [ ]  4  certum             pin 2027-06-09 http
+   [ ]  5  izenpe             pin 2030-04-01 http
   …
 url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort

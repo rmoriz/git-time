@@ -657,7 +657,12 @@ mod tests {
     fn the_frame_shows_the_trust_tier_and_the_help() {
         let rendered = frame(&picked(), &presets::PRESETS, 24, 80);
         assert!(rendered.contains("pin "), "{rendered}");
-        assert!(rendered.contains("tofu"), "{rendered}");
+        // No built-in row is TOFU now, so the table shows the published tier;
+        // the `tofu` tier is rendered from a constructed unpublished preset.
+        assert!(!rendered.contains("tofu"), "{rendered}");
+        assert!(rendered.contains("pin -"), "{rendered}");
+        let tofu = frame(&picked(), &[unpublished()], 24, 80);
+        assert!(tofu.contains("tofu"), "{tofu}");
         assert!(rendered.contains(" http"), "{rendered}");
         assert!(rendered.contains("0 selected"), "{rendered}");
         assert!(rendered.contains("enter save"), "{rendered}");
@@ -869,6 +874,23 @@ mod tests {
         }
     }
 
+    /// A preset that publishes no root: what a hand-added, unmeasured authority
+    /// looks like. No built-in row is in that position any more, so the table
+    /// cannot supply one; the TOFU display path still has to be covered.
+    fn unpublished() -> presets::Preset {
+        presets::Preset {
+            name: "unpublished",
+            url: "http://tsa.example/tsr",
+            anchor_url: "http://tsa.example/tsr",
+            chain: &[],
+            alg: "sha256",
+            policy: None,
+            fingerprints: &[],
+            insecure_http: true,
+            curated: false,
+        }
+    }
+
     #[test]
     fn the_trust_column_says_the_pin_and_its_date() {
         let preset = presets::find("digicert").expect("a pinned preset");
@@ -952,21 +974,22 @@ mod tests {
 
     #[test]
     fn an_unpublished_preset_without_a_bundle_stays_tofu() {
-        let preset = presets::find("swisssign").expect("a TOFU preset");
-        assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "tofu");
+        let preset = unpublished();
+        assert!(preset.fingerprints.is_empty(), "the premise: no pin");
+        assert_eq!(super::trust(&preset, None, at(2026, 1, 1)), "tofu");
     }
 
     /// The local bundle is the only copy of an unpublished root, so the date
     /// and its verdict have to be reachable for exactly that preset too.
     #[test]
     fn a_pinned_unpublished_preset_says_its_date() {
-        let preset = presets::find("swisssign").expect("a TOFU preset");
+        let preset = unpublished();
         assert_eq!(
-            super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
+            super::trust(&preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
             "pin 2030-01-01"
         );
         assert_eq!(
-            super::trust(preset, Some(&[root("2020-01-01")]), at(2026, 1, 1)),
+            super::trust(&preset, Some(&[root("2020-01-01")]), at(2026, 1, 1)),
             "EXPIRED"
         );
     }

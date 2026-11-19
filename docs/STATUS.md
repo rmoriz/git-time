@@ -201,8 +201,6 @@ explicit parameters, still fails in `webpki` (see the known gaps).
   taint a child.
 - A selection fetches anchors over the network; behind a firewall it warns and leaves the
   repo unsealed rather than broken (`doctor` names the missing anchor).
-- `swisssign` answers every query with a `303` to a `400` page (11/2026), so it pins nothing and
-  seals nothing; it stays in the table as a TOFU row and reports the two failed attempts.
 - `seal --range` cannot rewrite descendants of a range member; those dangle until re-sealed.
 - Failure reasons are sanitised into one trailer line, so an absolute path appears truncated.
 - `webpki` has no SHA-1 and no explicit-parameter support for *certificate* signatures: a TSA whose

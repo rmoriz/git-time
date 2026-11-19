@@ -10,11 +10,12 @@
 //! fingerprint a published root of that authority carries.
 //!
 //! The order is deliberate: the curated default first, then the rest of the
-//! measured roots, then the one that is trust on first use. FreeTSA and DFN
-//! publish a plain PEM; for every other preset the anchor URL *is* the endpoint,
-//! because no certificate download is served there. The fetch asks the endpoint
-//! for a token and takes the self-signed root of the chain it replies with (and
-//! walks the top certificate's AIA `caIssuers` where the root is not embedded).
+//! measured roots. No built-in preset is left to trust on first use. FreeTSA
+//! and DFN publish a plain PEM; for every other preset the anchor URL *is* the
+//! endpoint, because no certificate download is served there. The fetch asks the
+//! endpoint for a token and takes the self-signed root of the chain it replies
+//! with (and walks the top certificate's AIA `caIssuers` where the root is not
+//! embedded).
 //! No certificate URL is invented: where one is listed it was fetched and its
 //! fingerprint checked against the measured pin — that is the Portuguese state
 //! PKI's publication of `ECRaizEstado 002` for `cartaodecidadao`, whose own reply
@@ -123,10 +124,12 @@ pub struct Preset {
     /// let freetsa = presets::find("freetsa").expect("a pinned preset");
     /// assert!(!freetsa.fingerprints.is_empty());
     ///
-    /// // An endpoint that could not be measured is trust on first use.
-    /// let swisssign = presets::find("swisssign").expect("a tofu preset");
-    /// assert!(swisssign.fingerprints.is_empty());
+    /// // FreeTSA publishes both spellings of one root, so a match may be either.
+    /// assert!(freetsa.fingerprints.len() > 1);
     /// ```
+    ///
+    /// An empty list is trust on first use. No built-in preset is in that
+    /// position today: each one's root was measured.
     pub fingerprints: &'static [&'static str],
     /// Whether the endpoint is plain `http://` and is accepted as such.
     pub insecure_http: bool,
@@ -139,9 +142,9 @@ pub struct Preset {
     pub curated: bool,
 }
 
-/// The built-in presets, in the order they are written: the two originals, the
-/// three with a published root, then the seven that are trust on first use.
-pub const PRESETS: [Preset; 22] = [
+/// The built-in presets, in the order they are written: the two originals, then
+/// the rest in the order they were measured.
+pub const PRESETS: [Preset; 21] = [
     Preset {
         name: "freetsa",
         url: "https://freetsa.org/tsr",
@@ -206,9 +209,6 @@ pub const PRESETS: [Preset; 22] = [
         insecure_http: true,
         curated: false,
     },
-    // One endpoint keeps no fingerprint: `swisssign` answered every query with a
-    // 400, so no chain could be measured here. Its fetched fingerprint is
-    // printed and has to be compared by a reader.
     Preset {
         name: "acs-microsoft",
         url: "http://timestamp.acs.microsoft.com",
@@ -253,17 +253,6 @@ pub const PRESETS: [Preset; 22] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["E8:9D:08:31:6C:29:D1:15:74:9A:27:ED:58:13:32:CB:0A:B4:D7:9F"],
-        insecure_http: true,
-        curated: false,
-    },
-    Preset {
-        name: "swisssign",
-        url: "http://tsa.swisssign.net",
-        anchor_url: "http://tsa.swisssign.net",
-        chain: &[],
-        alg: "sha256",
-        policy: None,
-        fingerprints: &[],
         insecure_http: true,
         curated: false,
     },
@@ -561,8 +550,8 @@ mod tests {
         );
     }
 
-    /// Exactly one endpoint keeps no fingerprint: the one that could not be
-    /// measured because it answers no query.
+    /// No built-in endpoint is trust on first use any more: every row was
+    /// measured. The empty-list branch stays for a future one that cannot be.
     #[test]
     fn only_the_unmeasurable_endpoints_are_tofu() {
         let tofu: Vec<&str> = PRESETS
@@ -570,14 +559,14 @@ mod tests {
             .filter(|preset| preset.fingerprints.is_empty())
             .map(|preset| preset.name)
             .collect();
-        assert_eq!(tofu, ["swisssign"]);
+        assert_eq!(tofu, Vec::<&str>::new(), "every row carries a fingerprint");
 
         let pinned: Vec<&str> = PRESETS
             .iter()
             .filter(|preset| !preset.fingerprints.is_empty())
             .map(|preset| preset.name)
             .collect();
-        assert_eq!(pinned.len(), PRESETS.len() - tofu.len());
+        assert_eq!(pinned.len(), PRESETS.len(), "nothing is left to TOFU");
     }
 
     /// The default scope stays small and pinned: a preset that fires a request
@@ -623,7 +612,6 @@ mod tests {
                 "acs-microsoft",
                 "globalsign-r6",
                 "cartaodecidadao",
-                "swisssign",
                 "apple",
                 "dfn",
                 "globalsign-advanced",

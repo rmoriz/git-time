@@ -1670,14 +1670,25 @@ fn preset_list_names_every_preset_and_marks_the_trust_level() {
             "{name}: {listing}"
         );
     }
-    // The published roots are shown, the TOFU presets say so, and a plain-http
+    // The published roots are shown, no row is TOFU any more, and a plain-http
     // endpoint is visible as such.
     assert!(listing.contains("https://freetsa.org/tsr"), "{listing}");
     assert!(
         listing.contains("A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC"),
         "{listing}"
     );
-    assert!(listing.contains("tofu"), "{listing}");
+    assert!(!listing.contains("tofu"), "{listing}");
+    // Every row carries a fingerprint of its own instead.
+    for preset in &git_time_core::presets::PRESETS {
+        let published = preset.fingerprints.last().expect("a published root");
+        assert!(
+            listing
+                .lines()
+                .any(|line| line.starts_with(preset.name) && line.contains(published)),
+            "{}: {listing}",
+            preset.name
+        );
+    }
     assert!(listing.contains("http://time.certum.pl"), "{listing}");
     // The scope is a column: only the curated pair is a default.
     for name in ["freetsa", "digicert"] {
@@ -1696,10 +1707,11 @@ fn preset_list_names_every_preset_and_marks_the_trust_level() {
     );
 }
 
-/// A preset that publishes no root has no certificate to read a date from, so
-/// it says `not pinned` rather than guessing — and needs no network for it.
+/// A published root has a fingerprint but no local certificate, so it has no
+/// date to read and says `-`/`(missing)` rather than fetching one — and no
+/// longer says `tofu`.
 #[test]
-fn preset_list_says_not_pinned_without_an_anchor() {
+fn preset_list_says_no_date_for_a_published_root_without_a_local_pin() {
     let repo = Repo::new();
     repo.init();
 
@@ -1713,38 +1725,49 @@ fn preset_list_says_not_pinned_without_an_anchor() {
             .map(str::to_owned)
             .collect()
     };
-    let swisssign = fields("swisssign ");
-    assert_eq!(swisssign[4], "tofu", "still the TOFU spelling: {listing}");
-    assert_eq!(swisssign[5], "not", "{listing}");
-    assert_eq!(swisssign[6], "pinned", "{listing}");
-    // A published root has no local certificate to read a date from, so it
-    // says `-` rather than fetching one over the network.
+    let sectigo = fields("sectigo ");
+    assert_eq!(
+        sectigo[4],
+        *git_time_core::presets::find("sectigo")
+            .expect("the preset")
+            .fingerprints
+            .last()
+            .expect("a published value"),
+        "the fingerprint is still printed: {listing}"
+    );
+    assert_eq!(
+        sectigo[5], "-",
+        "a published root without a local pin has no date: {listing}"
+    );
+    assert_eq!(sectigo[6], "(missing)", "{listing}");
+    // The same is true of the curated row, and neither says `tofu`.
     let freetsa = fields("freetsa ");
     assert_eq!(
         freetsa[5], "-",
         "a published root without a local pin has no date: {listing}"
     );
     assert_eq!(freetsa[6], "(missing)", "{listing}");
+    assert!(!listing.contains("tofu"), "no row is TOFU: {listing}");
 }
 
-/// The opt-in preset publishes no root, so its local bundle is the only copy
-/// of the certificate: the date has to be read from there, not declared absent.
+/// A local bundle is the copy the date is read from, even when its root is
+/// published: the date has to come from there, not be declared absent.
 #[test]
-fn preset_list_reads_the_date_from_a_pinned_unpublished_bundle() {
+fn preset_list_reads_the_date_from_a_pinned_bundle() {
     let repo = Repo::new();
     repo.init();
     let stale = stale_ca(repo.path());
     std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
-    std::fs::copy(&stale, repo.anchors().join("swisssign.pem")).expect("pin the stale CA");
+    std::fs::copy(&stale, repo.anchors().join("sectigo.pem")).expect("pin the stale CA");
 
     let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
-    let swisssign = listing
+    let sectigo = listing
         .lines()
-        .find(|line| line.starts_with("swisssign "))
+        .find(|line| line.starts_with("sectigo "))
         .unwrap_or_else(|| panic!("the preset line: {listing}"));
-    assert!(swisssign.contains("2020-02-01 expired"), "{listing}");
-    assert!(!swisssign.contains("not pinned"), "{listing}");
-    assert!(swisssign.contains("(anchored)"), "{listing}");
+    assert!(sectigo.contains("2020-02-01 expired"), "{listing}");
+    assert!(!sectigo.contains("not pinned"), "{listing}");
+    assert!(sectigo.contains("(anchored)"), "{listing}");
 }
 
 /// A bundle is append-ordered, not date-ordered: a retired root left in front
@@ -1757,15 +1780,15 @@ fn preset_list_shows_the_newest_live_root_of_a_mixed_bundle() {
     let mut bundle = std::fs::read(freetsa_root()).expect("the fixture root");
     bundle.extend(std::fs::read(&stale).expect("the stale CA"));
     std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
-    std::fs::write(repo.anchors().join("swisssign.pem"), bundle).expect("pin the bundle");
+    std::fs::write(repo.anchors().join("sectigo.pem"), bundle).expect("pin the bundle");
 
     let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
-    let swisssign = listing
+    let sectigo = listing
         .lines()
-        .find(|line| line.starts_with("swisssign "))
+        .find(|line| line.starts_with("sectigo "))
         .unwrap_or_else(|| panic!("the preset line: {listing}"));
-    assert!(swisssign.contains("2041-03-07"), "{listing}");
-    assert!(!swisssign.contains("2020-02-01"), "{listing}");
+    assert!(sectigo.contains("2041-03-07"), "{listing}");
+    assert!(!sectigo.contains("2020-02-01"), "{listing}");
 }
 
 #[test]
@@ -1823,43 +1846,6 @@ fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
             .expect("the newest value"),
         "both spellings describe the same root"
     );
-}
-
-/// A preset without a published root is trust on first use: the fetched
-/// fingerprint is printed in full, and the add still succeeds.
-#[test]
-fn preset_add_of_a_tofu_preset_prints_the_fetched_fingerprint() {
-    let repo = Repo::new();
-    repo.init();
-
-    let fetch = [(
-        "GIT_TIME_ANCHOR_FETCH_CMD",
-        format!("cat {}", pstr(&freetsa_root())),
-    )];
-    let added = repo.run_time_env(&["tsa", "preset", "add", "swisssign"], &fetch);
-    assert!(added.status.success(), "{}", text(&added.stderr));
-    assert!(repo.anchors().join("swisssign.pem").exists(), "the anchor");
-
-    let stdout = text(&added.stdout);
-    assert!(stdout.contains("trust on first use"), "{stdout}");
-    let printed = fingerprint_after(&stdout, "root is ");
-    // Nothing can be compared, so the printed value is the artefact; it is in
-    // the SHA-1 spelling the authority publishes.
-    assert_eq!(printed.len(), 59, "a full SHA-1: {printed}");
-    assert!(
-        printed
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() || byte == b':'),
-        "hex: {printed}"
-    );
-    let root = std::fs::read(freetsa_root()).expect("the fixture root");
-    assert_eq!(
-        printed,
-        git_time_core::trust::sha1_fingerprint(&first_der(&String::from_utf8_lossy(&root))),
-        "the printed value is the value that was pinned"
-    );
-    // The TOFU preset publishes no expected value, so nothing is compared.
-    assert!(!stdout.contains("root fingerprint matches"), "{stdout}");
 }
 
 /// The three presets with a published root refuse a different one, leave no
@@ -1972,8 +1958,10 @@ fn tsa_add_writes_the_insecure_transport_when_accepted() {
 /// The prompt `tsa select` prints, so the count of re-asks can be counted.
 const SELECT_PROMPT: &str = "Authorities to enable (e.g. 1,3-4, all, none): ";
 
-/// Enable exactly the two selected, with their keys and a printed fingerprint
-/// each.
+/// Enable exactly the two selected, with their keys. Only FreeTSA's root is
+/// served, so it pins and prints its fingerprint; the second id is a published
+/// preset whose root the stub CA is not, so it is reported failed while its
+/// keys stay written.
 #[test]
 fn select_enables_exactly_the_chosen_authorities() {
     let repo = Repo::new();
@@ -1984,12 +1972,12 @@ fn select_enables_exactly_the_chosen_authorities() {
         &repo.fetch_known_root(),
         "1,10\n",
     );
-    assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
+    assert_eq!(chosen.status.code(), Some(1), "{}", text(&chosen.stderr));
 
     let stdout = text(&chosen.stdout);
     for (id, url) in [
         ("freetsa", "https://freetsa.org/tsr"),
-        ("swisssign", "http://tsa.swisssign.net"),
+        ("apple", "http://timestamp.apple.com/ts01"),
     ] {
         assert_eq!(
             repo.config(&format!("time.tsa.{id}.url")).as_deref(),
@@ -2000,35 +1988,35 @@ fn select_enables_exactly_the_chosen_authorities() {
             Some("sha256")
         );
         assert!(repo.config(&format!("time.tsa.{id}.anchor")).is_some());
-        assert!(repo.anchors().join(format!("{id}.pem")).exists(), "{id}");
-        let line = stdout
-            .lines()
-            .find(|line| line.starts_with(&format!("enabled {id} ")))
-            .unwrap_or_else(|| panic!("{id} enabled: {stdout}"));
-        let printed = fingerprint_after(line, "fingerprint ");
-        // freetsa is served the pinned root, every other id the stub CA.
-        let bundle = if id == "freetsa" {
-            std::fs::read(freetsa_root()).expect("the fixture root")
-        } else {
-            std::fs::read_to_string(&repo.authority.ca)
-                .expect("the CA")
-                .into_bytes()
-        };
-        let der = first_der(&String::from_utf8_lossy(&bundle));
-        // The digest length follows the expectation: freetsa is SHA-256, the
-        // TOFU row is SHA-1.
-        if id == "freetsa" {
-            assert_eq!(printed.len(), 95, "{line}");
-            assert_eq!(printed, fingerprint_colon(&der), "the served root: {line}");
-        } else {
-            assert_eq!(printed.len(), 59, "{line}");
-            assert_eq!(
-                printed,
-                git_time_core::trust::sha1_fingerprint(&der),
-                "the served root: {line}"
-            );
-        }
     }
+
+    // freetsa is served the root it publishes, so it is pinned and the line
+    // names the matched value in the length that expectation is written in.
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("enabled freetsa "))
+        .unwrap_or_else(|| panic!("freetsa enabled: {stdout}"));
+    let printed = fingerprint_after(line, "fingerprint ");
+    let root = std::fs::read(freetsa_root()).expect("the fixture root");
+    assert_eq!(printed.len(), 95, "{line}");
+    assert_eq!(
+        printed,
+        fingerprint_colon(&first_der(&String::from_utf8_lossy(&root))),
+        "the served root: {line}"
+    );
+    assert!(repo.anchors().join("freetsa.pem").exists());
+
+    // apple does not match, so nothing is pinned at a path that would be a
+    // trust decision — but the entry stays configured so doctor can name it.
+    // The mismatch warning leads, then the row is reported failed.
+    let stderr = text(&chosen.stderr);
+    assert!(stderr.contains("apple"), "{stderr}");
+    assert!(stderr.contains("does not match"), "{stderr}");
+    assert!(
+        stdout.contains("failed apple: "),
+        "the row is refused: {stdout}"
+    );
+    assert!(!repo.anchors().join("apple.pem").exists());
 
     // Anything not chosen stays unconfigured.
     for id in ["digicert", "sectigo", "certum", "izenpe", "aped"] {
@@ -2104,16 +2092,22 @@ fn select_typed_indices_enable_exactly_those() {
     let repo = Repo::new();
     repo.init();
 
-    // `1` and `10` are freetsa and swisssign; the first is pinned against the
-    // fixture, the second is TOFU and takes the throwaway CA.
+    // `1` and `10` are freetsa and apple; the first is pinned against the
+    // fixture, the second is a published preset the stub CA does not match, so
+    // both sections are written and the run exits 1.
     let chosen = repo.run_time_with_stdin(
         &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
         "1,10\n",
     );
-    assert_eq!(chosen.status.code(), Some(0), "{}", text(&chosen.stderr));
+    assert_eq!(chosen.status.code(), Some(1), "{}", text(&chosen.stderr));
     assert!(repo.config("time.tsa.freetsa.url").is_some());
-    assert!(repo.config("time.tsa.swisssign.url").is_some());
+    assert!(repo.config("time.tsa.apple.url").is_some());
+    assert!(
+        text(&chosen.stderr).contains("apple"),
+        "the second id is the one refused: {}",
+        text(&chosen.stderr)
+    );
     let listing = text(&git(
         repo.path(),
         &["config", "--get-regexp", "^time\\.tsa\\.[a-z-]*\\.url$"],

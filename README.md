@@ -42,24 +42,11 @@ against the table and a mismatch is a refusal.
 endpoint; the full URL of the cursor row is printed below the list, so no column has to carry it.
 
 ```console
- > [x]  1  freetsa            pin A6:37:9E:7C… 
-   [x]  2  digicert           pin 05:63:B8:63… http
-   [ ]  3  sectigo            pin CB:73:94:4C… 
-   [ ]  4  certum             pin 07:E0:32:E0… http
-   [ ]  5  izenpe             pin 8E:5B:8B:AE… http
-   [ ]  6  acs-microsoft      pin F4:00:42:E2… http
-   [ ]  7  globalsign-r6      pin 13:9B:1C:71… http
-   [ ]  8  aped               pin 44:4D:AE:31… 
-   [ ]  9  cartaodecidadao    pin E8:9D:08:31… http
-   [ ] 10  swisssign          tofu             http
-   [ ] 11  apple              pin 61:1E:5B:66… http
-   [ ] 12  dfn                pin 58:81:54:65… http
-   [ ] 13  globalsign-advanc… pin 13:9B:1C:71… http
-   [ ] 14  comodoca           pin 52:42:1A:EA… http
-   [ ] 15  identrust          pin BA:29:41:60… http
-   [ ] 16  quovadis-eu        pin 1B:8E:EA:57… http
-   [ ] 17  ssl-com            pin B7:AB:33:08… http
-   [ ] 18  belgium            pin 98:98:9F:EE… http
+ > [x]  1  freetsa            pin 2041-03-07 
+   [x]  2  digicert           pin expires 2026-12-02 http
+   [ ]  3  sectigo            pin 2027-05-18 
+   [ ]  4  certum             pin 2027-06-09 http
+   [ ]  5  izenpe             pin 2030-04-01 http
   …
 url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
@@ -158,7 +145,8 @@ authority failed and why. A dead TSA costs evidence, never a commit.
 
 `git time tsa select` is how any of these get configured; `git time tsa preset add <name>` writes
 one by name. The table lives in `git_time_core::presets`. The `default` rows are the curated pair
-the docs recommend, nothing more — the selector preselects none of them.
+the docs recommend, nothing more; belonging to them alone ticks nothing — only an already configured
+section starts ticked.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|
@@ -171,7 +159,6 @@ the docs recommend, nothing more — the selector preselects none of them.
 | `globalsign-r6` | `http://timestamp.globalsign.com/tsa/r6advanced1` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `aped` | `https://timestamp.aped.gov.gr/qtss` | opt-in | pinned SHA-1 fingerprint |
 | `cartaodecidadao` | `http://ts.cartaodecidadao.pt/tsa/server` | opt-in | pinned SHA-1 fingerprint, plain http, anchor at the state PKI |
-| `swisssign` | `http://tsa.swisssign.net` | opt-in | trust on first use, plain http, answers `400` since 11/2026 |
 | `apple` | `http://timestamp.apple.com/ts01` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `dfn` | `http://zeitstempel.dfn.de` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `globalsign-advanced` | `http://rfc3161timestamp.globalsign.com/advanced` | opt-in | pinned SHA-1 fingerprint, plain http |
@@ -187,10 +174,10 @@ the docs recommend, nothing more — the selector preselects none of them.
 
 Root fingerprints were measured by querying each endpoint and walking its chain — the reply's
 certificates plus the top certificate's AIA `caIssuers` where the root is not embedded. izenpe's
-value was supplied and is confirmed by that walk. `swisssign` is the only trust-on-first-use row
-left: every query to it is answered with a `400`. Two earlier values were wrong for their endpoint
-and were replaced by measured ones: `sectigo` belongs to a different Sectigo root than the one the
-endpoint chains to, and `certum` too (`07:E0:32:E0:…`, Certum Trusted Network CA).
+value was supplied and is confirmed by that walk. Every built-in row is pinned today; trust on
+first use is what a hand-added, unpublished authority gets. Two earlier values were wrong for
+their endpoint and were replaced by measured ones: `sectigo` belongs to a different Sectigo root
+than the one the endpoint chains to, and `certum` too (`07:E0:32:E0:…`, Certum Trusted Network CA).
 
 A pinned fingerprint makes the *first* fetch verifiable: a bundle whose root hashes to anything
 else is refused and an existing pin is left alone. Where no fingerprint is published the fetch is
