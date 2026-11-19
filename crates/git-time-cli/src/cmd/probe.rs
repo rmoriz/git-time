@@ -101,8 +101,10 @@ pub enum Served {
 /// a date from. Doing this is what lets a prose answer or a leaf-first reply be
 /// reported instead of printed.
 ///
-/// A matched date that does not parse as `YYYY-MM-DD` is [`Served::Failed`]:
-/// nothing sensible can be shown for it.
+/// A matched certificate whose date is not `YYYY-MM-DD` is no candidate, and a
+/// re-encode failure is no candidate either; when nothing survives and one of
+/// those happened, the reply parsed but cannot be judged, so it is
+/// [`Served::Failed`]. A match anywhere still wins over both.
 #[must_use]
 pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Served {
     let certificates = super::anchors::parse_certificates(bundle);
@@ -111,21 +113,38 @@ pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Serv
     }
 
     let mut matched: Vec<Cached> = Vec::new();
+    let mut unjudgeable = false;
     for certificate in certificates {
         let Ok(der) = certificate.to_der() else {
+            unjudgeable = true;
             continue;
         };
         if super::install::fingerprint_matches(preset.fingerprints, &der).is_none() {
             continue;
         }
+        let not_after = super::anchors::not_after(&certificate);
+        // A date that is not a day cannot win a greatest-date selection, so it
+        // is dropped now rather than after one has already been picked.
+        if not_after.parse::<jiff::civil::Date>().is_err() {
+            unjudgeable = true;
+            continue;
+        }
         matched.push(Cached {
-            not_after: super::anchors::not_after(&certificate),
+            not_after,
             fingerprint: super::anchors::fingerprint(&der),
         });
     }
+    if matched.is_empty() {
+        return if unjudgeable {
+            Served::Failed
+        } else {
+            Served::Unpublished
+        };
+    }
 
-    // The greatest date that is still live, else the greatest date at all; the
-    // dates sort as strings because they are `YYYY-MM-DD`.
+    // The greatest date that is still live, else the greatest date at all: an
+    // all-expired reply still names a date, and `expired` marks it later. The
+    // dates sort as strings because every one of them is `YYYY-MM-DD`.
     let chosen = matched
         .iter()
         .filter(|served| !super::anchors::expired(&served.not_after, now))
@@ -138,9 +157,6 @@ pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Serv
     let Some(chosen) = chosen else {
         return Served::Unpublished;
     };
-    if chosen.not_after.parse::<jiff::civil::Date>().is_err() {
-        return Served::Failed;
-    }
     Served::Known(chosen.clone())
 }
 
@@ -367,8 +383,19 @@ pub(crate) mod tests {
         let bundle = std::fs::read(FREETSA_ROOT).expect("fixture");
         match super::probed_from(preset, &bundle, at(1_000)) {
             super::Served::Known(cached) => {
-                assert!(cached.not_after.starts_with("20"), "{}", cached.not_after);
-                assert!(!cached.fingerprint.is_empty());
+                assert_eq!(cached.not_after, "2041-03-07");
+                // The cache and every later comparison spell a fingerprint as
+                // lowercase hex; a nearby helper hands out the uppercase colon
+                // form instead, so the spelling is pinned here.
+                assert_eq!(cached.fingerprint.len(), 64);
+                assert!(
+                    cached
+                        .fingerprint
+                        .chars()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+                    "{}",
+                    cached.fingerprint
+                );
             }
             other => panic!("{other:?}"),
         }
@@ -394,11 +421,10 @@ pub(crate) mod tests {
         ));
     }
 
-    #[test]
-    fn the_newest_live_matching_root_wins() {
-        // Two matching roots, one expired in 2020: the live one's date is the one
-        // shown. Both are PEM, so the concatenation also exercises the parser's
-        // PEM scanner across two blocks.
+    /// The stale 2020 root followed by the live FreeTSA root, both PEM, with the
+    /// preset values that publish each — so a caller publishes either or both.
+    /// The concatenation also exercises the parser's PEM scanner across blocks.
+    fn stale_and_live() -> (Vec<u8>, &'static str, &'static str) {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let stale = std::fs::read(stale_ca(dir.path())).expect("fixture");
         let live = std::fs::read(FREETSA_ROOT).expect("fixture");
@@ -409,24 +435,57 @@ pub(crate) mod tests {
             2,
             "both roots are readable from the bundle"
         );
-        let (stale_fp, live_fp) = (colon(&stale), colon(&freetsa_der()));
-        let stale_fp: &'static str = Box::leak(stale_fp.into_boxed_str());
-        let live_fp: &'static str = Box::leak(live_fp.into_boxed_str());
-        let published: &'static [&'static str] =
-            Box::leak(vec![stale_fp, live_fp].into_boxed_slice());
-        let preset = Preset {
+        let stale_fp: &'static str = Box::leak(colon(&stale).into_boxed_str());
+        let live_fp: &'static str = Box::leak(colon(&freetsa_der()).into_boxed_str());
+        (bundle, stale_fp, live_fp)
+    }
+
+    fn preset_publishing(fingerprints: &'static [&'static str]) -> Preset {
+        Preset {
             name: "both",
             url: "",
             anchor_url: "",
             chain: &[],
             alg: "sha256",
             policy: None,
-            fingerprints: published,
+            fingerprints,
             insecure_http: false,
             curated: false,
-        };
-        match super::probed_from(&preset, &bundle, at(1_000)) {
-            super::Served::Known(cached) => assert_ne!(cached.not_after, "2020-02-01"),
+        }
+    }
+
+    #[test]
+    fn the_newest_live_matching_root_wins() {
+        // By 2030 the 2020 root is dead and the live one's date is the one shown.
+        let (bundle, stale_fp, live_fp) = stale_and_live();
+        let published: &'static [&'static str] =
+            Box::leak(vec![stale_fp, live_fp].into_boxed_slice());
+        match super::probed_from(&preset_publishing(published), &bundle, at(1_900_000_000)) {
+            super::Served::Known(cached) => assert_eq!(cached.not_after, "2041-03-07"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn among_live_roots_the_newest_date_is_shown() {
+        // Neither root is expired in 1970; the greatest date still has to win.
+        let (bundle, stale_fp, live_fp) = stale_and_live();
+        let published: &'static [&'static str] =
+            Box::leak(vec![stale_fp, live_fp].into_boxed_slice());
+        match super::probed_from(&preset_publishing(published), &bundle, at(1_000)) {
+            super::Served::Known(cached) => assert_eq!(cached.not_after, "2041-03-07"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_all_expired_reply_still_names_the_greatest_date() {
+        // Only the dead root is published, so the fallback answers; the date is
+        // reported and `expired` marks it where it is shown.
+        let (bundle, stale_fp, _live_fp) = stale_and_live();
+        let published: &'static [&'static str] = Box::leak(vec![stale_fp].into_boxed_slice());
+        match super::probed_from(&preset_publishing(published), &bundle, at(1_600_000_000)) {
+            super::Served::Known(cached) => assert_eq!(cached.not_after, "2020-02-01"),
             other => panic!("{other:?}"),
         }
     }
