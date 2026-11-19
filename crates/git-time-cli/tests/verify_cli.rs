@@ -1691,6 +1691,212 @@ fn the_openssl_script_passes_a_sealed_commit() {
     assert!(all.iter().any(|line| line == "OK"), "{all:?}");
 }
 
+/// The body of the `name` heredoc in `script`.
+fn heredoc_body(script: &str, name: &str) -> String {
+    let lines: Vec<&str> = script.lines().collect();
+    let open = format!("<<'{name}'");
+    let start = lines
+        .iter()
+        .position(|line| line.ends_with(&open))
+        .unwrap_or_else(|| panic!("a `{name}` heredoc: {script}"))
+        + 1;
+    let end = start
+        + lines[start..]
+            .iter()
+            .position(|line| *line == name)
+            .unwrap_or_else(|| panic!("the `{name}` heredoc ends: {script}"));
+    let mut body = lines[start..end].join("\n");
+    if end > start {
+        body.push('\n');
+    }
+    body
+}
+
+/// The base64 bodies of the certificates in `pem`, armor and wrapping stripped.
+fn pem_bodies(pem: &str) -> Vec<String> {
+    pem.split("-----END CERTIFICATE-----")
+        .filter_map(|block| {
+            let body: String = block
+                .lines()
+                .filter(|line| !line.starts_with("-----"))
+                .collect();
+            (!body.is_empty()).then_some(body)
+        })
+        .collect()
+}
+
+/// The base64 body of the one certificate in `path`, armor stripped.
+fn pem_body(path: &Path) -> String {
+    let pem = text(&std::fs::read(path).expect("read the certificate"));
+    pem_bodies(&pem).remove(0)
+}
+
+/// The `anchor.b64` heredoc of `script`, decoded to PEM.
+fn decoded_anchor(script: &str) -> String {
+    let encoded = heredoc_body(script, "anchor");
+    let dir = TempDir::new().expect("decode dir");
+    let source = dir.path().join("anchor.b64");
+    let plain = dir.path().join("anchor.pem");
+    std::fs::write(&source, encoded).expect("write the encoded anchor");
+    let output = Command::new("openssl")
+        .args(["base64", "-d", "-in"])
+        .arg(&source)
+        .arg("-out")
+        .arg(&plain)
+        .output()
+        .expect("openssl is available");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    text(&std::fs::read(&plain).expect("read the decoded anchor"))
+}
+
+/// The SHA-256 fingerprint `openssl x509` prints for the certificate at `path`.
+fn certificate_fingerprint(path: &Path) -> String {
+    let output = Command::new("openssl")
+        .args(["x509", "-noout", "-fingerprint", "-sha256", "-in"])
+        .arg(path)
+        .output()
+        .expect("openssl is available");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    text(&output.stdout)
+        .split_once('=')
+        .expect("a fingerprint line")
+        .1
+        .trim()
+        .to_owned()
+}
+
+/// Rewrite `rev` so its anchor line names exactly `fingerprints`, and return the
+/// new id. The pre-image is untouched, so only the imprint is recomputed.
+fn name_only(repo: &Repo, rev: &str, fingerprints: &[String]) -> String {
+    let listed = fingerprints.join(",");
+    repo.rewrite(rev, |object| {
+        let seam = Repo::trailer_seam(object);
+        let pre_image = &object[..seam];
+        let mut lines: Vec<String> = object.lines().map(str::to_owned).collect();
+        for line in &mut lines {
+            if let Some(rest) = line.strip_prefix("X-RFC3161-Anchor: id=") {
+                let (id, _) = rest
+                    .split_once("; sha256=")
+                    .expect("the anchor value carries a fingerprint");
+                *line = format!("X-RFC3161-Anchor: id={id}; sha256={listed}");
+            }
+        }
+        let imprint = hex(&Sha256::digest(pre_image.as_bytes()));
+        for line in &mut lines {
+            if line.starts_with("X-RFC3161-Imprint: ") {
+                *line = format!("X-RFC3161-Imprint: sha256:{imprint}");
+            }
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    })
+}
+
+/// A bundle with more than the root the token named still embeds only that
+/// root, and the embedded anchor alone judges the token after the bundle on the
+/// generating machine is gone.
+#[test]
+fn the_script_embeds_only_the_root_the_token_names() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    // A second, unrelated authority under the same id: after a rotation a
+    // bundle holds both roots, and only the one the token was judged against
+    // belongs in the script.
+    let other = Authority::new();
+    let both = repo.path().join("both.pem");
+    let mut bundle = std::fs::read(repo.authority.bundle()).expect("read the sealing CA");
+    bundle.extend(std::fs::read(other.bundle()).expect("read the other CA"));
+    std::fs::write(&both, &bundle).expect("write the bundle");
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.anchor", &pstr(&both)],
+    );
+    let sealing = certificate_fingerprint(&repo.authority.bundle());
+    let stranger = certificate_fingerprint(&other.bundle());
+    // Both roots are valid now, so the seal names both; an older block names
+    // only the one that took the token.
+    let oid = name_only(
+        &repo,
+        &repo.commit("two roots pinned"),
+        std::slice::from_ref(&sealing),
+    );
+    assert!(
+        repo.object(&oid)
+            .contains(&format!("X-RFC3161-Anchor: id=stub; sha256={sealing}")),
+        "the block names its root"
+    );
+
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+    let embedded = pem_bodies(&decoded_anchor(&script));
+    assert_eq!(embedded.len(), 1, "one root is embedded: {embedded:?}");
+    assert_eq!(
+        embedded[0],
+        pem_body(&repo.authority.bundle()),
+        "the named root is embedded"
+    );
+    assert_ne!(embedded[0], pem_body(&other.bundle()), "not the other one");
+    assert_ne!(sealing, stranger, "the two roots differ");
+
+    // The path the generating machine had is the only other source, and it is
+    // removed here: what is left is the embedded anchor.
+    std::fs::remove_file(&both).expect("remove the bundle");
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(0), "{all:?}");
+    assert!(all.iter().any(|line| line.starts_with("PASS ")), "{all:?}");
+}
+
+/// The validity check runs at the token's own genTime, not at wall clock, and
+/// an openssl whose `ts -verify` lacks `-attime` says which check it could not
+/// make instead of judging at now without a word.
+#[test]
+fn the_script_passes_attime_and_notes_when_unsupported() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.head();
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+
+    let baked = script
+        .lines()
+        .find(|line| line.starts_with("attime_value='"))
+        .unwrap_or_else(|| panic!("the genTime is baked in: {script}"));
+    let seconds: i64 = baked
+        .trim_start_matches("attime_value='")
+        .trim_end_matches('\'')
+        .parse()
+        .expect("whole seconds");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch")
+        .as_secs() as i64;
+    assert!(
+        (now - seconds).abs() < 600,
+        "the token's own genTime, not the committer date: {seconds} against {now}"
+    );
+    assert!(script.contains("openssl ts -verify -attime"), "{script}");
+    assert!(script.contains("attime=-attime"), "{script}");
+    assert!(
+        script.contains("this openssl has no -attime, validity is judged at run time"),
+        "the omission is named: {script}"
+    );
+    assert!(
+        script.contains("\"$attime\" \"$attime_value\""),
+        "the flag and its value are passed: {script}"
+    );
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(0), "{all:?}");
+    assert!(all.iter().any(|line| line == "OK"), "{all:?}");
+}
+
 /// A signed commit is rebuilt without its `gpgsig` header: the signature is
 /// not part of the pre-image, and the script has to drop it too.
 #[test]

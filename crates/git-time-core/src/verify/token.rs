@@ -352,6 +352,23 @@ pub fn signer_certificate(token: &[u8]) -> Option<Vec<u8>> {
     signer.to_der().ok()
 }
 
+/// The genTime a token claims, when the TSTInfo can be read.
+///
+/// It is the time the token says it was issued, and the time a verification is
+/// judged at: a root or a signer only vouches inside its own window, so a reader
+/// re-checking stored evidence needs this to pick the right window instead of
+/// the wall clock. Like [`signer_certificate`], it runs no chain validation; a
+/// token that names a genTime has not thereby earned trust.
+///
+/// A token whose CMS or TSTInfo does not parse has no readable time and yields
+/// `None`; the caller then has no `-attime` to offer and says so.
+#[must_use]
+pub fn gen_time(token: &[u8]) -> Option<Timestamp> {
+    let signed_data = parse_signed_data(token).ok()?;
+    let econtent = signed_data.encap_content_info.econtent.as_ref()?;
+    Tst::parse(econtent.value()).ok().map(|tst| tst.gen_time)
+}
+
 /// The imprint comparison.
 ///
 /// The record's algorithm and the imprint's must agree first: a record that

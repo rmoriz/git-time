@@ -28,13 +28,21 @@
 //! script needs `git`, `openssl` (with `ts`) and `zstd`, and it re-checks the
 //! gates only where a missing seal leaves no token to verify — a gate that is
 //! about the signature is decided here and merely named in the script.
+//!
+//! The script carries the material, not a pointer to it: the pre-image, every
+//! token and the roots each token was judged against are embedded base64, and
+//! the chain is checked at the token's own genTime. A bundle that has since
+//! rotated or moved, or a leaf that has since expired, does not make the script
+//! fail a seal that was sound when it was made.
 
 use git_time_core::object::PreImage;
 use git_time_core::policy::Policy;
 use git_time_core::store;
-use git_time_core::verify::{CommitEvidence, Invalid, SignatureStatus, Verdict, commit};
+use git_time_core::trust::{AnchorStore, fingerprint};
+use git_time_core::verify::{CommitEvidence, Invalid, SignatureStatus, Verdict, commit, gen_time};
 use serde_json::{Value, json};
 
+use crate::cmd::anchors::pem_block;
 use crate::cmd::{Exit, open, short};
 
 /// What to demand of every commit.
@@ -188,11 +196,16 @@ fn passes(evidence: &CommitEvidence, require: &Require) -> bool {
 /// Print the `--openssl` script: one block per commit, the embedded pre-image
 /// and, per token, one self-contained `openssl ts -verify` call.
 ///
-/// Nothing in the script reads the repository. The pre-image and the tokens are
-/// written into it as base64 at generation time, so the script is a document in
-/// its own right: `openssl base64 -d` shows the commit that is being audited.
-/// The imprint check still hashes those bytes, so a hand-edited payload is
-/// caught even though no history is walked.
+/// Nothing in the script reads the repository. The pre-image, the tokens and the
+/// anchor PEM of each token are written into it as base64 at generation time, so
+/// the script is a document in its own right: `openssl base64 -d` shows the
+/// commit that is being audited. The imprint check still hashes those bytes, so
+/// a hand-edited payload is caught even though no history is walked.
+///
+/// The anchors come from the pin, narrowed to the roots the block names and to
+/// the token's own genTime, which is also what `-attime` passes to openssl: a
+/// bundle that has since rotated is not the bundle the token met, and wall-clock
+/// time would fail a token that outlived its leaf.
 ///
 /// A commit that carries no token is a `SKIP` line, not silence; a gate is
 /// named but not re-checked, because checking it would mean re-implementing
@@ -222,7 +235,7 @@ fn print_openssl(
             }
         };
         let gates = require.failing(&evidence);
-        let payload = payload(repo, oid);
+        let payload = payload(repo, oid, policy.anchors());
         let Some(Payload {
             imprint,
             pre_image,
@@ -268,7 +281,7 @@ fn print_openssl(
         }
         script.push_str(&render_pre(&pre_image));
         script.push_str(OPENSSL_COMMIT);
-        for (index, (id, der)) in tokens.iter().enumerate() {
+        for (index, (id, der, ca_file)) in tokens.iter().enumerate() {
             let configured = policy
                 .tsas
                 .iter()
@@ -280,7 +293,17 @@ fn print_openssl(
                 index + 1,
                 quote(id),
             ));
-            quote_heredoc(&mut script, "token", der);
+            quote_heredoc(&mut script, "token", &base64_lines(der));
+            // The roots the token was judged against, and nothing else: the
+            // bundle on this machine may have rotated since, and a path here
+            // says nothing about the bytes the token met.
+            quote_heredoc(&mut script, "anchor", &base64_lines(ca_file));
+            // Whole seconds only, and only when the token names a genTime: the
+            // chain has to be judged at the token's own time.
+            match gen_time(der).map(|gen_time| gen_time.as_second()) {
+                Some(second) => script.push_str(&format!("attime_value='{second}'\n")),
+                None => script.push_str("attime_value=''\n"),
+            }
             script.push_str(OPENSSL_TOKEN);
         }
     }
@@ -291,11 +314,13 @@ fn print_openssl(
 }
 
 /// What a commit block embeds: the declared imprint, the pre-image and every
-/// `(id, token)` of the commit.
+/// `(id, token, anchor)` of the commit.
 struct Payload {
     imprint: git_time_core::imprint::Digest,
     pre_image: PreText,
-    tokens: Vec<(String, String)>,
+    /// Per token: the TSA id, the raw token DER and the `-CAfile` PEM the token
+    /// is judged against.
+    tokens: Vec<(String, Vec<u8>, Vec<u8>)>,
 }
 
 /// How the pre-image is carried.
@@ -310,9 +335,12 @@ enum PreText {
 
 /// Read `oid`'s block into a [`Payload`].
 ///
-/// The token bytes are the decoded DER, base64-encoded again for the heredoc:
-/// the script then needs no zstd and no base64url translation of its own.
-fn payload(repo: &git_time_core::repo::Repo, oid: &str) -> Option<Payload> {
+/// The token bytes are the decoded DER; the heredoc carries them base64-encoded,
+/// because the script needs no zstd and no base64url translation of its own. The
+/// same holds for the anchor PEM, which is built from the pinned store — the
+/// block's named fingerprints, narrowed at the token's genTime — so the script
+/// does not depend on a bundle that may have rotated or moved since.
+fn payload(repo: &git_time_core::repo::Repo, oid: &str, anchors: &AnchorStore) -> Option<Payload> {
     let (object, _raw) = repo.read_commit(oid).ok()?;
     let pre: PreImage = object.pre_image(store::PREFIX);
     let block = store::decode(pre.trailer.as_deref()?).ok().flatten()?;
@@ -329,9 +357,47 @@ fn payload(repo: &git_time_core::repo::Repo, oid: &str) -> Option<Payload> {
         tokens: block
             .tokens
             .iter()
-            .map(|token| (token.id.clone(), base64_lines(&token.token)))
+            .map(|token| {
+                let named = block.anchors.get(&token.id).map_or(&[][..], Vec::as_slice);
+                let anchor = anchor_pem(anchors, &token.id, &token.token, named);
+                (token.id.clone(), token.token.clone(), anchor)
+            })
             .collect(),
     })
+}
+
+/// The PEM to judge `token` against: the pinned roots of `id` that are valid at
+/// the token's genTime, narrowed to the `named` fingerprints, plus every pinned
+/// intermediate.
+///
+/// An unpinned id, a token whose genTime cannot be read or a store with no root
+/// valid then yields nothing: the script falls back to the paths it knows and
+/// says when neither exists. The token's own chain is not repeated here; it
+/// already travels inside the token.
+fn anchor_pem(anchors: &AnchorStore, id: &str, token: &[u8], named: &[String]) -> Vec<u8> {
+    let Some(gen_time) = gen_time(token) else {
+        return Vec::new();
+    };
+    let Some(anchor) = anchors.anchor(id) else {
+        return Vec::new();
+    };
+    let mut pem = Vec::new();
+    for root in anchor.roots_at(gen_time) {
+        if named.is_empty()
+            || named
+                .iter()
+                .any(|wanted| wanted.eq_ignore_ascii_case(&fingerprint(root.as_bytes())))
+        {
+            pem.extend(pem_block(root.as_bytes()));
+        }
+    }
+    if pem.is_empty() {
+        return pem;
+    }
+    for intermediate in &anchor.intermediates {
+        pem.extend(pem_block(intermediate.as_bytes()));
+    }
+    pem
 }
 
 /// The clear-text form of a pre-image, or its base64 form when it is not text.
@@ -423,10 +489,21 @@ const OPENSSL_HEADER: &str = r##"#!/bin/sh
 # The base64 blocks are many lines, so `base64 -d` is used without `-A`: the
 # LibreSSL one decodes nothing at all when a multi-line input meets that flag.
 #
-# The anchor is looked up at $XDG_CONFIG_HOME/git-time/anchors/<id>.pem (or
-# $HOME/.config/...), then at the path the generating machine had; if neither
+# The anchor is embedded per token: the roots the token was judged against, at
+# the token's own genTime, plus the intermediates pinned for its authority. The
+# bundle on the generating machine is only the fallback when the generation could
+# not resolve one; a bundle that has since rotated or moved is no longer the
+# bundle the token met. Each token block also carries its genTime in seconds, and
+# it is passed as `-attime` so the chain is judged at that time and not at the
+# clock of this run.
+#
+# The fallback paths are $XDG_CONFIG_HOME/git-time/anchors/<id>.pem (or
+# $HOME/.config/...), then the path the generating machine had; if neither
 # exists, the token fails and both paths are named. A bundle is passed whole as
 # -CAfile, so its intermediates count as trust material too.
+#
+# An openssl whose `ts -verify` has no `-attime` prints a NOTE up front and the
+# chain is then judged at run time.
 #
 # `--require-sealed` and `--require-signed` were decided when this script was
 # generated: a commit that fails one is named in a NOTE and counted, not
@@ -455,7 +532,8 @@ trap 'exit 143' TERM
 trap 'exit 129' HUP
 "##;
 
-/// The counters and the `-purpose` probe, before any commit block.
+/// The counters, the `-purpose` probe and the `-attime` probe, before any
+/// commit block.
 const OPENSSL_BODY: &str = r##"
 commits=0
 tokens=0
@@ -474,28 +552,47 @@ if ! openssl ts -verify -purpose timestampsign 2>&1 | grep -q '^usage:'; then
 else
     printf 'NOTE %s: no `ts -verify -purpose`; the timestamping EKU is not re-checked and SHA-384/SHA-512 tokens may be refused\n' "$openssl_version"
 fi
+
+# The chain is judged at the token's own genTime, never at the wall clock: a
+# token outlives the leaf that signed it, and judging at now would fail it for
+# being old rather than for being wrong. Same trial, same note: an openssl
+# without `-attime` says that it judged at now.
+attime=
+if ! openssl ts -verify -attime 1 2>&1 | grep -q '^usage:'; then
+    attime=-attime
+else
+    printf 'NOTE %s %s: this openssl has no -attime, validity is judged at run time\n' "$openssl_version" -attime
+fi
 "##;
 
 /// One token's inline block: decode, resolve its anchor and ask openssl.
 ///
-/// `$short`, `$id` and `$fallback` are set by the generated lines above it.
+/// `$short`, `$id`, `$fallback` and `$attime_value` are set by the generated
+/// lines above it; the anchor is embedded per token as `anchor.b64`.
 const OPENSSL_TOKEN: &str = r##"
 tokens=$((tokens+1))
 if ! openssl base64 -d -in "$scratch/token.b64" -out "$scratch/token.der" 2> "$scratch/err"; then
     printf 'FAIL %s %s: the token does not decode\n' "$short" "$id"
     failed=$((failed+1))
 else
-    if [ -n "${XDG_CONFIG_HOME:-}" ]; then
-        candidate="$XDG_CONFIG_HOME/git-time/anchors/$id.pem"
+    # The embedded roots are the ones this token was judged against; a bundle on
+    # this machine may have rotated since. The paths are only the fallback for a
+    # token the generation could not resolve an anchor for.
+    anchor=
+    if openssl base64 -d -in "$scratch/anchor.b64" -out "$scratch/anchor.pem" 2> "$scratch/err" \
+        && [ -s "$scratch/anchor.pem" ]; then
+        anchor="$scratch/anchor.pem"
     else
-        candidate="${HOME:-}/.config/git-time/anchors/$id.pem"
-    fi
-    if [ -f "$candidate" ]; then
-        anchor=$candidate
-    elif [ -n "$fallback" ] && [ -f "$fallback" ]; then
-        anchor=$fallback
-    else
-        anchor=
+        if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+            candidate="$XDG_CONFIG_HOME/git-time/anchors/$id.pem"
+        else
+            candidate="${HOME:-}/.config/git-time/anchors/$id.pem"
+        fi
+        if [ -f "$candidate" ]; then
+            anchor=$candidate
+        elif [ -n "$fallback" ] && [ -f "$fallback" ]; then
+            anchor=$fallback
+        fi
     fi
     if [ -z "$anchor" ]; then
         printf 'FAIL %s %s: no anchor pinned (looked at %s and %s)\n' "$short" "$id" "$candidate" "$fallback"
@@ -505,6 +602,9 @@ else
             set -- -purpose timestampsign
         else
             set --
+        fi
+        if [ -n "$attime" ] && [ -n "$attime_value" ]; then
+            set -- "$@" "$attime" "$attime_value"
         fi
         if openssl ts -verify -token_in -in "$scratch/token.der" -data "$scratch/pre" \
             -CAfile "$anchor" "$@" > "$scratch/out" 2> "$scratch/err"; then

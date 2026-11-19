@@ -11,4 +11,4 @@ pub use commit::{
     CommitEvidence, DROPPED_FILE, SignatureStatus, TsaEvidence, Verdict, VerifyError, commit,
     named_tsas,
 };
-pub use token::{Invalid, TokenVerdict, signer_certificate, token};
+pub use token::{Invalid, TokenVerdict, gen_time, signer_certificate, token};

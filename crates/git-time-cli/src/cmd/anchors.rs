@@ -447,7 +447,8 @@ fn parse_certificates(bytes: &[u8]) -> Vec<Certificate> {
     found
 }
 
-fn pem_block(der: &[u8]) -> Vec<u8> {
+/// `der` as one PEM certificate block.
+pub(crate) fn pem_block(der: &[u8]) -> Vec<u8> {
     let encoded = BASE64.encode(der);
     let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
     for chunk in encoded.as_bytes().chunks(64) {
