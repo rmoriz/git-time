@@ -181,7 +181,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
         Command::Select {
             interactive,
             dry_run,
-        } => select(&repo, interactive, dry_run).await,
+        } => select(&repo, &[], interactive, dry_run).await,
         Command::Restore {
             range,
             accept,
@@ -757,7 +757,16 @@ fn needs_a_terminal() -> Exit {
 /// `interactive` is not read here: the non-terminal refusal lives in [`run`], so
 /// it fires before the repository is opened, and `install` only ever calls this
 /// where an answer is expected.
-pub(crate) async fn select(repo: &Repo, _interactive: bool, dry_run: bool) -> Exit {
+///
+/// `accept` is forwarded from `install`, whose own `--accept` would otherwise be
+/// dropped by the handover: the ids it can name are the chosen ones, because
+/// those are the only ids this run fetches.
+pub(crate) async fn select(
+    repo: &Repo,
+    accept: &[String],
+    _interactive: bool,
+    dry_run: bool,
+) -> Exit {
     // The answer is the whole set: every preset section missing from it is
     // removed. An empty start would therefore drop every authority the user did
     // not mean to touch, and neither surface would show what is configured. The
@@ -791,7 +800,28 @@ pub(crate) async fn select(repo: &Repo, _interactive: bool, dry_run: bool) -> Ex
             Err(exit) => return exit,
         }
     };
-    apply(repo, &chosen, dry_run).await
+    let accept = match accepted(accept, &chosen) {
+        Ok(accept) => accept,
+        Err(exit) => return exit,
+    };
+    apply(repo, &chosen, &accept, dry_run).await
+}
+
+/// Resolve `--accept` values for a selection against the rows it chose.
+///
+/// A bare fingerprint is unambiguous only when one row was chosen, so the ids in
+/// play are the chosen ones and nothing else.
+fn accepted(
+    accept: &[String],
+    chosen: &[usize],
+) -> Result<std::collections::BTreeMap<String, String>, Exit> {
+    let ids: Vec<&str> = chosen
+        .iter()
+        .filter_map(|index| presets::PRESETS.get(*index))
+        .map(|preset| preset.name)
+        .collect();
+    crate::cmd::accept::one_or_id(accept, &ids)
+        .map_err(|error| Exit::usage(format!("git time tsa select: {error}")))
 }
 
 /// The preset indices the configuration already enables, for the seed.
@@ -918,7 +948,12 @@ fn index(text: &str, count: usize) -> Option<usize> {
 }
 
 /// Disable what is not chosen, then pin what is.
-async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
+async fn apply(
+    repo: &Repo,
+    chosen: &[usize],
+    accept: &std::collections::BTreeMap<String, String>,
+    dry_run: bool,
+) -> Exit {
     let configured = match anchors::configured(repo) {
         Ok(configured) => configured,
         Err(exit) => return exit,
@@ -960,15 +995,7 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
             );
             continue;
         }
-        match install::pin(
-            repo,
-            preset,
-            &BTreeMap::new(),
-            &BTreeMap::new(),
-            "git time install",
-        )
-        .await
-        {
+        match install::pin(repo, preset, accept, &BTreeMap::new(), "git time install").await {
             Ok(pinned) => {
                 if pinned.fingerprint_mismatch || pinned.missing_anchor.is_some() {
                     failed = true;
@@ -1267,7 +1294,7 @@ fn local_set(repo: &Repo, key: &str, value: &str) -> Result<(), Exit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_enabled, initial, pin_state};
+    use super::{accepted, already_enabled, initial, pin_state};
     use git_time_core::presets;
     use git_time_core::repo::Repo;
 
@@ -1314,6 +1341,22 @@ mod tests {
         let selection = initial(&[0, 1]);
         assert_eq!(selection.chosen(), [0, 1]);
         assert!(selection.is_chosen(1));
+    }
+
+    /// A bare accept is unambiguous only for a selection of one row; two rows
+    /// need the id, since only the chosen rows can be fetched.
+    #[test]
+    fn a_bare_accept_is_read_against_the_chosen_row() {
+        let bare = ["AA:BB".to_owned()];
+        let one = accepted(&bare, &[0]).expect("one chosen row names the id");
+        assert_eq!(one[presets::PRESETS[0].name], "AA:BB");
+
+        let two = accepted(&bare, &[0, 1]).expect_err("two rows are ambiguous");
+        assert!(two.message().contains(presets::PRESETS[0].name), "{two:?}");
+
+        let by_id =
+            accepted(&["digicert=AA:BB".to_owned()], &[2]).expect("the id is taken as given");
+        assert_eq!(by_id["digicert"], "AA:BB");
     }
 
     /// A hand-added, unmeasured preset has nothing to date it with and says so;

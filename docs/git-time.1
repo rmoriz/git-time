@@ -348,9 +348,10 @@ published value.
 .B install
 pins several authorities, so the value is
 .IR id = fingerprint
-and repeatable; a bare fingerprint is accepted only when the run pins exactly
-one authority.
-The accepted root is appended next to the retired one, never over it.
+and repeatable; a bare fingerprint is accepted only when exactly one authority
+is in play, configured or being written.
+The accepted root is appended next to the retired one, never over it, and
+becomes the first pin when nothing was pinned for that id.
 .PP
 The hooks resolve
 .B git\-time
@@ -367,13 +368,18 @@ reports it as a problem.
 .TP
 .B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
 Accept the root of a rotation. Repeatable; a bare fingerprint is taken only
-when the run pins exactly one authority.
+when exactly one authority is in play — configured or being written. The
+value is unused under
+.BR \-\-no\-tsa ,
+where nothing is fetched.
 .TP
 .B \-\-no\-tsa
 Write no authority configuration; keep whatever is configured.
 .PP
-Exits 0, 1 when a chosen authority cannot be pinned, or 2 when no authority
-is configured and stdin is not a terminal, or on a configuration error.
+A mismatch or an unreachable authority on the keep path is only a warning, so
+the status stays 0 there. Exits 1 for an anchor that cannot be pinned in the
+handover, and 2 when no authority is configured and stdin is not a terminal,
+or on a configuration error.
 .SS uninstall
 .B git time uninstall [ \-\-force ]
 .PP
@@ -481,7 +487,7 @@ Exits 0, 1 for an existing id, and 2 for a bad URL, id, duration or policy.
 .B git time tsa list [ \-\-json ]
 .PP
 List each configured authority with its URL, algorithm, anchor path, the
-newest live root's fingerprint and expiry date, anchor state and whether it is
+newest root's fingerprint and expiry date, anchor state and whether it is
 plain http.
 Every root of the bundle follows on an indented
 .B root
@@ -502,7 +508,7 @@ Exits 0, 1 for an unknown id, and 2 for a bad id or configuration error.
 .SS "tsa preset"
 .B git time tsa preset list
 .PP
-Print the built\-in presets with their scope
+Print the built\-in presets with their endpoint, algorithm, scope
 .B ( default
 or
 .BR "opt\-in" ),
@@ -510,7 +516,7 @@ their
 .B pinned
 fingerprint or
 .BR tofu ,
-the newest pinned root's expiry date, and
+the newest root's expiry date, and
 .B anchored
 or
 .BR missing .
@@ -521,6 +527,9 @@ in its last 90 days and
 past it; a published root that is not pinned here has no certificate to read
 and reads
 .BR \- .
+No current row is in the
+.B tofu
+position.
 Exits 0.
 .PP
 .B git time tsa preset add \fIname\fR [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ]
@@ -531,10 +540,14 @@ uses.
 A root fingerprint that does not match the published value is a refusal, so a
 pinned preset never accepts a substituted root; when the publication really
 moved, compare the value out of band and repeat with
-.BR \-\-accept .
+.BR \-\-accept ,
+bare or carrying the preset's own id — any other id matches nothing.
 The report names the accepted root and its date.
 .PP
-Exits 0, 1 when no anchor could be pinned, and 2 for an unknown name or
+Exits 0, 1 when no anchor could be pinned, and 2 for an unknown name, an
+unparseable
+.B --accept
+value, or
 configuration error.
 .SS "tsa select"
 .B git time tsa select [ \-\-interactive ] [ \-\-dry\-run ]
@@ -609,12 +622,24 @@ An id that is not a preset carries no URL anywhere and is named with the
 and
 .B anchor fetch
 steps instead.
+.PP
+An authority whose pinned bundle already holds a root the blocks name is
+skipped, and the summary counts it.
+.TP
+.B \-\-range \fIRANGE\fR
+A git rev\-range. Without it and without a
+.I commit
+argument, every commit reachable from HEAD is read.
 .TP
 .B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
-Append a root the blocks do not name. Repeatable; a bare fingerprint is
+Take a root the blocks do not name. Repeatable; a bare fingerprint is
 accepted only when one authority is in play.
+.TP
+.I commit ...
+Commits to read on top of any range.
 .PP
-Exits 0, 1 when a pin is refused, and 2 on a usage or configuration error.
+Exits 0, 1 when a pin is refused or an id has no preset, and 2 on a usage or
+configuration error.
 .SS anchor
 .B git time anchor \fIsubcommand\fR [ \fIarguments\fR ]
 .PP
@@ -972,7 +997,8 @@ may address several authorities and take
 .BI \-\-accept " id=fingerprint" ,
 repeatable; a bare value needs exactly one authority in play.
 .PP
-The accepted root is written ahead of the retired one, never over it.
+The accepted root is written ahead of the retired one, never over it; for an id
+with nothing pinned it is the first pin instead.
 Each root only vouches for tokens inside its own validity window, and the
 verifier intersects the pinned roots with the fingerprints the block names, so
 a new root never blesses an old token and an old root never vouches for a new

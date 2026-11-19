@@ -114,7 +114,7 @@ pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool, accept: &[
     let authorities: Vec<&Authority> = if no_tsa || keep {
         Vec::new()
     } else if std::io::stdin().is_terminal() {
-        return crate::cmd::tsa::select(&repo, true, false).await;
+        return crate::cmd::tsa::select(&repo, accept, true, false).await;
     } else {
         return Exit::usage(
             "git time install: no authority is configured and stdin is not a terminal; use `git \

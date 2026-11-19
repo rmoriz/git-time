@@ -145,11 +145,12 @@ exist, `install` hands over to `git time tsa select` inline on a terminal. A std
 terminal is refused with exit `2` and one line naming the ways out — `git time tsa select`,
 `git time tsa preset add <id>`, `git time tsa add <url>` — because a prompt nobody answers would
 hang a script. Of those, the first needs a terminal anyway; the other two never ask.
-`--no-tsa` writes no authority at all.
+`--no-tsa` writes no authority at all, and then an `--accept` is parsed but unused.
 
 A rotation is refused unless `--accept <id>=<fingerprint>` names the fetched root; `install` pins
 several authorities, so the flag is per id and repeatable, and a bare fingerprint is accepted only
-when the run pins exactly one authority. See [Surviving a TSA rotation](#surviving-a-tsa-rotation).
+when exactly one authority is in play — configured or being written. See [Surviving a TSA
+rotation](#surviving-a-tsa-rotation).
 
 A fetch that fails is a warning, not a failure; `doctor` names the gap, and under `time.gate =
 pre-commit` the summary says commits will be refused. Exits `0`, `1` when an anchor chosen in the
@@ -179,7 +180,7 @@ Register an authority in the local config. The id derives from the host and is r
 ### `git time tsa list [--json]` / `git time tsa remove <id>`
 
 List the configured authorities with their URL, algorithm and anchor path, or delete a whole
-`time.tsa.<id>` section. Each line then carries the newest live root's fingerprint and expiry date
+`time.tsa.<id>` section. Each line then carries the newest root's fingerprint and expiry date
 (`-` where there is no root), `anchored` or `missing`, and `insecure-http` when it applies; every
 root of the bundle follows on an indented `root` line. `remove` exits `1` when the id is unknown.
 Both exit `2` on usage or config.
@@ -188,13 +189,14 @@ Both exit `2` on usage or config.
 
 Print the built-in presets, or configure one, anchor included, through the install fetch path.
 `preset add` exits `1` when the anchor could not be pinned (a one-off add exists to pin), and `2`
-for an unknown name. A root fingerprint that does not match is a refusal, so a pinned preset never
-takes a substituted root; when the publication really moved, compare the fetched value out of band
-and repeat with `--accept` — bare, since the preset names exactly one id, or as
-`<id>=<fingerprint>` under the preset's own id.
+for an unknown name or an unparseable `--accept`. A root fingerprint that does not match is a
+refusal, so a pinned preset never takes a substituted root; when the publication really moved,
+compare the fetched value out of band and repeat with `--accept` — bare, since the preset names
+exactly one id, or as `<id>=<fingerprint>` under that same id (any other id matches nothing and is
+not an error).
 
-`preset list` prints one row per preset: name, endpoint, scope, the pinned fingerprint, the newest
-pinned root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
+`preset list` prints one row per preset: name, endpoint, algorithm, scope, the pinned fingerprint,
+the newest root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
 last 90 days and `expired` past it; a published root that is not pinned here has no certificate to
 read, so its date column reads `-`. `tofu` and `not pinned` are the two tiers a hand-added,
 unpublished authority would need; no built-in row is in that position any more, so the table shows
@@ -209,10 +211,10 @@ fallback. `sectigo` is not recommended: its endpoint refuses the TLS handshake o
 Everything else is opt-in.
 
 The table is ordered the `default` rows first. Every built-in row publishes a root, so any fetch of
-one can check it. A hand-added authority publishes nothing, so `tsa add`/`anchor fetch` fall back to
-trust on first use and print the fetched root fingerprint in full — that line is what makes the
-first pin reviewable, and `git time anchor pin` records it in `time.anchors-lock` afterwards so a
-later change is visible.
+one can check it. A hand-added authority publishes nothing, so its `anchor fetch` (the step after
+`tsa add`) falls back to trust on first use and prints the fetched root fingerprint in full — that
+line is what makes the first pin reviewable, and `git time anchor pin` records it in
+`time.anchors-lock` afterwards so a later change is visible.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|
@@ -310,15 +312,14 @@ keeps the frame. A terminal that cannot be put into raw mode at all falls back t
 the early versions, saying so in one line.
 
 The `pin` column is the trust tier: the root is checked against the table when it is pinned and a
-mismatch is a refusal. The date is the newest live root's `notAfter`; a root in its last 90 days
+mismatch is a refusal. The date is the newest root's `notAfter`; a root in its last 90 days
 reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row is due
 a rotation before the answer refuses the fetch. `pin -` is a published root that is not pinned on
-this machine yet — the state of every row on a machine with no anchors — and `enter` pins it.
-`tofu` can only be
-reviewed by reading the fingerprint the command prints —
-`git time anchor pin` records the pinned bundle's fingerprint in `time.anchors-lock` so a later
-change is caught. `http` marks a plain-`http` endpoint; the endpoint of the cursor row is printed in
-full below the list.
+this machine yet — the state of every row on a machine with no anchors — and `enter` pins it. The
+`tofu` tier takes no built-in row any more: a row that publishes nothing can only be reviewed by
+reading the fingerprint the command prints, and `git time anchor pin` records the pinned bundle's
+fingerprint in `time.anchors-lock` so a later change is caught. `http` marks a plain-`http`
+endpoint; the endpoint of the cursor row is printed in full below the list.
 
 The list is a window sized to the terminal: the footer, the URL line and the cursor row stay on
 screen, a cut edge is marked `…`, and the frame is re-measured from the terminal each key so a
@@ -341,12 +342,14 @@ Backfill the anchors a clone lacks, from the authority ids the evidence names. A
 and pinned when its published root is one the blocks name; a fetched root the blocks do not name is
 a rotation that needs `--accept`, and is otherwise reported and left unpinned. The signature state
 of every commit that named an id is printed before the fetch, so a reader sees which blocks were
-unverified when they chose. `--range` defaults to the commits reachable from HEAD; positional
-commits are read on top of any range.
+unverified when they chose. Without `--range` and without a commit, every commit reachable from
+HEAD is read; commits given positionally are read on top of any range. An authority whose pinned
+bundle already holds a named root is skipped and the summary counts it.
 
 An id that is not a preset carries no URL anywhere and is named with the `tsa add` and `anchor
-fetch` steps instead. Exits `0`, `1` when a pin is refused or an id has no preset, and `2` on a
-usage or configuration error.
+fetch` steps instead. `--accept <id>=<fingerprint>` takes a root the blocks do not name; it is
+repeatable, and a bare fingerprint is taken only when one authority is in play. Exits `0`, `1` when
+a pin is refused or an id has no preset, and `2` on a usage or configuration error.
 
 ### `git time anchor fetch <url> --id ID [--insecure-http] [--accept FINGERPRINT]`
 

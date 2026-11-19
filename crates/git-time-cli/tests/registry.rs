@@ -467,6 +467,11 @@ impl Repo {
         run_time_stdin(self.path(), self.xdg.path(), args, env, input)
     }
 
+    /// Run the binary with `input` on a terminal.
+    fn run_time_pty(&self, args: &[&str], env: &[(&str, String)], input: &str) -> Option<Output> {
+        run_time_pty(self.path(), self.xdg.path(), args, env, input)
+    }
+
     /// The environment that makes an anchor fetch hand back the throwaway CA.
     fn fetch_ca(&self) -> Vec<(&'static str, String)> {
         vec![(
@@ -702,6 +707,50 @@ fn run_time_stdin(
         .write_all(input.as_bytes())
         .expect("writes the answer");
     child.wait_with_output().expect("runs the binary")
+}
+
+/// Run the binary with `input` on a pseudo-terminal, the way an interactive
+/// caller arrives.
+///
+/// `script(1)` is what supplies the terminal: the suite's own stdin is a pipe, so
+/// the branches gated on `is_terminal` would never run otherwise. `None` when no
+/// `script` is installed, so the suite still runs where it is missing; its status
+/// is not asserted because util-linux `script` reports 0 for the child unless
+/// `-e` is given.
+fn run_time_pty(
+    dir: &Path,
+    xdg: &Path,
+    args: &[&str],
+    env: &[(&str, String)],
+    input: &str,
+) -> Option<Output> {
+    let mut child = Command::new("script")
+        .arg("-q")
+        .arg("/dev/null")
+        .arg(BIN)
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_TIME_SKIP")
+        .envs(insulated_env().iter().copied())
+        .env("PATH", path_env())
+        .env("XDG_CONFIG_HOME", xdg)
+        .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    child
+        .stdin
+        .take()
+        .expect("a stdin pipe")
+        .write_all(input.as_bytes())
+        .expect("writes the answer");
+    child.wait_with_output().ok()
 }
 
 fn ok(output: &Output) -> String {
@@ -2257,6 +2306,42 @@ fn fetching_a_first_pin_prints_it_in_full() {
         lines[1].contains("/acme.pem") && lines[1].contains("sha256 "),
         "{stdout}"
     );
+}
+
+#[test]
+fn install_carries_its_accept_over_the_handover() {
+    // A repository with no authority hands over to the selector, and the refusal
+    // hint names exactly `git time install --accept`, so the flag has to survive
+    // that hop instead of being read only on the keep path.
+    let repo = Repo::new();
+    repo.init();
+    // The fetch compares in the algorithm of the published value and speaks of
+    // the fetched root's DER, so the accept has to be that digest; the refusal
+    // prints it.
+    let probe = repo.run_time_env(&["tsa", "preset", "add", "freetsa"], &repo.fetch_ca());
+    let refused = text(&probe.stderr);
+    let value = format!(
+        "freetsa={}",
+        refused
+            .split_once("got ")
+            .map(|(_, rest)| rest.split(';').next().unwrap_or_default().trim())
+            .expect("the refusal names the fetched root")
+    );
+    // The probe configured the id, and the handover only happens without one.
+    repo.run_time(&["tsa", "remove", "freetsa"]);
+    assert!(!repo.anchors().join("freetsa.pem").exists());
+    let Some(output) = repo.run_time_pty(&["install", "--accept", &value], &repo.fetch_ca(), "1\n")
+    else {
+        eprintln!("no script(1) here: the handover was not exercised");
+        return;
+    };
+    let stdout = text(&output.stdout);
+    assert!(output.status.success(), "{stdout}{}", text(&output.stderr));
+    assert!(
+        stdout.contains("overriding the published fingerprint"),
+        "{stdout}"
+    );
+    assert!(repo.anchors().join("freetsa.pem").exists(), "{stdout}");
 }
 
 #[test]

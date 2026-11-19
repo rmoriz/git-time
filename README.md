@@ -40,7 +40,8 @@ Authorities already configured start ticked. The `pin` column is the trust tier:
 against the table and a mismatch is a refusal. `pin -` is a published root that is not pinned on this
 machine yet — what a machine with no anchors shows on every row — and `enter` pins it on the way
 out.
-`tofu` can only be reviewed by reading the fingerprint the command prints. `http` marks a plain-http
+`tofu` takes no row any more, because every preset publishes a root: a preset that publishes
+nothing can only be reviewed by reading the fingerprint the command prints. `http` marks a plain-http
 endpoint; the full URL of the cursor row is printed below the list, so no column has to carry it.
 
 ```console

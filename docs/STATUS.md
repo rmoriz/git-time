@@ -94,8 +94,8 @@ Presets live in `git_time_core::presets`; `tsa select` and `tsa preset add` writ
 one table. Only `anchor fetch`, `preset add`, `tsa restore` and a selection touch the network, and they all
 honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
 it is pinned; a mismatch is refused and leaves the previous anchor alone. An authority without a
-published root is trust on first use and prints the fetched fingerprint,
-which is the only reviewable artifact of the first pin. Plain-`http` presets record
+published root is trust on first use at its `anchor fetch`, which prints the fetched fingerprint,
+the only reviewable artifact of the first pin. Plain-`http` presets record
 `time.tsa.<id>.insecure-http`; all of them share one capped warning
 line at seal time.
 
@@ -114,7 +114,7 @@ operator section.
 | a root vouches only for tokens inside its own validity window | `roots_at`, the candidate loop | shipped |
 | a block names the roots valid at its tokens' `genTime`, inside the signed block | `X-RFC3161-Anchor`, `docs/format.md` | shipped |
 | `anchor fetch` refuses a changed root, prints both fingerprints and writes nothing | `anchor fetch` | shipped |
-| `--accept` appends ahead of the retired root, deduplicated (bare when one id is addressed, else `<id>=<fingerprint>`) | `install`, `anchor fetch`, `tsa restore`, `tsa preset add` | shipped |
+| `--accept` appends ahead of the retired root, deduplicated (bare only when one authority is in play, else `<id>=<fingerprint>`) | `install`, `anchor fetch`, `tsa restore`, `tsa preset add` | shipped |
 | the lock records one line per root, so a rotation is an `added` and a `removed` line | `anchor pin`, `anchor pin --check` | shipped |
 | `doctor` names `no root valid now` and a HEAD-named root that is not pinned | `doctor` | shipped |
 | `verify --openssl` embeds the roots the block names plus all pinned intermediates, judged with `-attime` | `verify --openssl` | shipped |
