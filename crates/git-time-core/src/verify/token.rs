@@ -526,11 +526,11 @@ impl Parsed {
     }
 
     /// Authenticate the token: the signed signer identifier, then the CMS
-    /// signature, chain to the pinned root, and the timestamping EKU at the
+    /// signature, chain to a pinned root, and the timestamping EKU at the
     /// token's own genTime.
     ///
-    /// The pinned root is the only material taken from `anchor`; the signer and
-    /// intermediates are the token's, and are pinned to `authority.leaf`.
+    /// The pinned roots are the only material taken from `anchor`; the signer
+    /// and intermediates are the token's, and are pinned to `authority.leaf`.
     fn authenticate(&self, anchor: &crate::trust::Anchor) -> Result<(), Invalid> {
         // Before the signature: the identifier is what says *which* certificate
         // the signed bytes belong to, so a token that names another one is
@@ -556,7 +556,8 @@ impl Parsed {
         let authority = TsaAuthority::new(
             DerCertificate::new(signer_der.clone()),
             intermediates,
-            anchor.root.clone(),
+            // Task 4 filters candidates: for now the first root is the anchor.
+            anchor.roots[0].clone(),
             None,
         );
 

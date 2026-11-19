@@ -1089,10 +1089,120 @@ fn anchor_bundle_keeps_root_then_intermediates() {
 
     assert!(anchor.intermediates.len() == 1);
     assert_eq!(
-        anchor.root.as_bytes(),
+        anchor.roots[0].as_bytes(),
         sigstore_types::DerCertificate::from_pem(ROOT_PEM)
             .expect("fixture root parses")
             .as_bytes()
+    );
+}
+
+#[test]
+fn a_bundle_starting_with_an_intermediate_still_finds_the_root() {
+    let dir = scratch();
+    let (_, ca_pem) =
+        throwaway_tsa_token_signed_with(dir.path(), "critical,timeStamping", "sha256");
+    let ca = std::fs::read_to_string(&ca_pem).expect("read CA");
+    let leaf = std::fs::read_to_string(dir.path().join("tsa-leaf.pem")).expect("read leaf");
+    // The leaf first, the CA second: the position must not decide.
+    let path = bundle(dir.path(), "reversed.pem", &format!("{leaf}{ca}"));
+
+    let store = AnchorStore::load(&[(ID.to_owned(), path)]).expect("the CA is still a root");
+    let anchor = store.anchor(ID).expect("the id is pinned");
+    assert_eq!(anchor.roots.len(), 1);
+    assert_eq!(anchor.intermediates.len(), 1);
+}
+
+#[test]
+fn a_bundle_without_a_self_signed_root_has_no_root() {
+    let dir = scratch();
+    let (_, _) = throwaway_tsa_token_signed_with(dir.path(), "critical,timeStamping", "sha256");
+    let leaf = std::fs::read_to_string(dir.path().join("tsa-leaf.pem")).expect("read leaf");
+    // Only the leaf: nothing in the bundle can end a chain.
+    let path = bundle(dir.path(), "leaf-only.pem", &leaf);
+
+    let error = AnchorStore::load(&[(ID.to_owned(), path.clone())]).expect_err("no root");
+    assert!(
+        matches!(error, git_time_core::trust::TrustError::NoRoot { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains(ID), "{error}");
+    assert!(
+        error.to_string().contains(&path.display().to_string()),
+        "{error}"
+    );
+}
+
+#[test]
+fn appending_keeps_both_roots_and_dedupes() {
+    // Both throwaway CAs have the same subject CN — this is the re-key case:
+    // same name, different key. Both roots have to survive, the fingerprint
+    // decides which one verifies.
+    // The helper writes fixed file names, so each generation needs its own dir.
+    let first_dir = scratch();
+    let second_dir = scratch();
+    let (_, first) =
+        throwaway_tsa_token_signed_with(first_dir.path(), "critical,timeStamping", "sha256");
+    let (_, second) =
+        throwaway_tsa_token_signed_with(second_dir.path(), "critical,timeStamping", "sha256");
+    let path = bundle(
+        first_dir.path(),
+        "one.pem",
+        &std::fs::read_to_string(&first).unwrap(),
+    );
+    let mut store = AnchorStore::load(&[(ID.to_owned(), path)]).expect("first root");
+    assert_eq!(store.anchor(ID).unwrap().roots.len(), 1);
+
+    let appended = bundle(
+        second_dir.path(),
+        "two.pem",
+        &std::fs::read_to_string(&second).unwrap(),
+    );
+    assert_eq!(store.append(ID, &appended).expect("append"), 1);
+    assert_eq!(store.anchor(ID).unwrap().roots.len(), 2);
+    assert_eq!(store.append(ID, &appended).expect("again"), 0);
+    assert_eq!(store.anchor(ID).unwrap().roots.len(), 2);
+}
+
+#[test]
+fn roots_at_respects_the_boundaries() {
+    // Build a bundle from a throwaway CA, read its notBefore/notAfter, and
+    // assert: a time before notBefore or after notAfter yields nothing, and a
+    // time equal to either boundary yields the root.
+    let dir = scratch();
+    let (_, ca_pem) =
+        throwaway_tsa_token_signed_with(dir.path(), "critical,timeStamping", "sha256");
+    let pem = std::fs::read_to_string(&ca_pem).expect("read CA");
+    let path = bundle(dir.path(), "root.pem", &pem);
+    let store = AnchorStore::load(&[(ID.to_owned(), path)]).expect("root loads");
+    let anchor = store.anchor(ID).expect("the id is pinned");
+
+    let der = sigstore_types::DerCertificate::from_pem(&pem)
+        .expect("CA parses")
+        .as_bytes()
+        .to_vec();
+    let certificate = x509_cert::Certificate::from_der(&der).expect("CA is a certificate");
+    let validity = &certificate.tbs_certificate.validity;
+    let not_before = i64::try_from(validity.not_before.to_unix_duration().as_secs())
+        .expect("notBefore fits a timestamp");
+    let not_after = i64::try_from(validity.not_after.to_unix_duration().as_secs())
+        .expect("notAfter fits a timestamp");
+    let at = |second: i64| Timestamp::from_second(second).expect("second is in range");
+
+    assert!(anchor.roots_at(at(not_before - 1)).is_empty(), "before");
+    assert!(anchor.roots_at(at(not_after + 1)).is_empty(), "after");
+    assert_eq!(anchor.roots_at(at(not_before)).len(), 1, "at notBefore");
+    assert_eq!(anchor.roots_at(at(not_after)).len(), 1, "at notAfter");
+}
+
+#[test]
+fn an_empty_bundle_is_empty_not_a_rootless_anchor() {
+    let dir = scratch();
+    let path = bundle(dir.path(), "empty.pem", "");
+
+    let error = AnchorStore::load(&[(ID.to_owned(), path)]).expect_err("an empty bundle");
+    assert!(
+        matches!(error, git_time_core::trust::TrustError::Empty { .. }),
+        "{error:?}"
     );
 }
 

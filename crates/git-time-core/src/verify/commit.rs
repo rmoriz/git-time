@@ -327,7 +327,7 @@ fn judge_tokens(
         };
         let anchor = anchors
             .anchor(&record.id)
-            .map(|anchor| crate::trust::fingerprint(anchor.root.as_bytes()));
+            .map(|anchor| crate::trust::fingerprint(anchor.roots[0].as_bytes()));
         match judge(record, &imprint, window.clone(), anchors) {
             TokenVerdict::Valid {
                 gen_time,
