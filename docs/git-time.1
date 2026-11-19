@@ -16,7 +16,7 @@ git\-time \- RFC 3161 timestamp evidence for commits
 .PP
 .B git time log [ \-\-range \fIRANGE\fR ] [ \-\-json ] [ \fIcommit\fR ... ]
 .PP
-.B git time install [ \-\-no\-tsa ]
+.B git time install [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ] [ \-\-no\-tsa ]
 .PP
 .B git time uninstall [ \-\-force ]
 .PP
@@ -308,7 +308,7 @@ Additional commits to list.
 Exits 0, 1 for a commit that could not be read, and 2 for a usage or
 configuration problem.
 .SS install
-.B git time install [ \-\-no\-tsa ]
+.B git time install [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ] [ \-\-no\-tsa ]
 .PP
 Wire the hooks into the current repository.
 .B post\-commit
@@ -341,6 +341,17 @@ configured so
 .B doctor
 can name the gap.
 .PP
+A rotated root is refused unless
+.B \-\-accept
+names it, because the fetched root of a pinned authority is compared with the
+published value.
+.B install
+pins several authorities, so the value is
+.IR id = fingerprint
+and repeatable; a bare fingerprint is accepted only when the run pins exactly
+one authority.
+The accepted root is appended next to the retired one, never over it.
+.PP
 The hooks resolve
 .B git\-time
 as a bare command through
@@ -353,6 +364,10 @@ unsealed and silent.
 warns when the binary is not found, and
 .B doctor
 reports it as a problem.
+.TP
+.B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
+Accept the root of a rotation. Repeatable; a bare fingerprint is taken only
+when the run pins exactly one authority.
 .TP
 .B \-\-no\-tsa
 Write no authority configuration; keep whatever is configured.
@@ -465,8 +480,12 @@ Exits 0, 1 for an existing id, and 2 for a bad URL, id, duration or policy.
 .SS "tsa list"
 .B git time tsa list [ \-\-json ]
 .PP
-List each configured authority with its URL, algorithm, anchor path,
-fingerprint, anchor state and whether it is plain http.
+List each configured authority with its URL, algorithm, anchor path, the
+newest live root's fingerprint and expiry date, anchor state and whether it is
+plain http.
+Every root of the bundle follows on an indented
+.B root
+line.
 .TP
 .B \-\-json
 Print the listing as one JSON array.
@@ -491,23 +510,29 @@ their
 .B pinned
 fingerprint or
 .BR tofu ,
-the newest root's expiry date, and whether the anchor is present.
-A published root that is not pinned here has no certificate to read and so no
-date, and reads
+the newest pinned root's expiry date, and
+.B anchored
+or
+.BR missing .
+The date carries
+.B (expires soon)
+in its last 90 days and
+.B expired
+past it; a published root that is not pinned here has no certificate to read
+and reads
 .BR \- .
-A pinned bundle whose every root is past keeps its date and reads
-.BR "\fIdate\fR expired" .
 Exits 0.
 .PP
-.B git time tsa preset add \fIname\fR
+.B git time tsa preset add \fIname\fR [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ]
 .PP
 Configure one preset, anchor included, through the same fetch path
 .B install
 uses.
 A root fingerprint that does not match the published value is a refusal, so a
-pinned preset never accepts a substituted root.
-A trust\-on\-first\-use preset prints the fetched fingerprint in full for
-review.
+pinned preset never accepts a substituted root; when the publication really
+moved, compare the value out of band and repeat with
+.BR \-\-accept .
+The report names the accepted root and its date.
 .PP
 Exits 0, 1 when no anchor could be pinned, and 2 for an unknown name or
 configuration error.
@@ -938,6 +963,8 @@ band, then repeat the command with
 .BR \-\-accept .
 .B anchor fetch
 addresses one id, so the value is bare.
+.BR tsa " " preset " " add
+names one too, and takes the bare value as well.
 .B install
 and
 .B tsa restore

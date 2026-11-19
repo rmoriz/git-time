@@ -64,7 +64,7 @@ with no authority hands over to the same UI, so installing and choosing can be o
 
 In a script, no prompt happens: `git time tsa preset add <id>` enables one preset and `git time
 tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without a terminal exits
-`2` with those routes named rather than hanging; `--interactive` says an answer is being piped.
+`2` with those routes named rather than hanging; `--interactive` means an answer is being piped.
 `--dry-run` prints the outcome and writes nothing.
 
 Anchors are per machine, so a clone starts out trusting none of them and `verify` reports every
@@ -77,10 +77,10 @@ changed since.
 
 When an authority rotates its root, `anchor fetch` refuses the new one, prints both fingerprints
 and leaves the old bundle alone. Compare the fetched value with the authority's own publication and
-repeat with `--accept` — bare for `anchor fetch`, as `<id>=<fingerprint>` for `install` and
-`tsa restore`. The root is written next to the retired one rather than replacing it, so current
-commits keep verifying both and each root only vouches inside its own validity window. The sorted
-`time.anchors-lock` diff carries both roots and is what you review and commit. See
+repeat with `--accept` — bare for `anchor fetch` and `tsa preset add`, as `<id>=<fingerprint>` for
+`install` and `tsa restore`. The root is written next to the retired one rather than replacing it,
+so current commits keep verifying both and each root only vouches inside its own validity window.
+The sorted `time.anchors-lock` diff carries both roots and is what you review and commit. See
 [the manual](docs/manual.md#surviving-a-tsa-rotation).
 
 ## Install from a release binary
@@ -147,9 +147,9 @@ authority failed and why. A dead TSA costs evidence, never a commit.
 ## Built-in authorities
 
 `git time tsa select` is how any of these get configured; `git time tsa preset add <name>` writes
-one by name. The table lives in `git_time_core::presets`. The `default` rows are the curated pair
-the docs recommend, nothing more; belonging to them alone ticks nothing — only an already configured
-section starts ticked.
+one by name, and `--accept` takes a rotated root there. The table lives in `git_time_core::presets`.
+The `default` rows are the curated pair the docs recommend, nothing more; belonging to them alone
+ticks nothing — only an already configured section starts ticked.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|

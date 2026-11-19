@@ -142,16 +142,18 @@ Wire the hooks. `post-commit` and `post-merge` are always wired; `pre-commit` an
 The authority set is chosen by configuration, not by a flag. `time.tsa.*` sections that already
 exist are left exactly as they are, so a second run, or a hand-made setup, survives. When none
 exist, `install` hands over to `git time tsa select` inline on a terminal. A stdin that is not a
-terminal is refused with exit `2` and one line naming the three scriptable routes — `git time tsa
-select`, `git time tsa preset add <id>`, `git time tsa add <url>` — because a prompt nobody answers
-would hang a script. `--no-tsa` writes no authority at all.
+terminal is refused with exit `2` and one line naming the ways out — `git time tsa select`,
+`git time tsa preset add <id>`, `git time tsa add <url>` — because a prompt nobody answers would
+hang a script. Of those, the first needs a terminal anyway; the other two never ask.
+`--no-tsa` writes no authority at all.
 
 A rotation is refused unless `--accept <id>=<fingerprint>` names the fetched root; `install` pins
 several authorities, so the flag is per id and repeatable, and a bare fingerprint is accepted only
 when the run pins exactly one authority. See [Surviving a TSA rotation](#surviving-a-tsa-rotation).
 
 A fetch that fails is a warning, not a failure; `doctor` names the gap, and under `time.gate =
-pre-commit` the summary says commits will be refused. Exits `0` or `2`.
+pre-commit` the summary says commits will be refused. Exits `0`, `1` when an anchor chosen in the
+handover cannot be pinned, and `2` when no authority is configured and stdin is not a terminal.
 
 ### `git time uninstall [--force]`
 
@@ -176,16 +178,27 @@ Register an authority in the local config. The id derives from the host and is r
 
 ### `git time tsa list [--json]` / `git time tsa remove <id>`
 
-List the configured authorities with their anchor state and fingerprint, or delete a whole
-`time.tsa.<id>` section. `remove` exits `1` when the id is unknown. Both exit `2` on usage or
-config.
+List the configured authorities with their URL, algorithm and anchor path, or delete a whole
+`time.tsa.<id>` section. Each line then carries the newest live root's fingerprint and expiry date
+(`-` where there is no root), `anchored` or `missing`, and `insecure-http` when it applies; every
+root of the bundle follows on an indented `root` line. `remove` exits `1` when the id is unknown.
+Both exit `2` on usage or config.
 
-### `git time tsa preset list` / `git time tsa preset add <name>`
+### `git time tsa preset list` / `git time tsa preset add <name> [--accept <id>=<fingerprint>]`
 
 Print the built-in presets, or configure one, anchor included, through the install fetch path.
 `preset add` exits `1` when the anchor could not be pinned (a one-off add exists to pin), and `2`
 for an unknown name. A root fingerprint that does not match is a refusal, so a pinned preset never
-takes a substituted root.
+takes a substituted root; when the publication really moved, compare the fetched value out of band
+and repeat with `--accept` — bare, since the preset names exactly one id, or as
+`<id>=<fingerprint>` under the preset's own id.
+
+`preset list` prints one row per preset: name, endpoint, scope, the pinned fingerprint, the newest
+pinned root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
+last 90 days and `expired` past it; a published root that is not pinned here has no certificate to
+read, so its date column reads `-`. `tofu` and `not pinned` are the two tiers a hand-added,
+unpublished authority would need; no built-in row is in that position any more, so the table shows
+neither.
 
 The `default` scope marks the curated pair — `freetsa` and `digicert`, both pinned against a
 measured root. It is what the selector recommends, not a preselection; `install` writes it only
@@ -195,10 +208,11 @@ pinned and the most available of the rest, and two rather than one so `required 
 fallback. `sectigo` is not recommended: its endpoint refuses the TLS handshake on some stacks.
 Everything else is opt-in.
 
-The table is ordered the `default` rows first. Every built-in row publishes a root, so `preset add`
-can check it; where a hand-added authority has no publication, nothing can be checked and the fetch
-prints the root fingerprint in full — that line is what makes the first pin reviewable, and `git
-time anchor pin` records it in `time.anchors-lock` afterwards so a later change is visible.
+The table is ordered the `default` rows first. Every built-in row publishes a root, so any fetch of
+one can check it. A hand-added authority publishes nothing, so `tsa add`/`anchor fetch` fall back to
+trust on first use and print the fetched root fingerprint in full — that line is what makes the
+first pin reviewable, and `git time anchor pin` records it in `time.anchors-lock` afterwards so a
+later change is visible.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|
@@ -318,9 +332,21 @@ prints `failed <id>: <reason>` and makes the command exit `1` while the others s
 prints the outcome and changes nothing.
 
 The command asks a question, so a stdin that is not a terminal is refused (`2`) rather than left to
-hang. `--interactive` says the answer is being piped. There are three routes that never ask:
-`git time tsa select` on a terminal, `git time tsa preset add <id>` for one preset, and `git time
-tsa add <url>` for an endpoint of your own.
+hang. `--interactive` means the answer is being piped. Two routes never ask at all: `git time tsa
+preset add <id>` for one preset and `git time tsa add <url>` for an endpoint of your own.
+
+### `git time tsa restore [--range RANGE] [--accept <id>=<fingerprint>] [<commit>…]`
+
+Backfill the anchors a clone lacks, from the authority ids the evidence names. A preset is fetched
+and pinned when its published root is one the blocks name; a fetched root the blocks do not name is
+a rotation that needs `--accept`, and is otherwise reported and left unpinned. The signature state
+of every commit that named an id is printed before the fetch, so a reader sees which blocks were
+unverified when they chose. `--range` defaults to the commits reachable from HEAD; positional
+commits are read on top of any range.
+
+An id that is not a preset carries no URL anywhere and is named with the `tsa add` and `anchor
+fetch` steps instead. Exits `0`, `1` when a pin is refused or an id has no preset, and `2` on a
+usage or configuration error.
 
 ### `git time anchor fetch <url> --id ID [--insecure-http] [--accept FINGERPRINT]`
 
@@ -363,9 +389,10 @@ git time anchor: pass `--accept 01:0A:…:00` to append it next to the pinned ro
 
 Compare the `got` value with the fingerprint the authority publishes out of band. When it is the
 one you expect, repeat the command with the flag. `anchor fetch` addresses one id, so its `--accept`
-takes the bare fingerprint. `install` and `tsa restore` can address several authorities at once and
-take `--accept <id>=<fingerprint>`, repeatable; a bare value is accepted only when exactly one
-authority is in play, and otherwise the ids are named.
+takes the bare fingerprint. `tsa preset add`, `install` and `tsa restore` take
+`--accept <id>=<fingerprint>`, repeatable; `preset add` names exactly one id, so there a bare value
+works as well. Otherwise a bare value is accepted only when exactly one authority is in play, and
+the ids are named instead.
 
 The accepted root is written ahead of the retired one, never over it. Old tokens keep
 chaining to the root that signed them, and each root only vouches for tokens inside its own
