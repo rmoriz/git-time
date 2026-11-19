@@ -1194,7 +1194,10 @@ fn history_survives_a_rotation_end_to_end() {
         repo.path(),
         &["config", "time.tsa.stub.anchor", &pstr(&stored)],
     );
-    git(repo.path(), &["config", "time.tsa.stub.insecure-http", "true"]);
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.insecure-http", "true"],
+    );
 
     // Root A is the first pin, taken on trust on first use.
     let serve_a = format!("cat {}", pstr(&repo.authority.bundle()));
@@ -1290,9 +1293,17 @@ fn history_survives_a_rotation_end_to_end() {
     let fresh = verify(&repo, &new, &[]);
     assert_eq!(fresh.status.code(), Some(0), "{:?}", lines(&fresh));
 
-    // A clone without the roots refuses the block, and names the root it needs.
-    repo.drop_anchor();
-    let without = verify(&repo, &new, &[]);
+    // A reader that holds only the retired root refuses the block: the named
+    // root B is not pinned here, and A cannot stand in for it. The reason and
+    // the fix are named.
+    let named_only = name_only(&repo, &new, std::slice::from_ref(&b));
+    let retired = store.path().join("anchors/retired.pem");
+    std::fs::write(&retired, &a_pinned).expect("the retired root");
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.anchor", &pstr(&retired)],
+    );
+    let without = verify(&repo, &named_only, &[]);
     let all = lines(&without);
     assert_eq!(without.status.code(), Some(1), "{all:?}");
     assert!(
@@ -1302,6 +1313,10 @@ fn history_survives_a_rotation_end_to_end() {
     assert!(
         all.iter().any(|line| line.contains(&b)),
         "the root is named: {all:?}"
+    );
+    assert!(
+        all.iter().any(|line| line.contains("tsa restore")),
+        "the fix is named: {all:?}"
     );
 }
 

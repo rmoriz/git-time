@@ -83,6 +83,14 @@ anywhere and is named with the `tsa add`/`anchor fetch` steps instead. `git time
 records the fingerprints for review, and `git time anchor pin --check` catches a bundle that has
 changed since.
 
+When an authority rotates its root, `anchor fetch` refuses the new one, prints both fingerprints
+and leaves the old bundle alone. Compare the fetched value with the authority's own publication and
+repeat with `--accept` — bare for `anchor fetch`, as `<id>=<fingerprint>` for `install` and
+`tsa restore`. The root is appended next to the retired one rather than replacing it, so old
+commits keep verifying and each root only vouches inside its own validity window. The
+`time.anchors-lock` diff is then a single line to review and commit. See
+[the manual](docs/manual.md#surviving-a-tsa-rotation).
+
 ## Install from a release binary
 
 No toolchain needed. Pick the asset for your platform from

@@ -545,13 +545,36 @@ Print what would be enabled and disabled, change nothing.
 .PP
 Exits 0, 1 when a chosen anchor cannot be pinned, and 2 without a terminal,
 after three unparseable answers, or on a configuration error.
+.SS "tsa restore"
+.B git time tsa restore [ \-\-range \fIRANGE\fR ] [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ] [ \fIcommit\fR ... ]
+.PP
+Backfill the anchors a clone lacks, from the authority ids the evidence names.
+A preset is fetched and pinned when its published root is one the blocks name;
+a fetched root the blocks do not name is a rotation that needs an
+.BR \-\-accept ,
+and is otherwise reported and left unpinned.
+The signature state of every commit that named an id is printed before the
+fetch, so a reader sees which blocks were unverified when they chose.
+.PP
+An id that is not a preset carries no URL anywhere and is named with the
+.B tsa add
+and
+.B anchor fetch
+steps instead.
+.TP
+.B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
+Append a root the blocks do not name. Repeatable; a bare fingerprint is
+accepted only when one authority is in play.
+.PP
+Exits 0, 1 when a pin is refused, and 2 on a usage or configuration error.
 .SS anchor
 .B git time anchor \fIsubcommand\fR [ \fIarguments\fR ]
 .PP
 Work with pinned anchor certificates.
-The first certificate of a bundle is the trust anchor for its authority.
+Every self\-signed certificate of a bundle is a trust anchor for its authority;
+a bundle with no root is unusable.
 .SS "anchor fetch"
-.B git time anchor fetch \fIurl\fR \-\-id \fIid\fR [ \-\-insecure\-http ]
+.B git time anchor fetch \fIurl\fR \-\-id \fIid\fR [ \-\-insecure\-http ] [ \-\-accept \fIFINGERPRINT\fR ]
 .PP
 Fetch a PEM, DER or PKCS#7 bundle and pin it for
 .BR id .
@@ -561,6 +584,9 @@ working anchor intact.
 The target is the configured
 .B time.tsa.\fIid\fR.anchor
 when set, else the anchors directory.
+.PP
+A root a preset does not publish and that is not pinned yet is a rotation: the
+fetch refuses, prints both fingerprints and writes nothing.
 .TP
 .B \-\-id \fIid\fR
 The authority the bundle belongs to. Required.
@@ -569,9 +595,13 @@ The authority the bundle belongs to. Required.
 Accept a plain
 .B http://
 URL.
+.TP
+.B \-\-accept \fIFINGERPRINT\fR
+Append the fetched root, whose fingerprint the refusal printed.
+The fetch addresses one id, so the value is bare.
 .PP
-Exits 0, 1 for an unusable bundle, and 2 for a bad id, URL or configuration
-error.
+Exits 0, 1 for an unusable bundle or a refused rotation, and 2 for a bad id,
+URL or configuration error.
 A bundle for an id without a section is written and warned about as an
 orphan.
 .SS "anchor list"
@@ -594,11 +624,12 @@ Write
 .B time.anchors\-lock
 in the repository root, one
 .I id fingerprint
-line per configured authority, or compare the anchors against it.
-.TP
+line per root of every configured authority, or compare the anchors against it.
+One line per root makes a rotation a pair of lines in the diff, one removed
+and one added, instead of an in-place update of a value nobody can review..TP
 .B \-\-check
-Compare instead of writing, naming every missing, unparseable, changed and
-unrecorded id.
+Compare instead of writing, naming every missing, unparseable, added, removed
+and unrecorded id.
 .PP
 Exits 0, 1 on a mismatch, an unreadable lock or an unusable anchor, and 2 on a
 configuration error.
@@ -781,7 +812,7 @@ In the repository root, written by
 .BR "anchor pin" .
 One
 .I id fingerprint
-line per configured authority.
+line per root of every configured authority.
 .TP
 .I gitdir\fB/time\-skip
 The marker written by
@@ -859,6 +890,76 @@ Skip one commit on purpose:
 .B git time drop
 .PP
 .B git commit \-m \&"wip\&"
+.SH ROTATION
+An authority rotates when a key gets old, a root expires or one leaks.
+The history that authority already sealed must keep verifying, and a new root
+must not enter trust by itself.
+A fetch therefore keeps the old bundle and refuses a root it does not expect:
+.PP
+.nf
+.RS
+git time anchor: the root fetched for `tsa-example-net` from
+https://tsa.example.net/tsr does not match: expected \fIold\fR, got \fInew\fR;
+the bundle was not pinned and the existing anchor is untouched
+git time anchor: pass `--accept \fInew\fR` to append it next to the pinned root
+.RE
+.fi
+.PP
+Compare the fetched value with the fingerprint the authority publishes out of
+band, then repeat the command with
+.BR \-\-accept .
+.B anchor fetch
+addresses one id, so the value is bare.
+.B install
+and
+.B tsa restore
+may address several authorities and take
+.BI \-\-accept " id=fingerprint" ,
+repeatable; a bare value needs exactly one authority in play.
+.PP
+The accepted root is appended ahead of the retired one, never written over it.
+Each root only vouches for tokens inside its own validity window, and the
+verifier intersects the pinned roots with the fingerprints the block names, so
+a new root never blesses an old token and an old root never vouches for a new
+one.
+The block names the roots that were valid at the token's genTime and is covered
+by the commit signature.
+.PP
+The append adds one line per root to
+.BR time.anchors\-lock .
+Review the diff and commit it with the rotation: it is the record of the
+decision.
+.B anchor pin \-\-check
+reports the same change as an
+.B added
+line and exits 1 until the lock is updated, which is what makes a rotation
+visible in CI.
+.PP
+.B doctor
+names a rotation twice:
+.B "has no root valid now"
+on an anchor whose every pinned root has expired, and a fingerprint the commit
+at HEAD names but this machine has not pinned.
+Both lines carry the command that brings the root.
+.PP
+On a clone that lacks the root,
+.B verify
+reports UNTRUSTED with
+.B anchor\-not\-pinned
+and points at
+.BR "tsa restore" ,
+which reads the ids and named roots out of the evidence and takes the new root
+only with an
+.BR \-\-accept .
+.PP
+An older
+.B git\-time
+still decodes the block: it ignores the
+.B X\-RFC3161\-Anchor
+line and judges the token against the first certificate of the bundle.
+Old evidence keeps verifying there while the retired root is still first; a
+commit sealed later under the new root is UNTRUSTED on that reader.
+That is the state before this feature, and upgrading the reader is the fix.
 .SH "SECURITY CONSIDERATIONS"
 The pinned anchors are the trust store.
 A token is only as good as the bundle pinned under its id, so pin deliberately

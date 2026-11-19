@@ -133,7 +133,7 @@ The same evidence as one line per commit: short oid, TSA ids, genTimes, verdict.
 not a judgement: it exits `0` whenever it could read everything, and `1` only for a commit it could
 not read. `--json` carries no `pass`, `gates` or `required`.
 
-### `git time install [--no-tsa]`
+### `git time install [--no-tsa] [--accept <id>=<fingerprint>]`
 
 Wire the hooks. `post-commit` and `post-merge` are always wired; `pre-commit` and
 `pre-merge-commit` only under `time.gate = pre-commit`. A foreign hook is preserved as
@@ -145,6 +145,10 @@ exist, `install` hands over to `git time tsa select` inline on a terminal. A std
 terminal is refused with exit `2` and one line naming the three scriptable routes — `git time tsa
 select`, `git time tsa preset add <id>`, `git time tsa add <url>` — because a prompt nobody answers
 would hang a script. `--no-tsa` writes no authority at all.
+
+A rotation is refused unless `--accept <id>=<fingerprint>` names the fetched root; `install` pins
+several authorities, so the flag is per id and repeatable, and a bare fingerprint is accepted only
+when the run pins exactly one authority. See [Surviving a TSA rotation](#surviving-a-tsa-rotation).
 
 A fetch that fails is a warning, not a failure; `doctor` names the gap, and under `time.gate =
 pre-commit` the summary says commits will be refused. Exits `0` or `2`.
@@ -325,7 +329,7 @@ hang. `--interactive` says the answer is being piped. There are three routes tha
 `git time tsa select` on a terminal, `git time tsa preset add <id>` for one preset, and `git time
 tsa add <url>` for an endpoint of your own.
 
-### `git time anchor fetch <url> --id ID [--insecure-http]`
+### `git time anchor fetch <url> --id ID [--insecure-http] [--accept FINGERPRINT]`
 
 Fetch a bundle and pin it for `ID`. The body is read as PEM, DER or PKCS#7 — a CA's download is
 often the latter two — and when `ID` is a preset, that preset's chain of issuers is fetched and
@@ -334,15 +338,76 @@ never destroys a working anchor. It writes the configured `time.tsa.<id>.anchor`
 (the file the policy reads), else the anchors directory. Exits `0`, `1` for an unusable bundle, `2`
 for a bad id, URL or config.
 
+A root that is neither published by a preset nor already pinned is a rotation: the fetch refuses,
+prints both fingerprints and changes nothing. `--accept` takes the fetched root's bare fingerprint
+(the fetch addresses one id) and appends it next to the retired one.
+
 ### `git time anchor list [--json]`
 
 Name each configured anchor with its SHA-256 fingerprint and `notAfter`. Exits `0` or `2`.
 
 ### `git time anchor pin [--check]`
 
-Write `time.anchors-lock`, one `<id> <sha256>` line per configured authority, or compare the
-anchors against it and name every missing, unparseable, changed and unrecorded id. Exits `0`, `1`
-on a mismatch or an unusable anchor, `2` on config errors.
+Write `time.anchors-lock`, one `<id> <sha256>` line per root of every configured authority, or
+compare the anchors against it and name every missing, unparseable, added, removed and unrecorded
+id. Exits `0`, `1` on a mismatch or an unusable anchor, `2` on config errors.
+
+## Surviving a TSA rotation
+
+An authority rotates when a key gets old, a root expires or one leaks. The rotation must not cost
+the history that authority already sealed, and it must not enter trust by itself: a fetch keeps the
+old bundle and refuses a root it does not expect.
+
+The refusal names both values and the way out:
+
+```console
+$ git time anchor fetch https://tsa.example.net/tsr --id tsa-example-net
+git time anchor: the root fetched for `tsa-example-net` from https://tsa.example.net/tsr does not
+match: expected F1:C6:…:9A, got 01:0A:…:00; the bundle was not pinned and the existing anchor is
+untouched
+git time anchor: pass `--accept 01:0A:…:00` to append it next to the pinned root
+```
+
+Compare the `got` value with the fingerprint the authority publishes out of band. When it is the
+one you expect, repeat the command with the flag. `anchor fetch` addresses one id, so its `--accept`
+takes the bare fingerprint. `install` and `tsa restore` can address several authorities at once and
+take `--accept <id>=<fingerprint>`, repeatable; a bare value is accepted only when exactly one
+authority is in play, and otherwise the ids are named.
+
+The accepted root is **appended** ahead of the retired one, never written over it. Old tokens keep
+chaining to the root that signed them, and each root only vouches for tokens inside its own
+validity window. Verification intersects the pinned roots with the fingerprints the commit's block
+names, so a new root never blesses an old token and an old root never vouches for a new one. The
+block line (`X-RFC3161-Anchor`) is covered by the commit signature and names the roots valid at the
+token's `genTime`.
+
+The append changes `time.anchors-lock`, one line per root. Review it and commit it with the
+rotation: the diff is the record of the decision and what later reviewers see.
+
+```diff
+  tsa-example-net f1c6c6fe6969cfb65118326f162c3f25886f493e9e8186599cf233bcaade129a
++ tsa-example-net 010a2d31e7873a9d92dadb7f9a7a5b03ddfdafa6eef32defbd4508594e4b700
+```
+
+`git time anchor pin --check` reports the same change as an `added` line per new root and exits `1`
+until the lock is updated, which is what makes a rotation visible in CI.
+
+`doctor` names a rotation twice: ``anchor <id>`` `has no root valid now` when every pinned root
+has expired — the next seal's tokens would be `UNTRUSTED` — and ``HEAD names `anchor <id>`
+fingerprint …, which is not pinned`` when the commit at HEAD was sealed under a root this machine
+does not have. Both lines carry the command that brings the root.
+
+On a clone that lacks the root, `verify` reports `UNTRUSTED` with `anchor-not-pinned`, names the
+fingerprint the block requires and points at `git time tsa restore`. `tsa restore` reads the ids and
+named roots out of the evidence, pins a preset when the fetched root is the published one, and
+otherwise reports the new root for an `--accept <id>=<fingerprint>`. Presets only: an id of your own
+is named with the `tsa add`/`anchor fetch` steps.
+
+A reader on an older `git-time` still decodes the block — the `X-RFC3161-Anchor` line is unknown to
+it and ignored — and judges the token against the first certificate of the pinned bundle. Old
+evidence therefore keeps verifying there as long as the retired root is still first; a commit
+sealed later under the new root is `UNTRUSTED` on that reader. That is the state before this
+feature: upgrade the reader rather than change the evidence.
 
 ## Operational notes
 
@@ -400,9 +465,10 @@ $ git time anchor pin --check    # in CI, or after an update
 mismatch freetsa: anchor changed
 ```
 
-`anchor fetch` replaces a bundle only after every certificate parsed, so a failed fetch leaves the
-old one in place. A changed fingerprint is not automatically wrong — but it is a change you should
-have reviewed. `git time tsa list` and `anchor list` print the current fingerprints to compare
+`anchor fetch` parses a bundle before it touches the pinned file, so a failed fetch leaves the old
+one in place. A changed root is refused until it is accepted by fingerprint; see
+[Surviving a TSA rotation](#surviving-a-tsa-rotation). Once accepted it is appended, never
+substituted. `git time tsa list` and `anchor list` print the current fingerprints to compare
 against the authority's published value out of band.
 
 ### Double signing prompt on smartcards

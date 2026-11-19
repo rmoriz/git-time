@@ -75,10 +75,11 @@ the host unless `--id` names one, and is restricted to `[a-z0-9-]`. `http://` ne
 and a duplicate id changes nothing. `tsa remove` deletes the section whole.
 
 `anchor fetch <url> --id <id>` parses a bundle into certificates before replacing the pinned
-file, so a failed or garbled fetch never destroys a working anchor. It writes the configured
-`time.tsa.<id>.anchor` path when there is one (the file the policy reads), else the anchors
-directory, and needs `--insecure-http` for a plain `http` bundle URL. `anchor pin` writes
-`time.anchors-lock` (one `<id> <sha256>` line per authority) and `--check` names changed and
+file, so a failed or garbled fetch never destroys a working anchor. A root that is neither
+published by a preset nor already pinned is refused until `--accept` names it. It writes the
+configured `time.tsa.<id>.anchor` path when there is one (the file the policy reads), else the
+anchors directory, and needs `--insecure-http` for a plain `http` bundle URL. `anchor pin` writes
+`time.anchors-lock` (one `<id> <sha256>` line per root) and `--check` names added, removed and
 unparseable ids.
 The lock is a review artifact, **not a trust store**: verification keeps judging from the pinned
 bundle, and deleting the lock changes no verdict.
@@ -96,6 +97,29 @@ it is pinned; a mismatch is refused and leaves the previous anchor alone. The pr
 are trust on first use and print the fetched fingerprint, which is the only reviewable artifact of
 the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http`; all of them share one capped warning
 line at seal time.
+
+## Surviving a root rotation (shipped)
+
+Every row is in the tree with a test; the halves were tasks 1–13 of
+`docs/superpowers/plans/2026-11-19-tsa-rotation.md` and the whole story is one scenario
+(`history_survives_a_rotation_end_to_end`, task 14: seal under A, refuse the fetch to B, accept it,
+old commit still verifies, new block names B, one line added to the lock). `docs/manual.md` has the
+operator section.
+
+| Guarantee | Where it lives | Status |
+|---|---|---|
+| the token's signed signer identifier is enforced (`ess-missing`, `ess-mismatch`, `ess-malformed`, `tsa-name`) | `git_time_core::verify::token` | shipped |
+| a bundle may carry several roots; every certificate is classified and each root is a trust anchor in file order | `AnchorStore`, `Anchor::roots` | shipped |
+| a root vouches only for tokens inside its own validity window | `roots_at`, the candidate loop | shipped |
+| a block names the roots valid at its tokens' `genTime`, inside the signed block | `X-RFC3161-Anchor`, `docs/format.md` | shipped |
+| `anchor fetch` refuses a changed root, prints both fingerprints and writes nothing | `anchor fetch` | shipped |
+| `--accept <id>=<fingerprint>` appends ahead of the retired root, deduplicated | `install`, `anchor fetch`, `tsa restore`, `tsa preset add` | shipped |
+| the lock records one line per root, so a rotation is an `added` and a `removed` line | `anchor pin`, `anchor pin --check` | shipped |
+| `doctor` names `no root valid now` and a HEAD-named root that is not pinned | `doctor` | shipped |
+| `verify --openssl` embeds the roots the block names plus all pinned intermediates, judged with `-attime` | `verify --openssl` | shipped |
+| the expiry column marks past and near dates and reads them from the local bundle | `tsa list`, `tsa select`, `tsa preset list` | shipped |
+| a preset keeps a list of published roots, so an accepted rotation is recorded at release time | `presets` | shipped |
+| the refusal vocabulary and the anchor line are specified | `docs/format.md` | shipped |
 
 ## Adoption (Task 15)
 
