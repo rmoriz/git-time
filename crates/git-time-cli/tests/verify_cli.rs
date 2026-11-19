@@ -120,8 +120,8 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// Run the binary with `args` in `dir`.
-fn run_time(dir: &Path, args: &[&str]) -> Output {
+/// Run the binary with `args` in `dir`, plus `env` on top of the insulated set.
+fn run_time_env(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut command = Command::new(BIN);
     command
         .arg("-C")
@@ -131,11 +131,17 @@ fn run_time(dir: &Path, args: &[&str]) -> Output {
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .env_remove("GIT_TIME_SKIP")
+        .envs(env.iter().copied())
         .envs(insulated_env().iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command.output().expect("runs the binary")
+}
+
+/// Run the binary with `args` in `dir`.
+fn run_time(dir: &Path, args: &[&str]) -> Output {
+    run_time_env(dir, args, &[])
 }
 
 // --- throwaway authority ------------------------------------------------
@@ -654,6 +660,68 @@ fn verify(repo: &Repo, rev: &str, extra: &[&str]) -> Output {
     run_time(repo.path(), &args)
 }
 
+/// Run the verifier with an empty `XDG_CONFIG_HOME`, the way a machine that
+/// never pinned this authority's roots would, and return the output.
+fn verify_without_anchors(repo: &Repo, rev: &str, extra: &[&str]) -> Output {
+    let xdg = TempDir::new().expect("empty XDG_CONFIG_HOME");
+    let xdg_path = pstr(xdg.path());
+    let mut args = vec!["verify"];
+    args.extend_from_slice(extra);
+    args.push(rev);
+    let output = run_time_env(repo.path(), &args, &[("XDG_CONFIG_HOME", &xdg_path)]);
+    std::mem::forget(xdg);
+    output
+}
+
+/// The fingerprint HEAD's block names for its TSA, from the block itself.
+fn named_root(repo: &Repo) -> String {
+    let object = repo.object("HEAD");
+    let line = object
+        .lines()
+        .find(|line| line.starts_with("X-RFC3161-Anchor: "))
+        .expect("the sealed block names its root");
+    let (_, fingerprint) = line
+        .split_once("; sha256=")
+        .expect("the anchor line carries a fingerprint");
+    fingerprint.to_owned()
+}
+
+/// A fingerprint nobody pinned.
+const UNPINNED: &str = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:\
+                        00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF";
+
+/// Rewrite HEAD so its block names [`UNPINNED`] instead of the root it sealed
+/// with, and return the new id. The pre-image is left alone, so only the imprint
+/// is recomputed and the changed field is the named root.
+fn rename_root(repo: &Repo) -> String {
+    let named = named_root(repo);
+    repo.rewrite("HEAD", |object| {
+        let seam = Repo::trailer_seam(object);
+        let pre_image = &object[..seam];
+        let mut lines: Vec<String> = object.lines().map(str::to_owned).collect();
+        for line in &mut lines {
+            if let Some(rest) = line.strip_prefix("X-RFC3161-Anchor: ") {
+                let (id, fingerprint) = rest
+                    .strip_prefix("id=")
+                    .expect("the anchor line names its id")
+                    .split_once("; sha256=")
+                    .expect("the anchor value carries a fingerprint");
+                assert_eq!(fingerprint, named, "the block names its sealing root");
+                *line = format!("X-RFC3161-Anchor: id={id}; sha256={UNPINNED}");
+            }
+        }
+        let imprint = hex(&Sha256::digest(pre_image.as_bytes()));
+        for line in &mut lines {
+            if line.starts_with("X-RFC3161-Imprint: ") {
+                *line = format!("X-RFC3161-Imprint: sha256:{imprint}");
+            }
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    })
+}
+
 /// The human lines of a verify run, stdout first and stderr appended.
 fn lines(output: &Output) -> Vec<String> {
     let mut all: Vec<String> = text(&output.stdout).lines().map(str::to_owned).collect();
@@ -928,6 +996,139 @@ fn a_missing_anchor_is_untrusted() {
     assert!(
         all.iter().any(|line| line.contains("untrusted")),
         "the reason is named: {all:?}"
+    );
+    // Nothing pinned at all is not the same as a named root gone missing, so the
+    // restore hint stays off.
+    assert!(
+        !all.iter().any(|line| line.contains("tsa restore")),
+        "{all:?}"
+    );
+}
+
+/// A block naming a root this machine has not pinned is untrusted, names the
+/// root, and points at the command that brings it.
+#[test]
+fn a_block_naming_an_unpinned_root_is_untrusted_with_a_restore_hint() {
+    let repo = Repo::new();
+    let oid = rename_root(&repo);
+
+    let output = verify_without_anchors(&repo, &oid, &[]);
+    let all = lines(&output);
+    assert_eq!(output.status.code(), Some(1), "{all:?}");
+    assert!(all[0].contains("UNTRUSTED 0/1"), "{all:?}");
+    let detail = all
+        .iter()
+        .find(|line| line.contains("anchor-not-pinned"))
+        .unwrap_or_else(|| panic!("the reason is named: {all:?}"));
+    assert!(detail.contains(UNPINNED), "the root is named: {all:?}");
+    assert!(
+        detail.contains("tsa restore"),
+        "the command is named: {all:?}"
+    );
+    assert!(
+        all.iter()
+            .any(|line| line.trim() == "`git time tsa restore` pins it"),
+        "the hint line is there: {all:?}"
+    );
+}
+
+/// The machine form carries the roots the block names, so a consumer can name
+/// them without re-reading the commit.
+#[test]
+fn json_carries_the_anchors_the_block_names() {
+    let repo = Repo::new();
+    let oid = rename_root(&repo);
+
+    let evidence = json_commits(&verify_without_anchors(&repo, &oid, &["--json"]));
+    assert_eq!(evidence[0]["verdict"], "untrusted", "{evidence:?}");
+    assert_eq!(
+        evidence[0]["per_tsa"][0]["anchors"],
+        json!([UNPINNED]),
+        "{evidence:?}"
+    );
+
+    // `log` reports the same evidence, so it carries the field too.
+    let xdg = TempDir::new().expect("empty XDG_CONFIG_HOME");
+    let xdg_path = pstr(xdg.path());
+    let logged = run_time_env(
+        repo.path(),
+        &["log", "--json", &oid],
+        &[("XDG_CONFIG_HOME", &xdg_path)],
+    );
+    let evidence = json_commits(&logged);
+    assert_eq!(
+        evidence[0]["per_tsa"][0]["anchors"],
+        json!([UNPINNED]),
+        "{evidence:?}"
+    );
+}
+
+/// `anchors` is there even when the block names none: an empty array, not a
+/// missing key, so a consumer needs no absence check.
+#[test]
+fn json_anchors_is_empty_when_the_block_names_none() {
+    let repo = Repo::new();
+    repo.drop_anchor();
+    let oid = repo.rewrite("HEAD", |object| {
+        let seam = Repo::trailer_seam(object);
+        let pre_image = &object[..seam];
+        let mut lines: Vec<String> = object
+            .lines()
+            .filter(|line| !line.starts_with("X-RFC3161-Anchor: "))
+            .map(str::to_owned)
+            .collect();
+        let imprint = hex(&Sha256::digest(pre_image.as_bytes()));
+        for line in &mut lines {
+            if line.starts_with("X-RFC3161-Imprint: ") {
+                *line = format!("X-RFC3161-Imprint: sha256:{imprint}");
+            }
+        }
+        let mut text = lines.join("\n");
+        text.push('\n');
+        text
+    });
+
+    let evidence = json_commits(&verify_without_anchors(&repo, &oid, &["--json"]));
+    assert_eq!(evidence[0]["verdict"], "untrusted", "{evidence:?}");
+    assert_eq!(
+        evidence[0]["per_tsa"][0]["anchors"],
+        json!([]),
+        "{evidence:?}"
+    );
+}
+
+/// A token older than every pinned root names the fetch hint: the fix is to
+/// fetch the authority's current bundle, not to restore a root the block names.
+#[test]
+fn a_token_older_than_every_pinned_root_names_the_fetch_hint() {
+    let repo = Repo::new();
+    let oid = repo.head();
+    // A root minted after the token's genTime: validity starts at a whole
+    // second, so wait for the next one before minting it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("after the epoch");
+    std::thread::sleep(std::time::Duration::from_nanos(u64::from(
+        1_000_000_000 - now.subsec_nanos(),
+    )));
+    let later = Authority::new();
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.anchor", &pstr(&later.bundle())],
+    );
+
+    let output = verify_without_anchors(&repo, &oid, &[]);
+    let all = lines(&output);
+    assert_eq!(output.status.code(), Some(1), "{all:?}");
+    assert!(all[0].contains("UNTRUSTED 0/1"), "{all:?}");
+    assert!(
+        all.iter().any(|line| line.contains("no pinned root")),
+        "the reason is named: {all:?}"
+    );
+    assert!(
+        all.iter().any(|line| line.trim()
+            == "run `git time anchor fetch` and accept the root that is valid now"),
+        "the hint line is there: {all:?}"
     );
 }
 

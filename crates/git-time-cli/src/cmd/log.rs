@@ -118,6 +118,7 @@ fn entry_json(evidence: &CommitEvidence) -> Value {
                 "detail": tsa.detail,
                 "serial": tsa.serial,
                 "anchor": tsa.anchor,
+                "anchors": tsa.anchors,
             }))
             .collect::<Vec<_>>(),
         "warnings": evidence.warnings,

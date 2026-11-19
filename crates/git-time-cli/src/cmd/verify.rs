@@ -1,10 +1,13 @@
 //! `git time verify`: judge the evidence of commits.
 //!
 //! One line per commit — `PASS`/`FAIL`, the short oid, the verdict and the
-//! verified quorum — and, for a failure, one indented line per TSA answer.
+//! verified quorum — and, for a failure, one indented line per TSA answer. A
+//! trust refusal adds one line naming the command that brings the missing root:
+//! `anchor-not-pinned` says to restore it, `no-root-at-gen-time` to fetch the
+//! authority's current bundle. Nothing is run for it; the hint is text.
 //! Warnings are indented lines too, on a PASS as well, because they are the
 //! reason to look twice. `--json` prints the same findings as one document
-//! instead.
+//! instead, with the roots each block names.
 //!
 //! Read-only apart from the signature check: `sigcheck::verify` writes the
 //! checked commit back into the object database with `hash-object -w`, so a
@@ -29,7 +32,7 @@
 use git_time_core::object::PreImage;
 use git_time_core::policy::Policy;
 use git_time_core::store;
-use git_time_core::verify::{CommitEvidence, SignatureStatus, Verdict, commit};
+use git_time_core::verify::{CommitEvidence, Invalid, SignatureStatus, Verdict, commit};
 use serde_json::{Value, json};
 
 use crate::cmd::{Exit, open, short};
@@ -601,6 +604,25 @@ fn print_human(evidence: &CommitEvidence, require: &Require, required: usize) {
              `git time tsa restore` pins the authorities older commits name"
         );
     }
+    // A trust refusal is the only failure with a next step, and the two reasons
+    // have different ones: a root the block names is fetched back, a root that
+    // is simply too old is replaced. Printed once per record, not per token: a
+    // commit with three unnamed roots gets the hint once. The hint only names
+    // the command; nothing here runs it.
+    if evidence
+        .per_tsa
+        .iter()
+        .any(|tsa| tsa.verdict == Invalid::AnchorNotPinned.as_str())
+    {
+        println!("  `git time tsa restore` pins it");
+    }
+    if evidence
+        .per_tsa
+        .iter()
+        .any(|tsa| tsa.verdict == Invalid::NoRootAtGenTime.as_str())
+    {
+        println!("  run `git time anchor fetch` and accept the root that is valid now");
+    }
     if !pass {
         for gate in require.failing(evidence) {
             println!("  gate {gate}: {}", gate_reason(gate));
@@ -674,6 +696,7 @@ fn commit_json(
                 "detail": tsa.detail,
                 "serial": tsa.serial,
                 "anchor": tsa.anchor,
+                "anchors": tsa.anchors,
             }))
             .collect::<Vec<_>>(),
         "warnings": evidence.warnings,
