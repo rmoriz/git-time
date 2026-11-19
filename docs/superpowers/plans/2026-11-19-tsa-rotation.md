@@ -52,7 +52,7 @@ RFC 3161 §2.4.2 requires a signed `SigningCertificate` attribute; RFC 5816 §2.
   - `fn tsa_name(tsa: Option<&GeneralName>, signer: &Certificate) -> Result<(), Invalid>`
   - `Parsed.attributes: Attributes`; `Tst.tsa: Option<GeneralName>`; `parse` refuses `signer_infos.len() != 1` with `Invalid::Malformed`
 
-- [ ] **Step 1: Write the failing unit tests** in the `mod tests` of `token.rs`
+- [x] **Step 1: Write the failing unit tests** in the `mod tests` of `token.rs`
 
 Two builders beside `certificate_with_eku`, using `der::Sequence` structs that are also used for decoding:
 
@@ -89,7 +89,7 @@ fn ess(oid: ObjectIdentifier, certificate: &Certificate, algorithm: Option<&str>
 
 `tsa_name` tests: `None` → `Ok`; the signer's own subject DN → `Ok`; another DN → `TsaName`; a `dNSName` present in the signer's SAN → `Ok`; a `dNSName` absent from it → `TsaName`.
 
-- [ ] **Step 2: Two wiring tests** in `tests/verify_token.rs`, and a helper fix
+- [x] **Step 2: Two wiring tests** in `tests/verify_token.rs`, and a helper fix
 
 The throwaway tokens reuse the FreeTSA fixture's TSTInfo, so they carry FreeTSA's `tsa` DN under a throwaway signer and would now be `TsaName`. Add `fn remove_tsa(tst: &mut Vec<u8>)` beside the genTime rewrite: the fixture's `tsa` is the final field (`0xa0`, long form: `a0 82 01 13 a4 82 01 0f …`), so take the bytes before it, drop the old `30` header, and prepend a freshly encoded `SEQUENCE` header (`der::Length::encode`) instead of patching length digits. Anything after the `[0]` field — extensions in some replies — is informational and goes with it. The fixture token itself keeps its `tsa` and is the positive case; `genuine_token_with_pinned_root_is_valid` must stay green.
 
@@ -106,12 +106,12 @@ fn a_flipped_cert_hash_is_ess_mismatch_not_a_signature_error() {
 }
 ```
 
-- [ ] **Step 3: Run, expect failures**
+- [x] **Step 3: Run, expect failures**
 
 Run: `cargo test --offline -p git-time-core --test verify_token -- signer_identifier flipped_cert_hash`
 Expected: FAIL to compile (`EssMissing` and friends missing).
 
-- [ ] **Step 4: Implement**
+- [x] **Step 4: Implement**
 
 Add `-cades` to the sign invocation in `throwaway_tsa_token_under` and say why in the module docs. Add the OIDs, the variants and their `as_str` strings, and the two functions:
 
@@ -121,7 +121,7 @@ Add `-cades` to the sign invocation in `throwaway_tsa_token_under` and say why i
 - `authenticate`: `signer_identification(&self.attributes, &self.signer)` and `tsa_name(self.tst.tsa.as_ref(), &self.signer)` before `verify_signature`, so the identifier is judged before the bytes it names are trusted and the patched-token test sees its own reason.
 - `commit.rs::judge_tokens`: one `detail` sentence per new reason, ahead of the anchor fallback (`the token carries no ESS signer identifier`, `the ESS signer identifier names another certificate`, `the ESS signer identifier is malformed`, `the TSTInfo tsa name is not the signer's subject`).
 
-- [ ] **Step 5: Run the whole core suite, then commit**
+- [x] **Step 5: Run the whole core suite, then commit**
 
 Run: `cargo test --offline -p git-time-core`
 Expected: PASS.
@@ -154,7 +154,7 @@ a different certificate, was the fail-open corner of the verifier."
   - `Anchor::roots_at(&self, at: jiff::Timestamp) -> Vec<&DerCertificate>`
   - `is_self_signed(certificate: &x509_cert::Certificate) -> bool` (issuer == subject, DER compared via `to_der`).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/git-time-core/tests/verify_token.rs`:
 
@@ -200,23 +200,23 @@ fn roots_at_respects_the_boundaries() {
 }
 ```
 
-- [ ] **Step 2: Run them, expect `no method named append` / field `root` errors**
+- [x] **Step 2: Run them, expect `no method named append` / field `root` errors**
 
 Run: `cargo test --offline -p git-time-core --test verify_token -- a_bundle_starting appending_keeps roots_at`
 Expected: FAIL to compile.
 
-- [ ] **Step 3: Change `Anchor`, `insert`, add `append`/`roots_at`/`is_self_signed`**
+- [x] **Step 3: Change `Anchor`, `insert`, add `append`/`roots_at`/`is_self_signed`**
 
 `insert` becomes: read the bundle, `partition` by `is_self_signed`, error `NoRoot` when the root list is empty (path and id in the error), store it. `append` does the same, then extends the existing `Anchor` skipping DERs already in `roots`/`intermediates`, and returns the count of newly added roots. `roots_at` parses each root with `x509_cert::Certificate::from_der` (`at` as `UnixTime` seconds), keeps `not_before <= at <= not_after`, and returns them in bundle order.
 
 Detail: `TrustError` gains a `NoRoot` variant with the same `Display` style as `Empty`; `read_bundle`'s "first block is the root" contract moves to `insert`/`append`.
 
-- [ ] **Step 4: Run the three tests, then the whole core suite**
+- [x] **Step 4: Run the three tests, then the whole core suite**
 
 Run: `cargo test --offline -p git-time-core`
 Expected: PASS. Call sites of `anchor.root` (`verify/token.rs`, `verify/commit.rs`, `doctor.rs`) are expected to break; fix only those by taking `roots[0]` so the workspace builds — the candidate filter is Task 4.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/git-time-core/src/trust.rs crates/git-time-core/tests/verify_token.rs
@@ -241,7 +241,7 @@ between old and new evidence."
 - Consumes: nothing new.
 - Produces: `pub anchors: BTreeMap<String, Vec<String>>` on `TrailerBlock`; line form `X-RFC3161-Anchor: id=<id>; sha256=<FP>[,<FP>...]`, rendered after `Object` and before the first `Token`.
 
-- [ ] **Step 1: Write the failing tests** in `crates/git-time-core/tests/store.rs`
+- [x] **Step 1: Write the failing tests** in `crates/git-time-core/tests/store.rs`
 
 ```rust
 #[test]
@@ -267,23 +267,23 @@ fn anchor_fingerprints_must_be_sha256_hex() {
 }
 ```
 
-- [ ] **Step 2: Run, expect missing field errors**
+- [x] **Step 2: Run, expect missing field errors**
 
 Run: `cargo test --offline -p git-time-core --test store`
 Expected: FAIL to compile.
 
-- [ ] **Step 3: Implement field, render and decode**
+- [x] **Step 3: Implement field, render and decode**
 
 Parse `id=` and `sha256=` with the existing `take`/`require` helpers; split the fingerprint value on `,`; each part must be 32 colon-separated hex octets (accept both cases, normalize to upper case). Reject: unknown key order, missing id, duplicate id, id not in `tokens ∪ failures`, empty part. Render one line per id from the `BTreeMap`, each id once.
 
 Fill the field at every `TrailerBlock { .. }` literal (`seal.rs`, `commit.rs` tests, `store.rs` tests) with `BTreeMap::new()` for now.
 
-- [ ] **Step 4: Run the store suite and the workspace build**
+- [x] **Step 4: Run the store suite and the workspace build**
 
 Run: `cargo test --offline -p git-time-core --test store`, then `cargo build --offline`
 Expected: PASS / builds.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -310,7 +310,7 @@ it keeps a swapped bundle from silently re-pointing history."
   - `pub fn token(record, imprint, gen_time_range, anchors, named: &[String]) -> TokenVerdict` (both invalid variants are `Untrusted`-family: extend the counting).
   - `TsaEvidence.anchors: Vec<String>` (the fingerprints the block named for that id).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Helper change first: `throwaway_tsa_token_under` (line 635) gains a `stamp: Option<&str>` argument placed before `intermediate`; when it is `Some`, use that 15-character `YYYYMMDDhhmmssZ` instead of now at the existing rewrite site (line ~796). The three existing wrappers pass `None`. Then a wrapper `fn throwaway_tsa_token_stamped_at(dir: &Path, stamp: &str) -> (Vec<u8>, PathBuf)` calls it with `Some(stamp)`. The CA is minted with `-days 2`, so a 2050 stamp is outside its window.
 
@@ -362,12 +362,12 @@ fn a_named_root_that_matches_still_verifies() {
 }
 ```
 
-- [ ] **Step 2: Run, expect failures**
+- [x] **Step 2: Run, expect failures**
 
 Run: `cargo test --offline -p git-time-core --test verify_token -- a_token_signed_before a_named_root_that`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement the candidate filter**
+- [x] **Step 3: Implement the candidate filter**
 
 In `token()`: after the imprint/policy checks, compute `candidates = anchor.roots_at(parsed.tst.gen_time)`; if `candidates.is_empty()` return `NoRootAtGenTime`. Then, when `!named.is_empty()`, compare `crate::trust::fingerprint(candidate.as_bytes())` against `named` (case-insensitive) and keep matches; if none, return `AnchorNotPinned`.
 
@@ -375,12 +375,12 @@ In `token()`: after the imprint/policy checks, compute `candidates = anchor.root
 
 In `commit.rs::judge_tokens`: pass `block.anchors.get(&record.id).map(Vec::as_slice).unwrap_or_default()`, set `TsaEvidence.anchors` from the same slice, and count `Invalid::AnchorNotPinned` and `Invalid::NoRootAtGenTime` as `untrusted` for the verdict. Extend each invalid's detail: unpinned-named → ``the block names anchor <fp>, which is not pinned; `git time tsa restore` fetches it``; no-window → `no pinned root for `<id>` is valid at the token's genTime`.
 
-- [ ] **Step 4: Run the core suite**
+- [x] **Step 4: Run the core suite**
 
 Run: `cargo test --offline -p git-time-core`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -403,7 +403,7 @@ property of the root, so it is checked before the chain is even attempted."
 - Consumes: `TokenVerdict::Valid { gen_time, .. }`, `Anchor::roots_at`, `TrailerBlock.anchors`.
 - Produces: nothing public.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -413,21 +413,21 @@ fn a_sealed_block_names_the_roots_valid_at_the_tokens_time() {
 }
 ```
 
-- [ ] **Step 2: Run, expect an empty map**
+- [x] **Step 2: Run, expect an empty map**
 
 Run: `cargo test --offline -p git-time-core --test seal -- names_the_roots`
 Expected: FAIL (`anchors["stub"]` missing).
 
-- [ ] **Step 3: Collect and write**
+- [x] **Step 3: Collect and write**
 
 While accepting a token, on `TokenVerdict::Valid { gen_time, .. }` insert into a `BTreeMap<String, BTreeSet<String>>` every `trust::fingerprint(root.as_bytes())` from `anchors.anchor(&record.id)?.roots_at(gen_time)`. Move it into the block as `BTreeMap<String, Vec<String>>` (set order). An id whose only answer failed gets no line.
 
-- [ ] **Step 4: Run the seal suite**
+- [x] **Step 4: Run the seal suite**
 
 Run: `cargo test --offline -p git-time-core --test seal`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -451,7 +451,7 @@ would name the dead one and make the fresh commit unverifiable on sight."
 - Consumes: `TsaEvidence.anchors`, `Invalid::as_str`.
 - Produces: JSON `per_tsa[].anchors: [..]`; hint lines for both reasons.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -466,21 +466,21 @@ fn json_carries_the_anchors_the_block_names() {
 }
 ```
 
-- [ ] **Step 2: Run, expect failures**
+- [x] **Step 2: Run, expect failures**
 
 Run: `cargo test --offline -p git-time-cli --test verify_cli -- a_block_naming_an_unpinned`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `print_human`: for `anchor-not-pinned`, print `  <id>: <detail>` (detail already names the fingerprint) plus a second line `` `git time tsa restore` pins it``. For `no-root-at-gen-time`, print the detail and `  run `git time anchor fetch` and accept the root that is valid now`. In the JSON evidence, add `"anchors": [..]` from `TsaEvidence.anchors`.
 
-- [ ] **Step 4: Run the verify suite**
+- [x] **Step 4: Run the verify suite**
 
 Run: `cargo test --offline -p git-time-cli --test verify_cli`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -504,7 +504,7 @@ can be exact and name the command that fixes it."
 - Consumes: existing preset table.
 - Produces: `pub fingerprints: &'static [&'static str]`; `pub fn matching_digest(expected: &str, der: &[u8]) -> String` in `install.rs` (length from the expectation, as `digest_for` does today), `pub fn fingerprint_matches(fingerprints: &[&str], der: &[u8]) -> Option<&'static str>` returning the value that matched.
 
-- [ ] **Step 1: Write the failing test** in `install.rs`
+- [x] **Step 1: Write the failing test** in `install.rs`
 
 ```rust
 #[test]
@@ -514,21 +514,21 @@ fn any_published_fingerprint_of_a_preset_accepts_the_root() {
 }
 ```
 
-- [ ] **Step 2: Run, expect `fingerprints` not found**
+- [x] **Step 2: Run, expect `fingerprints` not found**
 
 Run: `cargo test --offline -p git-time-cli --test install -- any_published`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace `fingerprint: Option<&str>` with `fingerprints: &'static [&'static str]` (`&[]` for TOFU); keep every current value as the last slice element. Every call site that used `preset.fingerprint` uses `fingerprint_matches(...)`; the TOFU path is now `fingerprints.is_empty()`. `digest_for` stays for single-value comparisons inside `matching_digest`.
 
-- [ ] **Step 4: Run install, registry and preset tests**
+- [x] **Step 4: Run install, registry and preset tests**
 
 Run: `cargo test --offline -p git-time-cli --test install --test registry`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -557,7 +557,7 @@ either a release or a spurious mismatch warning for every fetch afterwards."
   - `accept::one_or_id(values: &[String], pinned_ids: &[&str]) -> Result<BTreeMap<String, String>, String>` — resolves bare values, errors when a bare value meets more than one id.
   - `anchor fetch --accept <FINGERPRINT>`; `install --accept <ID=FINGERPRINT>` (repeatable); `tsa restore --accept <ID=FINGERPRINT>` (repeatable).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -573,12 +573,12 @@ fn a_bare_accept_on_a_two_authority_install_is_refused() { /* exit 2, names both
 fn restore_appends_a_named_root_after_accept() { /* block names the new root; restore without accept reports it, with id=fp pins it */ }
 ```
 
-- [ ] **Step 2: Run, expect unknown-argument errors**
+- [x] **Step 2: Run, expect unknown-argument errors**
 
 Run: `cargo test --offline -p git-time-cli --test install -- fetch_refuses accept_with_a_wrong a_bare_accept`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement the flow**
+- [x] **Step 3: Implement the flow**
 
 `anchor fetch`: fetch, parse; compare the root against (a) the preset's `fingerprints`, (b) the roots already in the target bundle; equal to a pinned root → overwrite the file with the fetch and print `anchor <id>: chain material updated`. New root and no pinned bundle → TOFU (print the fingerprint). New root and a pinned bundle → refuse, print expected (published or pinned, whichever applied) and found, exit 1; with `--accept <fp>`, require `fp == found`, `append`, print `anchor <id>: <n> root(s) appended, <m> now pinned`.
 
@@ -588,12 +588,12 @@ Expected: FAIL.
 
 Where nothing is pinned, `--accept` behaves as a plain pin. Never write on a mismatch a human did not confirm.
 
-- [ ] **Step 4: Run both suites**
+- [x] **Step 4: Run both suites**
 
 Run: `cargo test --offline -p git-time-cli --test install`, `cargo test --offline -p git-time-cli --test registry`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -617,7 +617,7 @@ accepted explicitly by fingerprint."
 - Consumes: the bundle's roots.
 - Produces: lock lines `<id> <fingerprint>` per root; `check` prints `added <id> <fp>` / `removed <id> <fp>`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```rust
 #[test]
@@ -626,21 +626,21 @@ fn check_reports_an_added_root_after_an_accept() {
 }
 ```
 
-- [ ] **Step 2: Run, expect `mismatch` instead of `added`**
+- [x] **Step 2: Run, expect `mismatch` instead of `added`**
 
 Run: `cargo test --offline -p git-time-cli --test registry -- added_root`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `pin` writes one line per root (sorted by id, then fingerprint). `check` builds `BTreeSet<(id, fp)>` on both sides, reports the set difference in both directions, and keeps the existing `missing`/`unparseable` messages.
 
-- [ ] **Step 4: Run the suite**
+- [x] **Step 4: Run the suite**
 
 Run: `cargo test --offline -p git-time-cli --test registry`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -663,7 +663,7 @@ are named separately now."
 - Consumes: the bundle's roots, HEAD's block.
 - Produces: two problems; the anchor report JSON gains `roots` (count) and `expired` (count).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -673,21 +673,21 @@ fn doctor_problems_no_root_valid_now() { /* stale-only bundle -> exit 1, line na
 fn doctor_problems_a_head_anchoring_an_unpinned_root() { /* HEAD's line names an absent root -> exit 1 */ }
 ```
 
-- [ ] **Step 2: Run, expect no such line**
+- [x] **Step 2: Run, expect no such line**
 
 Run: `cargo test --offline -p git-time-cli --test install -- doctor_problems`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Per configured id: count roots and how many are valid at now (`roots_at(now)`); when there are roots and none is valid, `problem`. Read HEAD's block (`store::decode` on its trailer, ignore errors) and for each id/fingerprint not pinned, `problem` with the id and fingerprint. Informational line otherwise: `anchor <id>: <n> root(s), latest notAfter <date>`.
 
-- [ ] **Step 4: Run the install suite**
+- [x] **Step 4: Run the install suite**
 
 Run: `cargo test --offline -p git-time-cli --test install`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -712,7 +712,7 @@ should be noticed in."
 
 Today the token block resolves `$candidate`/`$fallback` (a path on the generating machine) and passes that as `-CAfile`. **The embedded file becomes the source, the paths stay as fallback:** the script is a self-contained audit and must not depend on a bundle that may have rotated since.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -728,23 +728,23 @@ fn the_script_passes_attime_and_notes_when_unsupported() {
 }
 ```
 
-- [ ] **Step 2: Run, expect the second root to be embedded too**
+- [x] **Step 2: Run, expect the second root to be embedded too**
 
 Run: `cargo test --offline -p git-time-cli --test verify_cli -- embeds_only_the_root passes_attime`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `Payload.tokens` becomes `Vec<(String, String, Vec<u8>)>` — id, token DER, CAfile PEM bytes. Build the CAfile in `payload()`: take `store.anchor(id)`, keep `roots_at(gen_time)` narrowed to the block's named fingerprints for that id (all valid roots when nothing is named), PEM-encode them, then append every pinned intermediate and every intermediate the token carried (the token's own chain already reaches the verifier through the token; the pinned ones are the missing half). Emit it as `quote_heredoc(..., "anchor", pem)` next to the token heredoc, decode to `$scratch/anchor.pem` and pass that as `-CAfile`; keep `$candidate`/`$fallback` as the fallback when the decode fails.
 
 `-attime`: the probe goes next to the existing `purpose` probe in `OPENSSL_HEADER` (`openssl ts -verify -attime 1 -token_in … ` on a throwaway token, or simply `openssl version`-independent flag trial) and sets `attime=` to `-attime` or empty; when empty, `printf 'NOTE %s %s: this openssl has no -attime, validity is judged at run time\n'` and omit the flag. The flag value is the token's `genTime` in whole seconds, baked at generation time.
 
-- [ ] **Step 4: Run the suite and one live-looking run**
+- [x] **Step 4: Run the suite and one live-looking run**
 
 Run: `cargo test --offline -p git-time-cli --test verify_cli`, then `./target/debug/git-time verify --openssl HEAD | sh`
 Expected: PASS, `OK`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -766,7 +766,7 @@ it, the NOTE says the run judged at now."
 **Interfaces:**
 - Produces: `anchors::not_after(certificate: &x509_cert::Certificate) -> String` (`YYYY-MM-DD`), `anchors::expiry_label(not_after: &str, now: jiff::Timestamp) -> &'static str` (`""`, `"expired"`, `"(expires soon)"` with a 90-day horizon).
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[test]
@@ -779,21 +779,21 @@ fn preset_list_says_not_pinned_without_an_anchor() { /* empty XDG -> "not pinned
 fn json_carries_not_after() { /* tsa list --json has the date-only field */ }
 ```
 
-- [ ] **Step 2: Run, expect missing column**
+- [x] **Step 2: Run, expect missing column**
 
 Run: `cargo test --offline -p git-time-cli --test registry -- expired_root`
 Expected: FAIL.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 `tsa list`: one indented line per root `  root <fp> <YYYY-MM-DD><verdict>`; the authority line keeps its first root's date. `preset list`: date when pinned, else `not pinned`. `picker::row`: `pin <date>` / `tofu` in the trust column, `EXPIRED` when no root is valid now. `anchor list`: date-only, then `expired` marker. `doctor`: date next to the fingerprint.
 
-- [ ] **Step 4: Run both suites**
+- [x] **Step 4: Run both suites**
 
 Run: `cargo test --offline -p git-time-cli --test registry`, `cargo test --offline -p git-time-cli --test install`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -815,7 +815,7 @@ no certificate here to read."
 **Interfaces:**
 - Consumes: the codec from Task 3.
 
-- [ ] **Step 1: Add the failing document assertions**
+- [x] **Step 1: Add the failing document assertions**
 
 ```rust
 #[test]
@@ -828,21 +828,21 @@ fn the_reason_table_lists_every_new_refusal() { /* the four ESS/tsa kinds and th
 fn the_ess_rule_names_both_attributes_and_the_default() { /* §8: either attribute, sha256 default, certs[0] only */ }
 ```
 
-- [ ] **Step 2: Run, expect failures**
+- [x] **Step 2: Run, expect failures**
 
 Run: `cargo test --offline -p git-time-core --test format_doc`
 Expected: FAIL.
 
-- [ ] **Step 3: Write it**
+- [x] **Step 3: Write it**
 
 §8's existing ESS sentence stays and gains the detail (at least one of the two attributes, each present one evaluated, `certs[0]` only, `sha256` default); grammar (`Anchor: id=<TOKEN>; sha256=<FP>[,...]`, both required, id must occur in a `Token` or `Fail`), the position in §3 before `Token`, the optionality rule (absent → no filter; unknown to older readers → ignored, §9), the candidate rule (`notBefore <= genTime <= notAfter`, intersection with named), all six new values in the §3 `invalid-<kind>` list (`ess-missing`, `ess-mismatch`, `ess-malformed`, `tsa-name`, `no-root-at-gen-time`, `anchor-not-pinned`), and the appendix/fixture byte-for-byte with one `Anchor` line added.
 
-- [ ] **Step 4: Run the format suite**
+- [x] **Step 4: Run the format suite**
 
 Run: `cargo test --offline -p git-time-core --test format_doc`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -867,7 +867,7 @@ what a conflict means."
 **Interfaces:**
 - Consumes: everything above.
 
-- [ ] **Step 1: Write the failing scenario**
+- [x] **Step 1: Write the failing scenario**
 
 ```rust
 #[test]
@@ -878,21 +878,21 @@ fn history_survives_a_rotation_end_to_end() {
 }
 ```
 
-- [ ] **Step 2: Run, expect the refusal to be the current behaviour without accept**
+- [x] **Step 2: Run, expect the refusal to be the current behaviour without accept**
 
 Run: `cargo test --offline -p git-time-cli --test verify_cli -- survives_a_rotation`
 Expected: FAIL at the accept step.
 
-- [ ] **Step 3: Document it**
+- [x] **Step 3: Document it**
 
 Manual section on rotation (`--accept` forms, the lock diff, `doctor`'s lines, what an old reader sees), man page equivalents (`mandoc -Tlint` clean), README paragraph, STATUS table rows, release note.
 
-- [ ] **Step 4: Verify everything**
+- [x] **Step 4: Verify everything**
 
 Run: `cargo fmt --all && cargo clippy --offline --all-targets -q -- -D warnings && cargo test --offline && mandoc -Tlint docs/git-time.1`
 Expected: clean, 0 failed, lint 0.
 
-- [ ] **Step 5: Commit and push**
+- [x] **Step 5: Commit and push**
 
 ```bash
 git add -A
