@@ -492,10 +492,11 @@ their
 fingerprint or
 .BR tofu ,
 the newest root's expiry date, and whether the anchor is present.
-A published root that is not pinned here has no date and reads
-.BR \- ;
-so does a pinned bundle whose every root is past, which reads
-.BR EXPIRED .
+A published root that is not pinned here has no certificate to read and so no
+date, and reads
+.BR \- .
+A pinned bundle whose every root is past keeps its date and reads
+.BR "\fIdate\fR expired" .
 Exits 0.
 .PP
 .B git time tsa preset add \fIname\fR
@@ -549,7 +550,7 @@ saves when nothing was typed.
 .PP
 The \fBpin\fR column is the trust tier and shows the newest root's expiry;
 one in its last 90 days reads
-.BR "pin expires date" ,
+.BR "pin expires \fIdate\fR" ,
 a bundle whose every root is past reads
 .BR EXPIRED ,
 and a published root not pinned on this machine reads

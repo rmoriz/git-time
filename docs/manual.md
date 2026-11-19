@@ -299,7 +299,8 @@ The `pin` column is the trust tier: the root is checked against the table when i
 mismatch is a refusal. The date is the newest live root's `notAfter`; a root in its last 90 days
 reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row is due
 a rotation before the answer refuses the fetch. `pin -` is a published root that is not pinned on
-this machine yet — the state of every row on a fresh clone — and `enter` pins it. `tofu` can only be
+this machine yet — the state of every row on a machine with no anchors — and `enter` pins it.
+`tofu` can only be
 reviewed by reading the fingerprint the command prints —
 `git time anchor pin` records the pinned bundle's fingerprint in `time.anchors-lock` so a later
 change is caught. `http` marks a plain-`http` endpoint; the endpoint of the cursor row is printed in
