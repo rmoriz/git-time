@@ -83,8 +83,14 @@ unparseable ids.
 The lock is a review artifact, **not a trust store**: verification keeps judging from the pinned
 bundle, and deleting the lock changes no verdict.
 
+Anchors live on the machine, never in the repository, so a clone trusts nothing and reports every
+token `UNTRUSTED`. `tsa restore` backfills from the one part of the setup the clone still has: it
+reads the authority ids out of the evidence and pins each preset among them against the published
+root. Ids without a preset name no URL anywhere, so they are named with the `add`/`fetch` steps and
+the run fails; an id whose bundle is gone but that is still configured is pinned again by `install`.
+
 Presets live in `git_time_core::presets`; `tsa select` and `tsa preset add` write keys from that
-one table. Only `anchor fetch` and `preset add` (and a selection) touch the network, and they all
+one table. Only `anchor fetch`, `preset add`, `tsa restore` and a selection touch the network, and they all
 honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
 it is pinned; a mismatch is refused and leaves the previous anchor alone. The presets without one
 are trust on first use and print the fetched fingerprint, which is the only reviewable artifact of
@@ -152,6 +158,8 @@ explicit parameters, still fails in `webpki` (see the known gaps).
 |---|---|---|
 | everything from `post-commit` | `post-commit` **and** `post-merge` | measured: `git merge` fires `pre-merge-commit`/`post-merge`, never `post-commit` |
 | `STALE` verdict for replayed patches | `BAD-IMPRINT` | with `Object` being derived, the imprint already decides; one less verdict |
+| `--openssl` script re-derives the commit with `git` and `awk` | payload embedded: pre-image in clear, tokens base64 | it needs only `openssl`, and a reader sees exactly what is judged |
+| block without a token and without a `Fail` line is `UNDER-QUORUM` | `NONE` | nothing was asked, so no authority stayed silent; the line is said with the setup that is missing |
 | `X-RFC3161-Object` = commit oid | oid of the *timestamped bytes* (`hash-object` of the pre-image) | the input oid is not reproducible from the sealed object; this is, and makes idempotence work for signed/note commits |
 | RFC 3161 §2.3 via the library | enforced by us: critical EKU, sole purpose `timeStamping` | `webpki` ignores EKU criticality; FreeTSA’s leaf satisfies the strict reading |
 | `Required` keys seconds-only | also `10s`, `500ms` | ergonomics |

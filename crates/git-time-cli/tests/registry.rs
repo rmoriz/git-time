@@ -468,6 +468,47 @@ impl Repo {
         )
     }
 
+    /// Commit an empty change whose message names `ids` in a token trailer.
+    ///
+    /// The hook is skipped with `drop`, so the message reaches the object as
+    /// it was written: `restore` reads the ids the way a clone would.
+    fn commit_naming(&self, ids: &[&str]) {
+        let skip = self.run_time(&["drop"]);
+        assert!(skip.status.success(), "{}", text(&skip.stderr));
+        // A real block, so the id is read exactly as it is from a sealed commit
+        // without needing a TSA: the token bytes are never judged here.
+        let block = git_time_core::store::TrailerBlock {
+            imprint: git_time_core::imprint::Digest {
+                alg: git_time_core::imprint::Alg::Sha256,
+                bytes: vec![0; 32],
+            },
+            object: None,
+            tokens: ids
+                .iter()
+                .map(|id| git_time_core::store::TokenRecord {
+                    id: (*id).to_owned(),
+                    alg: git_time_core::imprint::Alg::Sha256,
+                    policy: None,
+                    nonce: vec![0; 8],
+                    token: vec![1, 2, 3],
+                })
+                .collect(),
+            failures: Vec::new(),
+            extra: Vec::new(),
+        };
+        let encoded = git_time_core::store::encode(&block, 64 * 1024).expect("encode the block");
+        let mut message = String::from("sealed elsewhere\n\n");
+        message.push_str(&String::from_utf8(encoded).expect("the block is text"));
+        message.push('\n');
+        let path = self.path().join("message.txt");
+        std::fs::write(&path, message).expect("write message");
+        git(
+            self.path(),
+            &["commit", "-q", "--allow-empty", "-F", "message.txt"],
+        );
+        std::fs::remove_file(&path).expect("remove message");
+    }
+
     fn config(&self, key: &str) -> Option<String> {
         let output = git_output(self.path(), &["config", "--local", "--get", key]);
         output
@@ -1619,4 +1660,145 @@ fn every_registry_command_refuses_outside_a_repository() {
             text(&output.stderr)
         );
     }
+}
+
+// --- restore ------------------------------------------------------------
+
+/// The evidence names the authority and the preset carries a published root, so
+/// a clone can backfill an anchor it never had without trusting the fetch.
+#[test]
+fn restore_pins_the_authority_the_evidence_names() {
+    let repo = Repo::new();
+    repo.init();
+    repo.commit_naming(&["freetsa"]);
+
+    let restored = repo.run_time_env(&["tsa", "restore"], &repo.fetch_known_root());
+    let stdout = ok(&restored);
+    assert!(
+        stdout.contains("freetsa: root fingerprint matches"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("tsa: 1 pinned"), "{stdout}");
+    assert!(
+        stdout.contains("git time anchor pin"),
+        "the fingerprints are named as unreviewed: {stdout}"
+    );
+
+    assert_eq!(
+        repo.config("time.tsa.freetsa.url").as_deref(),
+        Some("https://freetsa.org/tsr")
+    );
+    let anchor = repo
+        .config("time.tsa.freetsa.anchor")
+        .expect("the anchor path is written");
+    assert!(Path::new(&anchor).exists(), "{anchor}");
+}
+
+/// A second run fetches nothing: the authority is pinned already, so a restore
+/// over a long history costs no request for what is set up.
+#[test]
+fn restore_leaves_an_already_pinned_authority_alone() {
+    let repo = Repo::with_pinned_stub();
+    repo.commit_naming(&["stub"]);
+    let offline = [("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())];
+
+    let again = repo.run_time_env(&["tsa", "restore"], &offline);
+    let stdout = ok(&again);
+    assert!(
+        stdout.contains("1 authority(ies) already pinned"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("tsa: 0 pinned"), "{stdout}");
+    assert_eq!(text(&again.stderr), "", "nothing to warn about");
+}
+
+/// An id that is not a preset names no URL anywhere, so the fix is the two
+/// `add`/`fetch` steps — and the run is a failure, because the point of the
+/// command is a repository that verifies.
+#[test]
+fn restore_names_an_authority_that_is_not_a_preset() {
+    let repo = Repo::new();
+    repo.init();
+    repo.commit_naming(&["tsa-example"]);
+
+    let output = repo.run_time_env(&["tsa", "restore"], &repo.fetch_known_root());
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("tsa-example: not a preset"), "{stderr}");
+    assert!(
+        stderr.contains("tsa add <url> --id tsa-example"),
+        "{stderr}"
+    );
+    assert!(repo.config("time.tsa.tsa-example.url").is_none());
+}
+
+/// A root that is not the published one is not kept, and the run fails.
+#[test]
+fn restore_refuses_a_root_the_preset_does_not_publish() {
+    let repo = Repo::new();
+    repo.init();
+    repo.commit_naming(&["sectigo"]);
+
+    let output = repo.run_time_env(&["tsa", "restore"], &repo.fetch_ca());
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("sectigo: the fetched root is not the published fingerprint"),
+        "{stderr}"
+    );
+    let stdout = text(&output.stdout);
+    assert!(stdout.contains("tsa: 0 pinned, 1 refused"), "{stdout}");
+}
+
+/// History without evidence is not an error: there is nothing to backfill.
+#[test]
+fn restore_of_history_without_evidence_says_so() {
+    let repo = Repo::new();
+    repo.init();
+    repo.commit_naming(&[]);
+
+    let output = repo.run_time_env(&["tsa", "restore"], &repo.fetch_known_root());
+    let stdout = ok(&output);
+    assert!(
+        stdout.contains("the evidence names no authority"),
+        "{stdout}"
+    );
+}
+
+/// A fetch that brings no bundle leaves the pinned anchor alone and does not
+/// count as a restore: "pinned" has to mean the anchor this run asked for.
+#[test]
+fn restore_of_an_unusable_fetch_keeps_the_old_anchor_and_fails() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    // A preset id, so restore knows a URL to fetch, served by the stub.
+    repo.add_tsa("freetsa", &repo.stub_url());
+    let anchor = repo.anchors().join("freetsa.pem");
+    assert!(
+        repo.fetch_anchor("freetsa").status.success(),
+        "the anchor is pinned once"
+    );
+    // A file that does not load, so the run has to fetch rather than skip.
+    std::fs::write(&anchor, b"prose").expect("the anchor is replaced");
+    repo.commit_naming(&["freetsa"]);
+
+    let prose = [("GIT_TIME_ANCHOR_FETCH_CMD", "printf 'prose'".to_owned())];
+    let output = repo.run_time_env(&["tsa", "restore"], &prose);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("no usable bundle; the pinned anchor is unchanged"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&anchor).expect("the anchor"),
+        b"prose",
+        "the unusable file is left where doctor can name it"
+    );
+    assert!(
+        text(&output.stdout).contains("tsa: 0 pinned, 1 refused"),
+        "{}",
+        text(&output.stdout)
+    );
 }

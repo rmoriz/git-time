@@ -70,6 +70,14 @@ tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without
 `2` with those routes named rather than hanging; `--interactive` says an answer is being piped.
 `--dry-run` prints the outcome and writes nothing.
 
+Anchors are per machine, so a clone starts out trusting none of them and `verify` reports every
+token `UNTRUSTED` until they are backfilled. `git time tsa restore` reads the authority ids out of
+the evidence — the one part of the setup a clone still has — and pins each one it recognises as a
+preset, checked against that preset's published root. An id that is not a preset carries no URL
+anywhere and is named with the `tsa add`/`anchor fetch` steps instead. `git time anchor pin` then
+records the fingerprints for review, and `git time anchor pin --check` catches a bundle that has
+changed since.
+
 ## Install from a release binary
 
 No toolchain needed. Pick the asset for your platform from

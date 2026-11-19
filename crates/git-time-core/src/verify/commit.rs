@@ -189,6 +189,28 @@ pub struct CommitEvidence {
     pub warnings: Vec<String>,
 }
 
+/// The TSA ids `oid` was sealed by, in block order, without judging anything.
+///
+/// A restore path uses this: a token that will never verify without an anchor
+/// still names the authority whose anchor has to be pinned before it can. A
+/// commit with no readable block names nothing, and so does a `Fail` record's
+/// authority — it was configured when the commit was sealed.
+///
+/// # Errors
+///
+/// [`VerifyError::Repo`] when `oid` does not resolve, is not a commit, or the
+/// object database cannot be read.
+pub fn named_tsas(repo: &Repo, oid: &str) -> Result<Vec<String>, VerifyError> {
+    let (object, _raw) = repo.read_commit(oid)?;
+    let pre = object.pre_image(store::PREFIX);
+    let mut ids = Vec::new();
+    if let Block::Present(block) = block_of(repo, oid, pre.trailer.as_deref()) {
+        ids.extend(block.tokens.into_iter().map(|token| token.id));
+        ids.extend(block.failures.into_iter().map(|failure| failure.id));
+    }
+    Ok(ids)
+}
+
 /// Judge the evidence of `oid`.
 ///
 /// `anchors` is the pinned material; `policy` supplies the quorum and whether an

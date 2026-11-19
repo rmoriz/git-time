@@ -20,6 +20,7 @@
 //! sections removed. It needs a terminal unless `--interactive` says an answer
 //! is being piped; a script otherwise uses `preset add` or `add`.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 
@@ -83,6 +84,14 @@ pub enum Command {
         /// Print the selection and what would be written, change nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Pin the anchors a range's evidence names, so it can be verified here.
+    Restore {
+        /// A git rev-range. Defaults to every commit reachable from HEAD.
+        #[arg(long, value_name = "RANGE")]
+        range: Option<String>,
+        /// Commits to read on top of any range.
+        commits: Vec<String>,
     },
 }
 
@@ -153,6 +162,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
             interactive,
             dry_run,
         } => select(&repo, interactive, dry_run).await,
+        Command::Restore { range, commits } => restore(&repo, range.as_deref(), &commits).await,
     }
 }
 
@@ -387,31 +397,140 @@ async fn preset_add(repo: &Repo, name: &str) -> Exit {
             presets::names().collect::<Vec<_>>().join(", ")
         ));
     };
-    let pinned = match install::pin(repo, preset).await {
-        Ok(pinned) => pinned,
-        Err(exit) => return exit,
-    };
+    match pin_preset(repo, preset).await {
+        Ok(()) => Exit::ok(),
+        // The lines already said what failed; a refused root and a missing
+        // bundle both mean the pin did not do its job, which is the whole
+        // point of `preset add`.
+        Err(_reason) => Exit::seal(String::new()),
+    }
+}
+
+/// Pin one preset, printing what `tsa preset add` prints.
+///
+/// `Ok` means the anchor is pinned. The error is the reason it is not, for a
+/// caller — `tsa restore` — that carries on with the next id instead of
+/// stopping at the first authority the network or a fingerprint refuses.
+async fn pin_preset(repo: &Repo, preset: &'static presets::Preset) -> Result<(), String> {
+    let pinned = install::pin(repo, preset)
+        .await
+        .map_err(|exit| exit.message())?;
     println!("tsa {}: {} configured", preset.name, preset.url);
     if pinned.kept > 0 {
         println!("tsa {}: {} existing key(s) kept", preset.name, pinned.kept);
     }
-    if pinned.fingerprint_mismatch {
-        // The loud line naming both values was already said while pinning.
-        // Unlike `install`, where the hooks are still worth wiring, a one-off
-        // `preset add` exists to pin: a refused root did not do its job.
-        return Exit::seal(String::new());
+    let reason = if pinned.fingerprint_mismatch {
+        // The line naming both values was already said while pinning.
+        Some("the fetched root is not the published fingerprint".to_owned())
+    } else if pinned.unusable {
+        // What is pinned still works, but this fetch did not bring a bundle,
+        // so the anchor is not the one that was just asked for.
+        Some("the fetch brought no usable bundle; the pinned anchor is unchanged".to_owned())
+    } else {
+        pinned.missing_anchor.map(|path| {
+            format!(
+                "no anchor at {}; tokens of that authority cannot be verified until it is pinned",
+                path.display()
+            )
+        })
+    };
+    match reason {
+        Some(reason) => {
+            eprintln!("rfc3161: warning: tsa {}: {reason}", preset.name);
+            Err(reason)
+        }
+        None => Ok(()),
     }
-    if let Some(path) = pinned.missing_anchor {
+}
+
+/// Pin the anchors the evidence of `range`/`commits` names.
+///
+/// A clone has neither the `time.tsa.*` sections nor the pinned bundles — they
+/// are per-machine on purpose — so `verify` reports every token `UNTRUSTED`
+/// until they are backfilled. The ids are read straight from the blocks, which
+/// is the one place that survives the config being gone; a preset carries a
+/// published root, so the fetch is checked rather than trusted on first use.
+/// An id that is not a preset cannot be fetched without its URL and is named
+/// with the command that would configure it.
+async fn restore(repo: &Repo, range: Option<&str>, commits: &[String]) -> Exit {
+    let oids = match super::targets(repo, "tsa restore", range, commits) {
+        Ok(oids) => oids,
+        Err(exit) => return exit,
+    };
+    let configured = anchors::configured(repo).unwrap_or_default();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut todo: Vec<&'static presets::Preset> = Vec::new();
+    let mut unknown: BTreeSet<String> = BTreeSet::new();
+    let mut skips = 0_usize;
+    for oid in &oids {
+        let ids = match git_time_core::verify::named_tsas(repo, oid) {
+            Ok(ids) => ids,
+            Err(error) => return Exit::seal(format!("git time tsa restore: {oid}: {error}")),
+        };
+        for id in ids {
+            if !seen.insert(id.clone()) {
+                continue;
+            }
+            // Already pinned and loadable: nothing to do, and no fetch.
+            let pinned_here = configured
+                .iter()
+                .find(|anchor| anchor.id == id)
+                .is_some_and(|anchor| anchor.path.exists() && pinned(&id, &anchor.path));
+            if pinned_here {
+                skips += 1;
+            } else if let Some(preset) = presets::find(&id) {
+                todo.push(preset);
+            } else {
+                unknown.insert(id);
+            }
+        }
+    }
+
+    if seen.is_empty() {
+        println!("tsa: the evidence names no authority");
+        return Exit::ok();
+    }
+    if skips > 0 {
+        println!("tsa: {skips} authority(ies) already pinned");
+    }
+
+    let mut restored = 0_usize;
+    let mut refused: Vec<(&str, String)> = Vec::new();
+    for preset in &todo {
+        match pin_preset(repo, preset).await {
+            Ok(()) => restored += 1,
+            Err(reason) => refused.push((preset.name, reason)),
+        }
+    }
+    // The warning for each refusal was already said by `pin_preset`; only the
+    // count is left to say here.
+    debug_assert!(refused.iter().all(|(_, reason)| !reason.is_empty()));
+    // An id with no preset cannot be fetched: the evidence does not carry the
+    // URL, so the fix is the two `add`-then-`fetch` steps by hand.
+    for id in &unknown {
         eprintln!(
-            "rfc3161: warning: no anchor for `{}` at {}; tokens of that authority cannot be verified until it is pinned",
-            preset.name,
-            path.display()
+            "rfc3161: warning: tsa {id}: not a preset; configure it with `git time tsa add <url> \
+             --id {id} --anchor <path>` and then `git time anchor fetch <url> --id {id}`"
         );
-        // Unlike `install`, where the hooks are still worth wiring, a one-off
-        // `preset add` exists to pin: without an anchor it did not do its job.
-        return Exit::seal(String::new());
     }
-    Exit::ok()
+
+    println!(
+        "tsa: {restored} pinned, {} refused, {} without a preset, {skips} already pinned",
+        refused.len(),
+        unknown.len()
+    );
+    if restored > 0 {
+        println!(
+            "tsa: fingerprints were not reviewed; record and review them with `git time anchor pin`"
+        );
+    }
+    if refused.is_empty() && unknown.is_empty() {
+        Exit::ok()
+    } else {
+        // The point of the command is a repository that verifies, so an id the
+        // evidence names and this machine still cannot check is a failure.
+        Exit::seal(String::new())
+    }
 }
 
 /// The question the selector asks, verbatim so the transcript is stable.

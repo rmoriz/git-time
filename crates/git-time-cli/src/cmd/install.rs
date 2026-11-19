@@ -20,7 +20,8 @@
 //! exactly as they are, and an empty one hands over to `tsa select` on a
 //! terminal so `git time install` alone still ends in a working setup. A fetch
 //! that fails only warns: the hooks are still worth wiring, and `doctor` names
-//! the missing bundle. When the failure leaves an anchor path missing under the
+//! the missing bundle. A configured authority whose anchor is gone is pinned
+//! again when it is a preset. When the failure leaves an anchor path missing under the
 //! gate, the summary says loudly that commits will be refused. A fetched bundle
 //! is parsed into certificates before it replaces the pinned one, so prose
 //! cannot masquerade as an anchor. `--no-tsa` writes no authority at all.
@@ -28,6 +29,7 @@
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
+use git_time_core::presets;
 use git_time_core::presets::Preset as Authority;
 use git_time_core::repo::Repo;
 use git_time_core::trust::AnchorStore;
@@ -45,6 +47,9 @@ pub(crate) struct Pinned {
     /// Whether the fetched root was not the fingerprint the preset expects, so
     /// the bundle was left unpinned.
     pub(crate) fingerprint_mismatch: bool,
+    /// Whether the fetch brought back something that is not a bundle, so
+    /// whatever was pinned before is still the anchor.
+    pub(crate) unusable: bool,
 }
 
 /// Run `git time install`.
@@ -115,14 +120,31 @@ pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool) -> Exit {
         );
     };
     let mut kept = 0_usize;
+    let mut pinned_again = 0_usize;
     let mut unpinned: Vec<(String, PathBuf)> = Vec::new();
     let mut mismatched = 0_usize;
     // What is already configured is not fetched again, but it is still checked:
-    // an anchor path that does not load is exactly what doctor would name.
+    // an anchor path that does not load is exactly what doctor would name. A
+    // configured id whose bundle is gone — a moved home directory, a deleted
+    // anchors directory — is pinned again when it is a preset, because the
+    // published root makes that fetch checkable and a repository that names an
+    // authority in its evidence should be able to verify it here.
     if keep {
         for anchor in anchors::configured(&repo).unwrap_or_default() {
-            if !anchor.path.exists() || !crate::cmd::tsa::pinned(&anchor.id, &anchor.path) {
+            if anchor.path.exists() && crate::cmd::tsa::pinned(&anchor.id, &anchor.path) {
+                continue;
+            }
+            let Some(preset) = presets::find(&anchor.id) else {
                 unpinned.push((anchor.id, anchor.path));
+                continue;
+            };
+            match pin(&repo, preset).await {
+                Ok(pinned) if pinned.fingerprint_mismatch => mismatched += 1,
+                Ok(pinned) => match pinned.missing_anchor {
+                    Some(path) => unpinned.push((pinned.id.to_owned(), path)),
+                    None => pinned_again += 1,
+                },
+                Err(_) => unpinned.push((anchor.id, anchor.path)),
             }
         }
     }
@@ -146,7 +168,14 @@ pub async fn run(directory: Option<std::path::PathBuf>, no_tsa: bool) -> Exit {
         println!("tsa: none configured (--no-tsa)");
     } else if keep {
         let existing = anchors::configured(&repo).map_or(0, |anchors| anchors.len());
-        println!("tsa: {existing} existing authority(ies) kept");
+        println!(
+            "tsa: {existing} existing authority(ies) kept{}",
+            if pinned_again > 0 {
+                format!(" ({pinned_again} anchor(s) pinned again)")
+            } else {
+                String::new()
+            }
+        );
     } else {
         println!(
             "tsa: {} configured{}",
@@ -232,6 +261,7 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
     }
 
     let mut fingerprint_mismatch = false;
+    let mut unusable = false;
     let mut missing_anchor = None;
     match anchors::fetch_chain(authority.anchor_url, authority.chain).await {
         Ok(bytes) => match install_anchor(authority, &path, &bytes) {
@@ -278,10 +308,13 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
                     }
                 );
             }
-            Err(AnchorProblem::Unusable(reason)) => eprintln!(
-                "rfc3161: warning: the anchor of `{}` from {} is unusable: {reason}",
-                authority.name, authority.anchor_url
-            ),
+            Err(AnchorProblem::Unusable(reason)) => {
+                unusable = true;
+                eprintln!(
+                    "rfc3161: warning: the anchor of `{}` from {} is unusable: {reason}",
+                    authority.name, authority.anchor_url
+                );
+            }
         },
         Err(error) => eprintln!(
             "rfc3161: warning: cannot fetch the anchor of `{}` from {}: {error}",
@@ -296,6 +329,7 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
         kept,
         missing_anchor,
         fingerprint_mismatch,
+        unusable,
     })
 }
 

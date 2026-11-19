@@ -1521,11 +1521,53 @@ fn install_warns_about_a_missing_configured_anchor_under_the_gate() {
     let missing = repo.path().join("pinned/never-fetched.pem");
     repo.config("time.tsa.freetsa.anchor", &pstr(&missing));
 
-    let install = repo.install_presets("1", &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())]);
+    // The run itself, not the selector behind it: a configured id reaches the
+    // pin attempt straight away, so the warning has to come from there.
+    let install = repo.run_time_env(
+        &["install"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", "false".to_owned())],
+    );
     let stderr = text(&install.stderr);
     assert!(
         stderr.contains(&pstr(&missing)),
         "the warning names the configured path: {stderr}"
     );
     assert!(stderr.contains("will be refused"), "{stderr}");
+}
+
+/// A configured authority whose anchor file is gone — a moved home directory, a
+/// deleted anchors directory — is pinned again instead of only warned about,
+/// because the preset's published root makes that fetch checkable.
+#[test]
+fn a_configured_authority_without_an_anchor_is_pinned_again() {
+    let repo = Repo::blank();
+    assert!(
+        repo.install_presets("1", &repo.fetch_known_root())
+            .status
+            .success()
+    );
+    let anchor = repo.anchors().join("freetsa.pem");
+    std::fs::remove_file(&anchor).expect("the anchor is removed");
+
+    let install = repo.run_time_env(&["install"], &repo.fetch_known_root());
+    assert!(
+        install.status.success(),
+        "the anchors are not a reason to fail: {}",
+        text(&install.stderr)
+    );
+    assert!(
+        anchor.exists(),
+        "the anchor is pinned again: {}",
+        text(&install.stdout)
+    );
+    assert!(
+        text(&install.stdout).contains("1 anchor(s) pinned again"),
+        "the re-pin is reported: {}",
+        text(&install.stdout)
+    );
+    assert!(
+        text(&install.stdout).contains("root fingerprint matches"),
+        "and it was a checked fetch: {}",
+        text(&install.stdout)
+    );
 }
