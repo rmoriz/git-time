@@ -1173,7 +1173,11 @@ fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
     assert!(repo.anchors().join("freetsa.pem").exists(), "the anchor");
 
     let root = std::fs::read(freetsa_root()).expect("the fixture root");
-    let expected = fingerprint_colon(&first_der(&String::from_utf8_lossy(&root)));
+    let der = first_der(&String::from_utf8_lossy(&root));
+    // The fixture root is the one the preset publishes, and the match line
+    // names the published spelling it matched: the older SHA-1 slot, because it
+    // is listed first. Both spellings describe this root.
+    let expected = git_time_core::trust::sha1_fingerprint(&der);
     let stdout = text(&added.stdout);
     assert!(
         stdout.contains("freetsa: root fingerprint matches "),
@@ -1183,8 +1187,17 @@ fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
     assert_eq!(printed, expected, "the first certificate is fingerprinted");
     assert_eq!(
         printed.len(),
-        95,
-        "the expectation is SHA-256, so is the line"
+        59,
+        "the matched expectation is SHA-1, so is the line"
+    );
+    assert_eq!(
+        git_time_core::trust::fingerprint(&der),
+        *git_time_core::presets::find("freetsa")
+            .expect("the preset")
+            .fingerprints
+            .last()
+            .expect("the newest value"),
+        "both spellings describe the same root"
     );
 }
 
@@ -1250,7 +1263,7 @@ fn a_published_fingerprint_mismatch_is_refused() {
         assert!(stderr.contains(id), "{id} is named: {stderr}");
         assert!(stderr.contains("does not match"), "{stderr}");
         let published = git_time_core::presets::find(id)
-            .and_then(|preset| preset.fingerprint)
+            .and_then(|preset| preset.fingerprints.last().copied())
             .expect("a published root");
         assert!(stderr.contains(published), "{id}: {stderr}");
         // The fetched value is printed in the same digest length as the

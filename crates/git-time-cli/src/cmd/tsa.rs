@@ -377,8 +377,9 @@ fn preset_list(_repo: &Repo) -> Exit {
             // What `install` writes by default, and what is opt-in.
             if preset.curated { "default" } else { "opt-in" },
             // A pinned root is verifiable on the first fetch; the rest are
-            // trust on first use and say so here as well as at the pin.
-            preset.fingerprint.unwrap_or("tofu"),
+            // trust on first use and say so here as well as at the pin. After a
+            // rotation the newest value is the one shown, not the list.
+            preset.fingerprints.last().copied().unwrap_or("tofu"),
             if pinned(preset.name, &anchor) {
                 "anchored"
             } else {
@@ -588,7 +589,7 @@ fn ask() -> Result<Vec<usize>, Exit> {
             preset.name,
             preset.url,
             if preset.curated { "default" } else { "opt-in" },
-            match preset.fingerprint {
+            match preset.fingerprints.last().copied() {
                 Some(fingerprint) => format!("pinned {fingerprint}"),
                 None => "tofu".to_owned(),
             },
@@ -709,7 +710,7 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
                 "would enable {} ({}) fingerprint {}",
                 preset.name,
                 preset.url,
-                preset.fingerprint.unwrap_or("tofu")
+                preset.fingerprints.last().copied().unwrap_or("tofu")
             );
             continue;
         }
@@ -744,7 +745,7 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
                 // The spelling the preset is written in: SHA-256 where it pins
                 // one, SHA-1 for a SHA-1 pin and for trust on first use.
                 let fingerprint = crate::cmd::anchor::first_certificate_at(&anchor)
-                    .map(|der| install::digest_for(preset.fingerprint, &der))
+                    .map(|der| install::digest_for(preset.fingerprints.last().copied(), &der))
                     .unwrap_or_default();
                 println!(
                     "enabled {} ({}) fingerprint {fingerprint}",

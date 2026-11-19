@@ -6,8 +6,8 @@
 //!
 //! A preset carries where the authority is reached (`url`), where its anchor
 //! bundle is fetched from (`anchor_url`), the imprint algorithm requests ask
-//! for, the policy they request, and — where the root is known — the
-//! fingerprint that root must have.
+//! for, the policy they request, and — where the root is known — every
+//! fingerprint a published root of that authority carries.
 //!
 //! The order is deliberate: the curated default first, then the rest of the
 //! measured roots, then the one that is trust on first use. FreeTSA and DFN
@@ -20,18 +20,29 @@
 //! PKI's publication of `ECRaizEstado 002` for `cartaodecidadao`, whose own reply
 //! stops at the signing leaf. A download is read in PEM, DER or PKCS#7.
 //!
-//! # Why an expected fingerprint
+//! # Why expected fingerprints
 //!
 //! An anchor that is simply accepted as fetched is trust on first use: whatever
 //! the network hands back on the first `install` becomes the root every later
 //! verification trusts. That is fine until the first fetch is the wrong one.
 //! A fingerprint makes the first pin *verifiable* — the bundle is accepted only
-//! when its first certificate hashes to the value published for that authority,
+//! when its first certificate hashes to a value published for that authority,
 //! and a mismatch leaves the previous pin alone and says both values.
 //!
 //! Where no fingerprint is known the fetch is TOFU, so the writer prints the
 //! fetched root fingerprint prominently: that line is the only thing that makes
 //! the first pin reviewable.
+//!
+//! # A rotation is a list, newest last
+//!
+//! A root rotation leaves two legitimate values in the wild: the retired root
+//! still backs every token it signed. One slot meant either dropping the
+//! retired value — and refusing its tokens on the next fetch, under a spurious
+//! mismatch warning — or accepting only the old one. So each preset carries a
+//! list. A fetch is accepted when *any* value matches; the retired value stays
+//! until the authority no longer serves it, and the value it publishes now stays
+//! last so a display can name it without printing the whole list. An empty list
+//! is trust on first use, and a list that matches nothing is still a refusal.
 //!
 //! # Which two are the default
 //!
@@ -48,9 +59,10 @@
 //! walking the chain: the certificates of the reply, and the AIA `caIssuers`
 //! pointer where the root was not embedded. They are SHA-1 fingerprints, the
 //! form those authorities publish. Two values are SHA-256 instead: FreeTSA's
-//! (published that way) and izenpe's (supplied below). Both lengths are
-//! compared, chosen by the length of the expectation — see [`matching_digest`]
-//! in the CLI.
+//! (published that way) and izenpe's (supplied below). Each value is compared
+//! in its own length, chosen from the value — see [`matching_digest`] in the
+//! CLI — so a preset may carry both spellings of one root: `freetsa`'s SHA-1
+//! is the older slot of the very root whose SHA-256 it publishes.
 //!
 //! **Supplied, then confirmed** — `izenpe`. The value is the repository owner's
 //! and in SHA-256, because retrieving its root failed at the time; the AIA walk
@@ -91,10 +103,31 @@ pub struct Preset {
     pub alg: &'static str,
     /// The TSA policy requests ask for, when the authority has a published one.
     pub policy: Option<&'static str>,
-    /// The fingerprint the root must have, uppercase and colon separated,
-    /// when the root is known in advance: 20 octets when the authority
-    /// publishes SHA-1, 32 for FreeTSA's SHA-256. `None` is trust on first use.
-    pub fingerprint: Option<&'static str>,
+    /// Every fingerprint a published root of this authority carries, newest
+    /// last, uppercase and colon separated: 20 octets when the authority
+    /// publishes SHA-1, 32 when it publishes SHA-256. Empty is trust on first
+    /// use.
+    ///
+    /// A rotation leaves two legitimate roots in the wild, so this is a list
+    /// and a match against any entry is a match. The retired value stays so a
+    /// fetch of it is still accepted, and the newest stays last so a display
+    /// can name what the authority publishes now. Each value is compared in
+    /// the digest length it is written in, so one authority may carry both a
+    /// SHA-1 and a SHA-256 spelling.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use git_time_core::presets;
+    ///
+    /// let freetsa = presets::find("freetsa").expect("a pinned preset");
+    /// assert!(!freetsa.fingerprints.is_empty());
+    ///
+    /// // An endpoint that could not be measured is trust on first use.
+    /// let swisssign = presets::find("swisssign").expect("a tofu preset");
+    /// assert!(swisssign.fingerprints.is_empty());
+    /// ```
+    pub fingerprints: &'static [&'static str],
     /// Whether the endpoint is plain `http://` and is accepted as such.
     pub insecure_http: bool,
     /// Whether the curated default writes it.
@@ -116,9 +149,12 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: Some("1.2.3.4.1"),
-        fingerprint: Some(
+        // The same published root in both spellings: its SHA-1, and the
+        // SHA-256 FreeTSA publishes now. Newest last.
+        fingerprints: &[
+            "0B:93:07:6C:81:39:FA:2B:83:38:5F:78:28:D7:BE:75:73:40:D2:41",
             "A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC",
-        ),
+        ],
         insecure_http: false,
         curated: true,
     },
@@ -129,7 +165,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),
+        fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
         insecure_http: true,
         curated: true,
     },
@@ -142,7 +178,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("CB:73:94:4C:04:2E:53:BF:C4:57:9D:2F:71:2F:3E:EA:99:FE:43:07"),
+        fingerprints: &["CB:73:94:4C:04:2E:53:BF:C4:57:9D:2F:71:2F:3E:EA:99:FE:43:07"],
         insecure_http: false,
         curated: false,
     },
@@ -153,7 +189,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("07:E0:32:E0:20:B7:2C:3F:19:2F:06:28:A2:59:3A:19:A7:0F:06:9E"),
+        fingerprints: &["07:E0:32:E0:20:B7:2C:3F:19:2F:06:28:A2:59:3A:19:A7:0F:06:9E"],
         insecure_http: true,
         curated: false,
     },
@@ -164,9 +200,9 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some(
+        fingerprints: &[
             "8E:5B:8B:AE:DC:4D:58:BE:0E:30:1C:CC:B6:ED:17:3C:08:D7:C7:7C:E4:35:09:73:38:9F:F1:AF:A1:1D:7A:65",
-        ),
+        ],
         insecure_http: true,
         curated: false,
     },
@@ -180,7 +216,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("F4:00:42:E2:E5:F7:E8:EF:81:89:FE:D1:55:19:AE:CE:42:C3:BF:A2"),
+        fingerprints: &["F4:00:42:E2:E5:F7:E8:EF:81:89:FE:D1:55:19:AE:CE:42:C3:BF:A2"],
         insecure_http: true,
         curated: false,
     },
@@ -191,7 +227,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"),
+        fingerprints: &["13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"],
         insecure_http: true,
         curated: false,
     },
@@ -202,7 +238,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("44:4D:AE:31:5D:00:21:9C:6A:15:2F:0C:C0:2A:AE:32:3B:F9:C6:AC"),
+        fingerprints: &["44:4D:AE:31:5D:00:21:9C:6A:15:2F:0C:C0:2A:AE:32:3B:F9:C6:AC"],
         insecure_http: false,
         curated: false,
     },
@@ -216,7 +252,7 @@ pub const PRESETS: [Preset; 22] = [
         ],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("E8:9D:08:31:6C:29:D1:15:74:9A:27:ED:58:13:32:CB:0A:B4:D7:9F"),
+        fingerprints: &["E8:9D:08:31:6C:29:D1:15:74:9A:27:ED:58:13:32:CB:0A:B4:D7:9F"],
         insecure_http: true,
         curated: false,
     },
@@ -227,7 +263,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: None,
+        fingerprints: &[],
         insecure_http: true,
         curated: false,
     },
@@ -238,7 +274,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("61:1E:5B:66:2C:59:3A:08:FF:58:D1:4A:E2:24:52:D1:98:DF:6C:60"),
+        fingerprints: &["61:1E:5B:66:2C:59:3A:08:FF:58:D1:4A:E2:24:52:D1:98:DF:6C:60"],
         insecure_http: true,
         curated: false,
     },
@@ -252,7 +288,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"),
+        fingerprints: &["58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"],
         insecure_http: true,
         curated: false,
     },
@@ -266,7 +302,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"),
+        fingerprints: &["13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"],
         insecure_http: true,
         curated: false,
     },
@@ -277,7 +313,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("52:42:1A:EA:C4:24:C2:43:5E:7F:53:55:A3:04:37:A3:B1:74:58:79"),
+        fingerprints: &["52:42:1A:EA:C4:24:C2:43:5E:7F:53:55:A3:04:37:A3:B1:74:58:79"],
         insecure_http: true,
         curated: false,
     },
@@ -288,7 +324,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("BA:29:41:60:77:98:3F:F4:F3:EF:F2:31:05:3B:2E:EA:6D:4D:45:FD"),
+        fingerprints: &["BA:29:41:60:77:98:3F:F4:F3:EF:F2:31:05:3B:2E:EA:6D:4D:45:FD"],
         insecure_http: true,
         curated: false,
     },
@@ -299,7 +335,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("1B:8E:EA:57:96:29:1A:C9:39:EA:B8:0A:81:1A:73:73:C0:93:79:67"),
+        fingerprints: &["1B:8E:EA:57:96:29:1A:C9:39:EA:B8:0A:81:1A:73:73:C0:93:79:67"],
         insecure_http: true,
         curated: false,
     },
@@ -310,7 +346,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("B7:AB:33:08:D1:EA:44:77:BA:14:80:12:5A:6F:BD:A9:36:49:0C:BB"),
+        fingerprints: &["B7:AB:33:08:D1:EA:44:77:BA:14:80:12:5A:6F:BD:A9:36:49:0C:BB"],
         insecure_http: true,
         curated: false,
     },
@@ -321,7 +357,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("98:98:9F:EE:C1:6A:D7:74:61:54:15:E9:3A:96:3E:A3:EE:F5:FE:4F"),
+        fingerprints: &["98:98:9F:EE:C1:6A:D7:74:61:54:15:E9:3A:96:3E:A3:EE:F5:FE:4F"],
         insecure_http: true,
         curated: false,
     },
@@ -334,7 +370,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("E7:84:74:90:F7:11:43:FC:CE:F6:F6:5A:30:DA:1F:23:9E:0F:D7:BA"),
+        fingerprints: &["E7:84:74:90:F7:11:43:FC:CE:F6:F6:5A:30:DA:1F:23:9E:0F:D7:BA"],
         insecure_http: false,
         curated: false,
     },
@@ -347,7 +383,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("9E:79:CD:4E:A8:C2:79:08:11:D6:DA:43:ED:23:90:A6:CE:FF:35:3C"),
+        fingerprints: &["9E:79:CD:4E:A8:C2:79:08:11:D6:DA:43:ED:23:90:A6:CE:FF:35:3C"],
         insecure_http: true,
         curated: false,
     },
@@ -358,7 +394,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("88:21:9A:14:A6:A1:FF:5B:62:25:17:F7:00:1E:C3:02:C3:11:01:D7"),
+        fingerprints: &["88:21:9A:14:A6:A1:FF:5B:62:25:17:F7:00:1E:C3:02:C3:11:01:D7"],
         insecure_http: true,
         curated: false,
     },
@@ -369,7 +405,7 @@ pub const PRESETS: [Preset; 22] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprint: Some("93:05:7A:88:15:C6:4F:CE:88:2F:FA:91:16:52:28:78:BC:53:64:17"),
+        fingerprints: &["93:05:7A:88:15:C6:4F:CE:88:2F:FA:91:16:52:28:78:BC:53:64:17"],
         insecure_http: true,
         curated: false,
     },
@@ -460,33 +496,69 @@ mod tests {
     }
 
     /// Every pinned root is spelled the way it is compared: uppercase hex
-    /// octets separated by colons, 20 of them for a SHA-1 and 32 for FreeTSA's
-    /// SHA-256. A value in the wrong spelling would never match.
+    /// octets separated by colons, 20 of them for a SHA-1 and 32 for the
+    /// SHA-256 values. A value in the wrong spelling would never match. An
+    /// older slot of a rotated root may be either length; the newest one is
+    /// the length the authority publishes it in.
     #[test]
     fn every_pinned_root_has_a_well_formed_fingerprint() {
         for preset in &PRESETS {
-            let Some(fingerprint) = preset.fingerprint else {
-                continue;
-            };
-            let parts: Vec<&str> = fingerprint.split(':').collect();
-            // SHA-1 everywhere but the two SHA-256 values: FreeTSA's measured
-            // one and izenpe's supplied one.
-            let expected = if matches!(preset.name, "freetsa" | "izenpe") {
-                32
-            } else {
-                20
-            };
-            assert_eq!(parts.len(), expected, "{}: {expected} octets", preset.name);
-            for part in parts {
-                assert_eq!(part.len(), 2, "{}: two uppercase hex digits", preset.name);
+            let mut seen: Vec<&str> = Vec::new();
+            for (index, fingerprint) in preset.fingerprints.iter().enumerate() {
+                let newest = index + 1 == preset.fingerprints.len();
+                let parts: Vec<&str> = fingerprint.split(':').collect();
+                match (newest, matches!(preset.name, "freetsa" | "izenpe")) {
+                    // SHA-256 everywhere but the one SHA-1 value and the older
+                    // slot.
+                    (true, true) => {
+                        assert_eq!(parts.len(), 32, "{}: 32 octets", preset.name);
+                    }
+                    (true, false) => {
+                        assert_eq!(parts.len(), 20, "{}: 20 octets", preset.name);
+                    }
+                    (false, _) => {
+                        assert!(
+                            matches!(parts.len(), 20 | 32),
+                            "{}: an older value is a SHA-1 or a SHA-256",
+                            preset.name
+                        );
+                    }
+                }
+                for part in parts {
+                    assert_eq!(part.len(), 2, "{}: two uppercase hex digits", preset.name);
+                    assert!(
+                        part.bytes()
+                            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()),
+                        "{}: `{part}` is uppercase hex",
+                        preset.name
+                    );
+                }
                 assert!(
-                    part.bytes()
-                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()),
-                    "{}: `{part}` is uppercase hex",
+                    !seen.contains(fingerprint),
+                    "{}: {fingerprint} is listed twice",
                     preset.name
                 );
+                seen.push(fingerprint);
             }
         }
+    }
+
+    /// The one rotated preset keeps the retired spelling first and the value
+    /// the authority publishes now last, so a display can name the newest.
+    #[test]
+    fn a_rotation_keeps_the_retired_value_and_the_newest_last() {
+        let freetsa = find("freetsa").expect("the preset");
+        assert_eq!(freetsa.fingerprints.len(), 2);
+        assert_eq!(
+            freetsa.fingerprints[1].split(':').count(),
+            32,
+            "the current SHA-256 is last"
+        );
+        assert_eq!(
+            freetsa.fingerprints[0].split(':').count(),
+            20,
+            "the retired SHA-1 stays first"
+        );
     }
 
     /// Exactly one endpoint keeps no fingerprint: the one that could not be
@@ -495,14 +567,14 @@ mod tests {
     fn only_the_unmeasurable_endpoints_are_tofu() {
         let tofu: Vec<&str> = PRESETS
             .iter()
-            .filter(|preset| preset.fingerprint.is_none())
+            .filter(|preset| preset.fingerprints.is_empty())
             .map(|preset| preset.name)
             .collect();
         assert_eq!(tofu, ["swisssign"]);
 
         let pinned: Vec<&str> = PRESETS
             .iter()
-            .filter(|preset| preset.fingerprint.is_some())
+            .filter(|preset| !preset.fingerprints.is_empty())
             .map(|preset| preset.name)
             .collect();
         assert_eq!(pinned.len(), PRESETS.len() - tofu.len());

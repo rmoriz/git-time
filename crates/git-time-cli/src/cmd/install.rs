@@ -44,8 +44,8 @@ pub(crate) struct Pinned {
     pub(crate) kept: usize,
     /// Where its anchor is expected, and whether that path is now missing.
     pub(crate) missing_anchor: Option<PathBuf>,
-    /// Whether the fetched root was not the fingerprint the preset expects, so
-    /// the bundle was left unpinned.
+    /// Whether the fetched root was not one of the fingerprints the preset
+    /// publishes, so the bundle was left unpinned.
     pub(crate) fingerprint_mismatch: bool,
     /// Whether the fetch brought back something that is not a bundle, so
     /// whatever was pinned before is still the anchor.
@@ -265,11 +265,12 @@ pub(crate) async fn pin(repo: &Repo, authority: &Authority) -> Result<Pinned, Ex
     let mut missing_anchor = None;
     match anchors::fetch_chain(authority.anchor_url, authority.chain).await {
         Ok(bytes) => match install_anchor(authority, &path, &bytes) {
-            Ok(fingerprint) => {
+            Ok((published, fingerprint)) => {
                 // A pinned root is only worth something when the match is
                 // visible: the reader has to be able to see that the fetch was
-                // checked, not just that a file appeared.
-                if let Some(expected) = authority.fingerprint {
+                // checked, not just that a file appeared. The line names the
+                // published value that matched, so a rotation is visible too.
+                if let Some(expected) = published {
                     println!("{}: root fingerprint matches {expected}", authority.name);
                 } else {
                     // Trust on first use: the printed value is the only thing
@@ -350,13 +351,35 @@ pub(crate) fn digest_for(expected: Option<&str>, der: &[u8]) -> String {
     }
 }
 
+/// The digest of `der` in the length `expected` is written in.
+///
+/// Each published value is compared in its own length, so a preset may carry
+/// both a SHA-1 and a SHA-256 spelling of one root. See [`digest_for`].
+pub fn matching_digest(expected: &str, der: &[u8]) -> String {
+    digest_for(Some(expected), der)
+}
+
+/// The published fingerprint in `fingerprints` that `der` carries.
+///
+/// Returns the value that matched — not the computed digest — so a success line
+/// names what the preset actually published, and the newest value can stay last
+/// without every line naming it. An empty list (trust on first use) and a root
+/// no value describes both answer `None`: the caller decides the TOFU path, and
+/// an unmatched non-empty list stays a refusal.
+pub fn fingerprint_matches(fingerprints: &[&'static str], der: &[u8]) -> Option<&'static str> {
+    fingerprints
+        .iter()
+        .find(|expected| matching_digest(expected, der).eq_ignore_ascii_case(expected))
+        .copied()
+}
+
 /// Why a fetched bundle was not pinned.
 enum AnchorProblem {
     /// It is not a certificate bundle, or could not be written.
     Unusable(String),
-    /// Its root is not the fingerprint the preset expects.
+    /// Its root carries none of the fingerprints the preset publishes.
     Mismatch {
-        /// The fingerprint the preset pins.
+        /// The fingerprints the preset publishes.
         expected: String,
         /// The fingerprint the bundle actually carries.
         found: String,
@@ -369,15 +392,18 @@ enum AnchorProblem {
 /// [`AnchorStore::load`] accepted every certificate, so a fetch that returned
 /// prose or a truncated block leaves the previous anchor untouched.
 ///
-/// When the preset expects a root fingerprint, the first certificate — the one
-/// that would become the anchor — must carry it. A mismatch writes nothing: the
-/// previous pin, if any, survives and the path stays absent otherwise, which is
-/// exactly what `doctor` reports as a missing anchor.
+/// When the preset publishes root fingerprints, the first certificate — the one
+/// that would become the anchor — must carry one of them. A mismatch writes
+/// nothing: the previous pin, if any, survives and the path stays absent
+/// otherwise, which is exactly what `doctor` reports as a missing anchor.
+///
+/// Returns the published value that matched (if any) and the fingerprint of the
+/// fetched root in that value's length, so the caller can name the match.
 fn install_anchor(
     authority: &Authority,
     path: &Path,
     bytes: &[u8],
-) -> Result<String, AnchorProblem> {
+) -> Result<(Option<&'static str>, String), AnchorProblem> {
     let staging = path.with_extension("pem.new");
     std::fs::write(&staging, bytes).map_err(|error| {
         AnchorProblem::Unusable(format!("cannot write {}: {error}", staging.display()))
@@ -397,23 +423,28 @@ fn install_anchor(
     let der = crate::cmd::anchor::first_certificate(bytes).ok_or_else(|| {
         AnchorProblem::Unusable(format!("{} carried no certificate", path.display()))
     })?;
-    let fingerprint = digest_for(authority.fingerprint, &der);
-    if let Some(expected) = authority.fingerprint
-        && !expected.eq_ignore_ascii_case(&fingerprint)
-    {
+    let published = fingerprint_matches(authority.fingerprints, &der);
+    if !authority.fingerprints.is_empty() && published.is_none() {
         // Nothing is written at all: an expected-but-wrong root must not become
-        // the anchor merely because it parsed.
+        // the anchor merely because it parsed. `found` is spelled in the newest
+        // published length, so it is directly comparable with that value.
         let _ = std::fs::remove_file(&staging);
         return Err(AnchorProblem::Mismatch {
-            expected: expected.to_owned(),
-            found: fingerprint,
+            expected: authority.fingerprints.join(" or "),
+            found: digest_for(authority.fingerprints.last().copied(), &der),
         });
     }
+    // The match, not the preset's newest value: a retired root has to print in
+    // its own length too.
+    let fingerprint = match published {
+        Some(expected) => matching_digest(expected, &der),
+        None => digest_for(None, &der),
+    };
     std::fs::rename(&staging, path).map_err(|error| {
         let _ = std::fs::remove_file(&staging);
         AnchorProblem::Unusable(format!("cannot write {}: {error}", path.display()))
     })?;
-    Ok(fingerprint)
+    Ok((published, fingerprint))
 }
 
 /// Set one repository-local config key unless it is already set.
@@ -447,7 +478,7 @@ pub(crate) fn gate(repo: &Repo) -> Result<bool, Exit> {
 
 #[cfg(test)]
 mod tests {
-    use super::digest_for;
+    use super::{digest_for, fingerprint_matches, matching_digest};
 
     /// 95 characters: 32 upper-hex octets, colon separated.
     const SHA256: &str = "05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43:81:13:7C:5E:5F:D6:D4:70:1A:57:33:9C";
@@ -473,5 +504,42 @@ mod tests {
         let printed = digest_for(None, der);
         assert_eq!(printed.len(), 59, "{printed}");
         assert_eq!(printed, git_time_core::trust::sha1_fingerprint(der));
+    }
+
+    /// The comparison is per value, in the length that value is written in: a
+    /// preset carrying a SHA-1 and a SHA-256 spelling works for both.
+    #[test]
+    fn any_published_fingerprint_matches_and_the_match_is_named() {
+        let der = b"a certificate";
+        assert_eq!(
+            matching_digest(SHA1, der),
+            git_time_core::trust::sha1_fingerprint(der)
+        );
+        assert_eq!(
+            matching_digest(SHA256, der),
+            git_time_core::trust::fingerprint(der)
+        );
+
+        // The values have to be `'static` to be returned; a real preset owns
+        // its slice.
+        let retired: &'static str =
+            Box::leak(git_time_core::trust::sha1_fingerprint(der).into_boxed_str());
+        let current: &'static str =
+            Box::leak(git_time_core::trust::fingerprint(der).into_boxed_str());
+        assert_eq!(
+            fingerprint_matches(&[retired, current], der),
+            Some(retired),
+            "the retired value is the one named"
+        );
+        assert_eq!(
+            fingerprint_matches(&[current, retired], der),
+            Some(current),
+            "the newest value is named when it is listed first"
+        );
+
+        // An empty list is trust on first use, not a match; a non-empty list
+        // that matches nothing is a refusal the caller turns into a mismatch.
+        assert_eq!(fingerprint_matches(&[], der), None);
+        assert_eq!(fingerprint_matches(&["00:11:22"], der), None);
     }
 }

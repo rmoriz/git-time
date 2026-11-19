@@ -278,7 +278,7 @@ fn row(selection: &Selection, index: usize, preset: &Preset) -> String {
         ' '
     };
     let tick = if selection.is_chosen(index) { 'x' } else { ' ' };
-    let trust = match preset.fingerprint {
+    let trust = match preset.fingerprints.last() {
         Some(fingerprint) => format!("pin {fingerprint}"),
         None => "tofu".to_owned(),
     };
@@ -602,7 +602,7 @@ mod tests {
             chain: &[],
             alg: "sha256",
             policy: None,
-            fingerprint: Some("05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"),
+            fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
             insecure_http: true,
             curated: false,
         }

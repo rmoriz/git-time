@@ -1378,6 +1378,40 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     }
 }
 
+/// A rotation leaves two legitimate values in the wild. Fetching the retired
+/// one is a match, and the line has to name that value — not the newest.
+#[test]
+fn any_published_fingerprint_of_a_preset_accepts_the_root() {
+    let repo = Repo::new();
+    let preset = git_time_core::presets::find("freetsa").expect("the fixture preset");
+    assert!(
+        preset.fingerprints.len() >= 2,
+        "the preset carries a retired and a current value: {:?}",
+        preset.fingerprints
+    );
+    let retired = preset.fingerprints[0];
+    assert_ne!(
+        retired,
+        *preset.fingerprints.last().expect("a current value"),
+        "the retired value is not the newest"
+    );
+
+    let added = repo.run_time_env(
+        &["tsa", "preset", "add", "freetsa"],
+        &repo.fetch_known_root(),
+    );
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    let stdout = text(&added.stdout);
+    assert!(
+        stdout.contains(&format!("freetsa: root fingerprint matches {retired}")),
+        "the line names the value that matched: {stdout}"
+    );
+    assert!(
+        repo.anchors().join("freetsa.pem").exists(),
+        "the retired root is pinned"
+    );
+}
+
 #[test]
 fn install_refuses_a_root_whose_fingerprint_does_not_match() {
     let repo = Repo::blank();
@@ -1399,7 +1433,7 @@ fn install_refuses_a_root_whose_fingerprint_does_not_match() {
     let fetched = fingerprint_colon(&first_der(&ca));
     for preset in ["sectigo", "certum", "izenpe"] {
         let published = git_time_core::presets::find(preset)
-            .and_then(|preset| preset.fingerprint)
+            .and_then(|preset| preset.fingerprints.last().copied())
             .expect("a published root");
         assert!(stderr.contains(published), "{preset}: {stderr}");
     }
