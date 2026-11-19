@@ -595,7 +595,7 @@ else
         fi
     fi
     if [ -z "$anchor" ]; then
-        printf 'FAIL %s %s: no anchor pinned (looked at %s and %s)\n' "$short" "$id" "$candidate" "$fallback"
+        printf 'FAIL %s: no anchor available for %s (looked at %s and %s)\n' "$short" "$id" "$candidate" "$fallback"
         failed=$((failed+1))
     else
         if [ -n "$purpose" ]; then

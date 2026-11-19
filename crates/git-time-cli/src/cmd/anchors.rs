@@ -62,6 +62,84 @@ pub fn fingerprint(bytes: &[u8]) -> String {
         .to_ascii_lowercase()
 }
 
+/// The `notAfter` of `certificate` as `YYYY-MM-DD`.
+///
+/// The ASN.1 value renders as an RFC 3339 instant; a listing has room for the
+/// day alone, and the day is what a reader holds against their calendar.
+#[must_use]
+pub fn not_after(certificate: &Certificate) -> String {
+    certificate
+        .tbs_certificate
+        .validity
+        .not_after
+        .to_string()
+        .chars()
+        .take(10)
+        .collect()
+}
+
+/// How many days before `notAfter` a date is called soon: a rotation is not
+/// noticed in the last week, so the warning starts well ahead of it.
+const EXPIRY_SOON: i64 = 90;
+
+/// The verdict on the date `not_after` at `now`: `"expired"` once `now` is past
+/// it, `"(expires soon)"` within [`EXPIRY_SOON`] days, nothing otherwise.
+///
+/// Being a pure function of `now` keeps the clock rewindable in a test without
+/// minting an old certificate. An unparsable date has no verdict.
+#[must_use]
+pub fn expiry_label(not_after: &str, now: jiff::Timestamp) -> &'static str {
+    let Ok(date) = not_after.parse::<jiff::civil::Date>() else {
+        return "";
+    };
+    // Midnight UTC of the day: a root that expires at any hour of it is past
+    // as soon as the day is.
+    let Ok(expires) = date.at(0, 0, 0, 0).to_zoned(jiff::tz::TimeZone::UTC) else {
+        return "";
+    };
+    let expires = expires.timestamp();
+    if now > expires {
+        return "expired";
+    }
+    if expires.as_second() - now.as_second() <= EXPIRY_SOON * 86_400 {
+        return "(expires soon)";
+    }
+    ""
+}
+
+/// Whether the date `not_after` is already past at `now`.
+#[must_use]
+pub fn expired(not_after: &str, now: jiff::Timestamp) -> bool {
+    expiry_label(not_after, now) == "expired"
+}
+
+/// One root of a pinned bundle, as the listings show it.
+#[derive(Debug, Clone)]
+pub struct RootRow {
+    /// The SHA-256 fingerprint of the root.
+    pub fingerprint: String,
+    /// Its `notAfter` as `YYYY-MM-DD`.
+    pub not_after: String,
+}
+
+/// The roots of the bundle at `path`, in file order.
+///
+/// `None` when the bundle is missing, unparseable or holds no root, so a
+/// listing says `-` instead of inventing a date.
+#[must_use]
+pub fn roots(path: &Path) -> Option<Vec<RootRow>> {
+    let roots = crate::cmd::anchor::root_certificates(path)?;
+    let mut rows = Vec::with_capacity(roots.len());
+    for der in roots {
+        let certificate = Certificate::from_der(&der).ok()?;
+        rows.push(RootRow {
+            fingerprint: fingerprint(&der),
+            not_after: not_after(&certificate),
+        });
+    }
+    Some(rows)
+}
+
 /// Fetch the bundle at `url`.
 ///
 /// A GET is tried first: when it answers 2xx with a certificate — PEM, DER or a

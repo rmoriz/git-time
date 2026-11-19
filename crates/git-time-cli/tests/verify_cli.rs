@@ -1775,10 +1775,13 @@ fn name_only(repo: &Repo, rev: &str, fingerprints: &[String]) -> String {
         let mut lines: Vec<String> = object.lines().map(str::to_owned).collect();
         for line in &mut lines {
             if let Some(rest) = line.strip_prefix("X-RFC3161-Anchor: id=") {
-                let (id, _) = rest
+                let (id, tail) = rest
                     .split_once("; sha256=")
                     .expect("the anchor value carries a fingerprint");
-                *line = format!("X-RFC3161-Anchor: id={id}; sha256={listed}");
+                // Whatever follows the list is kept, so a later field does not
+                // silently disappear with the old fingerprints.
+                let (_, after) = tail.split_once(';').unwrap_or((tail, ""));
+                *line = format!("X-RFC3161-Anchor: id={id}; sha256={listed}{after}");
             }
         }
         let imprint = hex(&Sha256::digest(pre_image.as_bytes()));
@@ -1853,6 +1856,10 @@ fn the_script_embeds_only_the_root_the_token_names() {
 /// The validity check runs at the token's own genTime, not at wall clock, and
 /// an openssl whose `ts -verify` lacks `-attime` says which check it could not
 /// make instead of judging at now without a word.
+///
+/// Both branches are in the generated text either way, so what the local probe
+/// actually decides is what is asserted here, and only a capable host's run can
+/// show that the baked value is one openssl accepts.
 #[test]
 fn the_script_passes_attime_and_notes_when_unsupported() {
     if !script_tools() {
@@ -1863,38 +1870,60 @@ fn the_script_passes_attime_and_notes_when_unsupported() {
     let oid = repo.head();
     let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
 
+    // The token's own genTime, read back from the evidence: not the committer
+    // date, and not the clock of this test.
+    let evidence = json_commits(&verify(&repo, &oid, &["--json"]));
+    let gen_time = evidence[0]["per_tsa"][0]["gen_time"]
+        .as_str()
+        .expect("the evidence names the genTime");
+    let expected = gen_time
+        .parse::<jiff::Timestamp>()
+        .expect("the genTime parses")
+        .as_second();
     let baked = script
         .lines()
         .find(|line| line.starts_with("attime_value='"))
         .unwrap_or_else(|| panic!("the genTime is baked in: {script}"));
-    let seconds: i64 = baked
-        .trim_start_matches("attime_value='")
-        .trim_end_matches('\'')
-        .parse()
-        .expect("whole seconds");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("after the epoch")
-        .as_secs() as i64;
-    assert!(
-        (now - seconds).abs() < 600,
-        "the token's own genTime, not the committer date: {seconds} against {now}"
-    );
-    assert!(script.contains("openssl ts -verify -attime"), "{script}");
-    assert!(script.contains("attime=-attime"), "{script}");
-    assert!(
-        script.contains("this openssl has no -attime, validity is judged at run time"),
-        "the omission is named: {script}"
-    );
-    assert!(
-        script.contains("\"$attime\" \"$attime_value\""),
-        "the flag and its value are passed: {script}"
+    assert_eq!(
+        baked
+            .trim_start_matches("attime_value='")
+            .trim_end_matches('\''),
+        expected.to_string(),
+        "the flag value is the token's genTime"
     );
 
-    let run = run_script(&repo, &script);
-    let all = lines(&run);
-    assert_eq!(run.status.code(), Some(0), "{all:?}");
-    assert!(all.iter().any(|line| line == "OK"), "{all:?}");
+    // The same trial the script's probe runs, decided here on this host.
+    let probe = Command::new("openssl")
+        .args(["ts", "-verify", "-attime", "1"])
+        .output()
+        .expect("openssl is available");
+    let mut probe_text = text(&probe.stdout);
+    probe_text.push_str(&text(&probe.stderr));
+    let supported = !probe_text.lines().any(|line| line.starts_with("usage:"));
+    assert!(
+        script.contains("openssl ts -verify -attime"),
+        "the probe is the same trial: {script}"
+    );
+
+    if supported {
+        assert!(script.contains("attime=-attime"), "{script}");
+        let run = run_script(&repo, &script);
+        let all = lines(&run);
+        assert_eq!(run.status.code(), Some(0), "{all:?}");
+        assert!(all.iter().any(|line| line == "OK"), "{all:?}");
+        assert!(
+            !all.iter().any(|line| line.contains("no -attime")),
+            "no omission on a host that has the flag: {all:?}"
+        );
+    } else {
+        let run = run_script(&repo, &script);
+        let all = lines(&run);
+        assert!(
+            all.iter()
+                .any(|line| line.contains("no -attime, validity is judged at run time")),
+            "the omission is named when the flag is missing: {all:?}"
+        );
+    }
 }
 
 /// A signed commit is rebuilt without its `gpgsig` header: the signature is
@@ -2151,7 +2180,8 @@ fn a_token_without_an_anchor_fails_the_openssl_script() {
     let all = lines(&run);
     assert_ne!(run.status.code(), Some(0), "{all:?}");
     assert!(
-        all.iter().any(|line| line.contains("no anchor pinned")),
+        all.iter()
+            .any(|line| line.contains("no anchor available for")),
         "{all:?}"
     );
 }
