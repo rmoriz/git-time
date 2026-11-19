@@ -79,8 +79,9 @@ changed since.
 When an authority rotates its root, `anchor fetch` refuses the new one, prints both fingerprints
 and leaves the old bundle alone. Compare the fetched value with the authority's own publication and
 repeat with `--accept` — bare for `anchor fetch` and `tsa preset add`, as `<id>=<fingerprint>` for
-`install` and `tsa restore`. The root is written next to the retired one rather than replacing it,
-so current commits keep verifying both and each root only vouches inside its own validity window.
+`install` and `tsa restore`, where a bare value needs exactly one authority in play. The root is
+written next to the retired one rather than replacing it, so current commits keep verifying both
+and each root only vouches inside its own validity window.
 The sorted `time.anchors-lock` diff carries both roots and is what you review and commit. See
 [the manual](docs/manual.md#surviving-a-tsa-rotation).
 

@@ -367,11 +367,10 @@ warns when the binary is not found, and
 reports it as a problem.
 .TP
 .B \-\-accept \fIid\fR=\fIFINGERPRINT\fR
-Accept the root of a rotation. Repeatable; a bare fingerprint is taken only
-when exactly one authority is in play — configured or being written. The
-value is unused under
-.BR \-\-no\-tsa ,
-where nothing is fetched.
+Accept the root of a rotation. Repeatable. A bare fingerprint is taken
+only for one authority in play, configured or being written. Under
+.B \-\-no\-tsa
+nothing is fetched and the value is parsed but unused.
 .TP
 .B \-\-no\-tsa
 Write no authority configuration; keep whatever is configured.
@@ -636,7 +635,7 @@ Take a root the blocks do not name. Repeatable; a bare fingerprint is
 accepted only when one authority is in play.
 .TP
 .I commit ...
-Commits to read on top of any range.
+Commits to read; without a range they are the only source.
 .PP
 Exits 0, 1 when a pin is refused or an id has no preset, and 2 on a usage or
 configuration error.

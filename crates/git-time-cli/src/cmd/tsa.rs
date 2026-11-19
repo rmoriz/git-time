@@ -181,7 +181,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
         Command::Select {
             interactive,
             dry_run,
-        } => select(&repo, &[], interactive, dry_run).await,
+        } => select(&repo, &[], "git time tsa select", interactive, dry_run).await,
         Command::Restore {
             range,
             accept,
@@ -764,6 +764,7 @@ fn needs_a_terminal() -> Exit {
 pub(crate) async fn select(
     repo: &Repo,
     accept: &[String],
+    command: &str,
     _interactive: bool,
     dry_run: bool,
 ) -> Exit {
@@ -800,7 +801,7 @@ pub(crate) async fn select(
             Err(exit) => return exit,
         }
     };
-    let accept = match accepted(accept, &chosen) {
+    let accept = match accepted(accept, &chosen, command) {
         Ok(accept) => accept,
         Err(exit) => return exit,
     };
@@ -814,6 +815,7 @@ pub(crate) async fn select(
 fn accepted(
     accept: &[String],
     chosen: &[usize],
+    command: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Exit> {
     let ids: Vec<&str> = chosen
         .iter()
@@ -821,7 +823,7 @@ fn accepted(
         .map(|preset| preset.name)
         .collect();
     crate::cmd::accept::one_or_id(accept, &ids)
-        .map_err(|error| Exit::usage(format!("git time tsa select: {error}")))
+        .map_err(|error| Exit::usage(format!("{command}: {error}")))
 }
 
 /// The preset indices the configuration already enables, for the seed.
@@ -1348,14 +1350,16 @@ mod tests {
     #[test]
     fn a_bare_accept_is_read_against_the_chosen_row() {
         let bare = ["AA:BB".to_owned()];
-        let one = accepted(&bare, &[0]).expect("one chosen row names the id");
+        let one =
+            accepted(&bare, &[0], "git time tsa select").expect("one chosen row names the id");
         assert_eq!(one[presets::PRESETS[0].name], "AA:BB");
 
-        let two = accepted(&bare, &[0, 1]).expect_err("two rows are ambiguous");
+        let two =
+            accepted(&bare, &[0, 1], "git time tsa select").expect_err("two rows are ambiguous");
         assert!(two.message().contains(presets::PRESETS[0].name), "{two:?}");
 
-        let by_id =
-            accepted(&["digicert=AA:BB".to_owned()], &[2]).expect("the id is taken as given");
+        let by_id = accepted(&["digicert=AA:BB".to_owned()], &[1], "git time tsa select")
+            .expect("the id is taken as given");
         assert_eq!(by_id["digicert"], "AA:BB");
     }
 

@@ -709,14 +709,22 @@ fn run_time_stdin(
     child.wait_with_output().expect("runs the binary")
 }
 
+/// Quote `word` so `/bin/sh` reads it back as one word.
+#[cfg(not(target_os = "macos"))]
+fn sh_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', "'\\''"))
+}
+
 /// Run the binary with `input` on a pseudo-terminal, the way an interactive
 /// caller arrives.
 ///
 /// `script(1)` is what supplies the terminal: the suite's own stdin is a pipe, so
 /// the branches gated on `is_terminal` would never run otherwise. `None` when no
-/// `script` is installed, so the suite still runs where it is missing; its status
-/// is not asserted because util-linux `script` reports 0 for the child unless
-/// `-e` is given.
+/// `script` is installed, so the suite still runs where it is missing.
+///
+/// The two `script`s disagree on how the command is named — util-linux wants one
+/// `-c` line, BSD/macOS wants it positionally — and `-e` makes the child's status
+/// the exit status on both.
 fn run_time_pty(
     dir: &Path,
     xdg: &Path,
@@ -728,14 +736,19 @@ fn run_time_pty(
     // stdin and forwards it, and a pipe there can already be closed by the time
     // the picker quits on Linux (EPIPE on the tail).
     let answer = xdg.join("pty-answer");
-    std::fs::write(&answer, input).expect("writes the answer");
-    let child = Command::new("script")
-        .arg("-q")
-        .arg("/dev/null")
-        .arg(BIN)
-        .arg("-C")
-        .arg(dir)
-        .args(args)
+    std::fs::write(&answer, input).ok()?;
+    let mut script = Command::new("script");
+    script.arg("-q").arg("-e").arg("/dev/null");
+    #[cfg(target_os = "macos")]
+    script.arg(BIN).arg("-C").arg(dir).args(args);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut line: Vec<String> = vec![BIN.to_owned(), "-C".to_owned(), pstr(dir)];
+        line.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let line: Vec<String> = line.iter().map(|word| sh_quote(word)).collect();
+        script.arg("-c").arg(line.join(" "));
+    }
+    let child = script
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
@@ -744,7 +757,7 @@ fn run_time_pty(
         .env("PATH", path_env())
         .env("XDG_CONFIG_HOME", xdg)
         .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
-        .stdin(Stdio::from(std::fs::File::open(&answer).expect("opens it")))
+        .stdin(Stdio::from(std::fs::File::open(&answer).ok()?))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2341,6 +2354,36 @@ fn install_carries_its_accept_over_the_handover() {
         "{stdout}"
     );
     assert!(repo.anchors().join("freetsa.pem").exists(), "{stdout}");
+    // And the root that landed is the accepted one, not whatever was served.
+    let anchored = repo.anchors().join("freetsa.pem");
+    let accepted = value
+        .split_once('=')
+        .map(|(_, found)| found)
+        .unwrap_or_default();
+    // The digest length is the algorithm, the same rule the accept follows.
+    let alg = if accepted.len() == 95 {
+        "-sha256"
+    } else {
+        "-sha1"
+    };
+    let printed = Command::new("openssl")
+        .args([
+            "x509",
+            "-in",
+            &pstr(&anchored),
+            "-noout",
+            "-fingerprint",
+            alg,
+        ])
+        .output()
+        .expect("openssl");
+    let printed = text(&printed.stdout);
+    assert!(
+        printed
+            .to_ascii_uppercase()
+            .contains(&accepted.to_ascii_uppercase()),
+        "{printed} does not carry {accepted}"
+    );
 }
 
 #[test]

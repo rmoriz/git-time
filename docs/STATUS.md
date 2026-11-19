@@ -114,7 +114,7 @@ operator section.
 | a root vouches only for tokens inside its own validity window | `roots_at`, the candidate loop | shipped |
 | a block names the roots valid at its tokens' `genTime`, inside the signed block | `X-RFC3161-Anchor`, `docs/format.md` | shipped |
 | `anchor fetch` refuses a changed root, prints both fingerprints and writes nothing | `anchor fetch` | shipped |
-| `--accept` appends ahead of the retired root, deduplicated (bare only when one authority is in play, else `<id>=<fingerprint>`) | `install`, `anchor fetch`, `tsa restore`, `tsa preset add` | shipped |
+| `--accept` appends ahead of the retired root, deduplicated (bare only when exactly one authority is in play, else `<id>=<fingerprint>`) | `install`, `anchor fetch`, `tsa restore`, `tsa preset add` | shipped |
 | the lock records one line per root, so a rotation is an `added` and a `removed` line | `anchor pin`, `anchor pin --check` | shipped |
 | `doctor` names `no root valid now` and a HEAD-named root that is not pinned | `doctor` | shipped |
 | `verify --openssl` embeds the roots the block names plus all pinned intermediates, judged with `-attime` | `verify --openssl` | shipped |

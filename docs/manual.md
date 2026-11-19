@@ -149,8 +149,8 @@ hang a script. Of those, the first needs a terminal anyway; the other two never 
 
 A rotation is refused unless `--accept <id>=<fingerprint>` names the fetched root; `install` pins
 several authorities, so the flag is per id and repeatable, and a bare fingerprint is accepted only
-when exactly one authority is in play — configured or being written. See [Surviving a TSA
-rotation](#surviving-a-tsa-rotation).
+when exactly one authority is in play — configured or being written (`--no-tsa` parses it and then
+does not use it). See [Surviving a TSA rotation](#surviving-a-tsa-rotation).
 
 A fetch that fails is a warning, not a failure; `doctor` names the gap, and under `time.gate =
 pre-commit` the summary says commits will be refused. Exits `0`, `1` when an anchor chosen in the
@@ -343,8 +343,9 @@ and pinned when its published root is one the blocks name; a fetched root the bl
 a rotation that needs `--accept`, and is otherwise reported and left unpinned. The signature state
 of every commit that named an id is printed before the fetch, so a reader sees which blocks were
 unverified when they chose. Without `--range` and without a commit, every commit reachable from
-HEAD is read; commits given positionally are read on top of any range. An authority whose pinned
-bundle already holds a named root is skipped and the summary counts it.
+HEAD is read; a commit given positionally is the only source then, and is read on top of an
+explicit range otherwise. An authority whose pinned bundle already holds a named root is skipped
+and the summary counts it.
 
 An id that is not a preset carries no URL anywhere and is named with the `tsa add` and `anchor
 fetch` steps instead. `--accept <id>=<fingerprint>` takes a root the blocks do not name; it is
