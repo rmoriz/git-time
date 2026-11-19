@@ -294,29 +294,31 @@ fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestam
     )
 }
 
-/// The trust column: `pin <YYYY-MM-DD>` for a published root, `tofu` without
-/// one, and `EXPIRED` once none of the bundle's roots is valid at `now`.
+/// The trust column: `pin <YYYY-MM-DD>` with its verdict for a pinned root,
+/// `EXPIRED` once none of the bundle's roots is valid at `now`, `tofu` without
+/// a published root, and `pin -` for one that is not pinned here.
 ///
-/// A published root that is not pinned on this machine has no date to show and
-/// says `pin -`; the date is what a reader weighs a rotation by, so it sits
-/// where the choice is made.
+/// The local bundle is read first, because for a preset that publishes no root
+/// it is the only copy: such an authority is exactly where a hidden date hurts.
+/// The date is what a reader weighs a rotation by, so it sits where the choice
+/// is made.
 fn trust(preset: &Preset, roots: Option<&[anchors::RootRow]>, now: jiff::Timestamp) -> String {
+    if let Some(roots) = roots.filter(|roots| !roots.is_empty()) {
+        if roots
+            .iter()
+            .all(|root| anchors::expired(&root.not_after, now))
+        {
+            return "EXPIRED".to_owned();
+        }
+        if let Some(root) = roots.last() {
+            return format!("pin {}", anchors::expiry_text(&root.not_after, now));
+        }
+    }
     if preset.fingerprints.is_empty() {
-        return "tofu".to_owned();
+        "tofu".to_owned()
+    } else {
+        "pin -".to_owned()
     }
-    let Some(roots) = roots.filter(|roots| !roots.is_empty()) else {
-        return "pin -".to_owned();
-    };
-    if roots
-        .iter()
-        .all(|root| anchors::expired(&root.not_after, now))
-    {
-        return "EXPIRED".to_owned();
-    }
-    roots.first().map_or_else(
-        || "pin -".to_owned(),
-        |root| format!("pin {}", root.not_after),
-    )
 }
 
 /// `text` cut to `width` characters, with `…` when it had to be cut.
@@ -727,8 +729,9 @@ mod tests {
                 .to_owned()
         };
 
-        // A 40-character name, cut. The trust column holds `pin <day>` or
-        // `EXPIRED`, which fit the width, so only the name needs the ellipsis.
+        // A 40-character name, cut. The trust column holds `pin <day>`,
+        // `EXPIRED` or `pin -`; a verdict is cut inside its own column, so with
+        // no bundle pinned here only the name needs the ellipsis.
         let long = row_of(&[long_preset()]);
         assert!(long.chars().count() < 60, "{long:?}");
         assert_eq!(long.matches('…').count(), 1, "the name is cut: {long:?}");
@@ -825,6 +828,11 @@ mod tests {
             super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
             "pin 2030-01-01"
         );
+        // The verdict rides along while the day takes the room it needs.
+        assert_eq!(
+            super::trust(preset, Some(&[root("2027-01-01")]), at(2026, 12, 1)),
+            "pin 2027-01-01 (expires soon)"
+        );
     }
 
     #[test]
@@ -838,30 +846,42 @@ mod tests {
             ),
             "EXPIRED"
         );
-        // One live root is enough, and the first root's day is the one shown.
+        // One live root is enough, and the newest root's day is the one shown.
         assert_eq!(
             super::trust(
                 preset,
                 Some(&[root("2020-01-01"), root("2030-01-01")]),
                 at(2026, 1, 1)
             ),
-            "pin 2020-01-01"
+            "pin 2030-01-01"
         );
     }
 
     #[test]
-    fn an_unpublished_preset_stays_tofu() {
+    fn an_unpublished_preset_without_a_bundle_stays_tofu() {
+        let preset = presets::find("swisssign").expect("a TOFU preset");
+        assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "tofu");
+    }
+
+    /// The local bundle is the only copy of an unpublished root, so the date
+    /// and its verdict have to be reachable for exactly that preset too.
+    #[test]
+    fn a_pinned_unpublished_preset_says_its_date() {
         let preset = presets::find("swisssign").expect("a TOFU preset");
         assert_eq!(
             super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
-            "tofu"
+            "pin 2030-01-01"
         );
-        assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "tofu");
+        assert_eq!(
+            super::trust(preset, Some(&[root("2020-01-01")]), at(2026, 1, 1)),
+            "EXPIRED"
+        );
     }
 
     #[test]
     fn a_published_root_that_is_not_pinned_here_has_no_date() {
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(super::trust(preset, None, at(2026, 1, 1)), "pin -");
+        assert_eq!(super::trust(preset, Some(&[]), at(2026, 1, 1)), "pin -");
     }
 }

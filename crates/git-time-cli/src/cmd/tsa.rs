@@ -435,24 +435,27 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 
 /// Print the built-in presets and whether their anchor is pinned here.
 ///
-/// A preset without a published fingerprint says `not pinned`: there is no
-/// certificate to read a date from, and none is fetched for it.
+/// The date comes from the local bundle where there is one, newest root first:
+/// for a preset that publishes no fingerprint that bundle is the only place the
+/// date exists at all. A published root that is not pinned here has no
+/// certificate to read and says `-`; `not pinned` is for a preset with neither.
 fn preset_list(_repo: &Repo) -> Exit {
     // One instant for the whole listing: every date is judged as of one moment.
     let now = jiff::Timestamp::now();
     for preset in &presets::PRESETS {
         let anchor = anchors::dir().join(format!("{}.pem", preset.name));
-        // The pinned bundle's first certificate is the newest root; only a
-        // local one can say when it expires, so nothing is fetched here.
-        let expiry = match preset.fingerprints.last() {
-            None => "not pinned".to_owned(),
-            Some(_) => anchors::roots(&anchor)
-                .and_then(|roots| roots.into_iter().next())
-                .map_or_else(
-                    || "-".to_owned(),
-                    |root| anchors::expiry_text(&root.not_after, now),
-                ),
-        };
+        // Only a local certificate can say when it expires, so nothing is
+        // fetched here. The last root is the newest after a rotation.
+        let expiry = anchors::roots(&anchor)
+            .and_then(|roots| roots.last().cloned())
+            .map(|root| anchors::expiry_text(&root.not_after, now))
+            .unwrap_or_else(|| {
+                if preset.fingerprints.is_empty() {
+                    "not pinned".to_owned()
+                } else {
+                    "-".to_owned()
+                }
+            });
         println!(
             "{} {} {} {} {} {} ({})",
             preset.name,

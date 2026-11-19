@@ -1640,6 +1640,26 @@ fn preset_list_says_not_pinned_without_an_anchor() {
     assert_eq!(freetsa[6], "(missing)", "{listing}");
 }
 
+/// The opt-in preset publishes no root, so its local bundle is the only copy
+/// of the certificate: the date has to be read from there, not declared absent.
+#[test]
+fn preset_list_reads_the_date_from_a_pinned_unpublished_bundle() {
+    let repo = Repo::new();
+    repo.init();
+    let stale = stale_ca(repo.path());
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::copy(&stale, repo.anchors().join("swisssign.pem")).expect("pin the stale CA");
+
+    let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
+    let swisssign = listing
+        .lines()
+        .find(|line| line.starts_with("swisssign "))
+        .unwrap_or_else(|| panic!("the preset line: {listing}"));
+    assert!(swisssign.contains("2020-02-01 expired"), "{listing}");
+    assert!(!swisssign.contains("not pinned"), "{listing}");
+    assert!(swisssign.contains("(anchored)"), "{listing}");
+}
+
 #[test]
 fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
     let repo = Repo::new();
