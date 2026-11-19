@@ -126,8 +126,8 @@ operator section.
 
 `README.md` is the front door, `docs/manual.md` the operator manual. `.github/workflows/ci.yml`
 runs fmt, clippy and the suite on Ubuntu, for branches and pull requests. The four targets are built
-only on a tag, by `.github/workflows/release.yml`, in two jobs (one per OS); its macOS job runs the
-same suite before it packages, and the publish is refused unless the suite is green. That is
+only on a `v*` tag, by `.github/workflows/release.yml`, in two jobs (one per OS); its macOS job runs
+the same suite before it packages, and the publish is refused unless the suite is green. That is
 deliberate: the account serves about two concurrent macOS runners and cancels a job that queues for
 more than fifteen minutes, which fails the run, so an ordinary push spends no slot on binaries
 nobody waits for. A job so cancelled twice is what kept `v0.1.0` from publishing. A release attaches
@@ -135,9 +135,10 @@ the four bare binaries and nothing else — no archive, no checksum file — so 
 `chmod +x` and a run. The musl targets build in separate target dirs, so no host-built build script
 crosses a container boundary.
 
-A tag is the only thing that reaches that build: a documentation-only push costs the Ubuntu suite
-and nothing more. The suite still runs on both, so an empty check list never appears on a pull
-request. No markdown file is compiled in, so a doc change cannot break a build either.
+A `v*` tag is the only thing that reaches that build: a documentation-only push costs the Ubuntu
+suite and nothing more. The suite still runs on branches and pull requests, so an empty check list
+never appears on a pull request. No markdown file is compiled in, so a doc change cannot break a
+build either.
 
 GitHub reports capacity constraints on arm64 macOS runners, and a queued-out job is cancelled
 after fifteen minutes, so the darwin job targets the Intel pool (`macos-15-intel`) instead of
@@ -156,7 +157,9 @@ It skips when the network is gone and removes its repository and fetched anchors
 ### Why the macOS fixtures name their algorithms
 
 The suite is the same everywhere, but the `openssl` a run meets is not: macOS `/usr/bin/openssl` is
-LibreSSL 3.3.6, and the CI image puts Homebrew `openssl@1.1` (1.1.1w) ahead of it. Their defaults are
+LibreSSL 3.3.6, and the CI image puts Homebrew `openssl@1.1` (1.1.1w) ahead of it. The tag build's
+macOS job prepends `openssl@3` and asserts it; the fixture rules below come from the older default
+because the image's own PATH still hands it out elsewhere. Their defaults are
 outside what `webpki` verifies, and every symptom below started as a red macOS leg with no clue in
 the log — hence the fixture rules and the `openssl version -a` line a failed seal now prints:
 

@@ -4,7 +4,8 @@ name: Debug (Intel macOS)
 # (Homebrew 1.1.1, ahead of /usr/bin), so this runs the token and seal tests with
 # the failure diagnostics turned on and names the binary it found. Kept because
 # the macOS suite now only runs inside the tag build, so getting a readable red
-# leg otherwise costs a release attempt.
+# leg otherwise costs a release attempt. It reproduces that leg, not the tag
+# build's suite: no `openssl@3` swap and no fmt/clippy here.
 on:
   workflow_dispatch:
 

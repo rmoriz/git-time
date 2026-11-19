@@ -111,8 +111,8 @@ $ git commit -m "add entry point"
 Verifying the checksum before running the binary is worth the extra line: the whole point of this
 tool is evidence you can check yourself.
 
-A tagged version builds the same four binaries and publishes them; an ordinary push only runs the
-suite, so the number of [Actions runs](https://github.com/rmoriz/git-time/actions) stays small. The
+A `v*` tagged version builds the same four binaries and publishes them; an ordinary push only runs
+the suite, so runner minutes are spent where they are useful. The
 Linux builds are static (`static-pie`); the macOS builds link the system libraries.
 
 ## A real transcript
