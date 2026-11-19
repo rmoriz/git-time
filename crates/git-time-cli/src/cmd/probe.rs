@@ -6,7 +6,7 @@
 //! rather than trusted, and a stale or malformed entry only means "ask again":
 //! the request costs less than showing a date that a rotation has outlived.
 
-// The worker and the picker that read this arrive in a later change.
+// The picker that drains this arrives in a later change.
 #![allow(dead_code)]
 
 use std::collections::VecDeque;
@@ -245,7 +245,13 @@ impl Prober {
         Self { shared, results }
     }
 
-    /// Queue every preset except the `skip`ped indices again, as it is.
+    /// Queue every preset except the `skip`ped indices again, whether or not an
+    /// earlier run has delivered or is still working on them.
+    ///
+    /// A row can therefore be reported more than once: [`Prober::drain`]'s
+    /// caller keys by index and keeps the last answer, and a [`Served::Known`]
+    /// store overwrites the entry the earlier answer left — the cache holds one
+    /// date per authority, so the newest reply is the one that counts.
     pub fn refresh(&self, skip: &[usize]) {
         {
             let mut queue = lock(&self.shared);
@@ -255,6 +261,9 @@ impl Prober {
     }
 
     /// Every result that has arrived since the last call.
+    ///
+    /// An index may arrive more than once — see [`Prober::refresh`] — so a
+    /// caller keys by index rather than counting the results.
     #[must_use]
     pub fn drain(&self) -> Vec<(usize, Served)> {
         self.results.try_iter().collect()
@@ -296,6 +305,25 @@ fn enqueue(rows: &mut VecDeque<usize>, count: usize, skip: &[usize]) {
     rows.extend((0..count).filter(|index| !skip.contains(index)));
 }
 
+/// The in-flight mark of one popped row.
+///
+/// A guard rather than a written-out decrement: a panic inside the injected
+/// fetch would otherwise leave the counter above zero for good, and every
+/// caller that reads `pending() == 0` as "done" would wait forever. Dropped
+/// after the result is sent and counted, so zero still means both happened.
+struct InFlight<'a>(&'a Shared);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut queue = lock(self.0);
+        queue.in_flight = queue.in_flight.saturating_sub(1);
+        drop(queue);
+        // A caller polling `pending` needs no wake, but a queue that is emptied
+        // from here should not leave anyone else's wait asleep on it.
+        self.0.wake.notify_all();
+    }
+}
+
 /// One worker: take a row, fetch it, judge it, store a date only if justified,
 /// and report the answer.
 fn work(shared: &Shared, sender: &Sender<(usize, Served)>) {
@@ -316,6 +344,10 @@ fn work(shared: &Shared, sender: &Sender<(usize, Served)>) {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
             }
         };
+        // Held across the fetch, the judgement and the send, so the row stays
+        // pending until its answer is in the channel — or until a panic here
+        // gives it back.
+        let in_flight = InFlight(shared);
 
         let preset = &shared.presets[index];
         let now = jiff::Timestamp::now();
@@ -327,6 +359,9 @@ fn work(shared: &Shared, sender: &Sender<(usize, Served)>) {
                 }
                 served
             }
+            // Both failures are one `Failed` and the reason is dropped: the
+            // display shows a marker, not a cause, and a reason field would be
+            // guessed at until a caller needs it.
             Err(_) => Served::Failed,
         };
         let counted = matches!(served, Served::Failed | Served::Unpublished);
@@ -336,13 +371,8 @@ fn work(shared: &Shared, sender: &Sender<(usize, Served)>) {
         if counted && sent {
             shared.failed.fetch_add(1, Ordering::Relaxed);
         }
-
-        let mut queue = lock(shared);
-        queue.in_flight -= 1;
-        drop(queue);
-        // A caller polling `pending` needs no wake, but a queue that is emptied
-        // from here should not leave anyone else's wait asleep on it.
-        shared.wake.notify_all();
+        // Last, so `pending() == 0` already means sent and counted.
+        drop(in_flight);
     }
 }
 
@@ -699,7 +729,7 @@ pub(crate) mod tests {
     fn answering(path: &'static str) -> super::Fetch {
         let log = URLS
             .with(|slot| slot.borrow_mut().take())
-            .unwrap_or_default();
+            .expect("call urls() first");
         Arc::new(move |url, _| {
             log.lock().unwrap().push(url.to_owned());
             std::fs::read(path).map_err(|error| error.to_string())
@@ -735,6 +765,7 @@ pub(crate) mod tests {
     fn a_result_carries_the_index_and_is_stored() {
         let _guard = xdg_lock();
         xdg();
+        urls();
         let _ = forget("freetsa");
         let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[]);
         let results = wait(&prober);
@@ -751,12 +782,9 @@ pub(crate) mod tests {
         let urls = urls();
         let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[1]);
         wait(&prober);
-        assert!(
-            !urls
-                .lock()
-                .unwrap()
-                .contains(&presets::PRESETS[1].url.to_owned())
-        );
+        let urls = urls.lock().unwrap();
+        assert_eq!(urls.len(), presets::PRESETS.len() - 1, "the rest fetched");
+        assert!(!urls.contains(&presets::PRESETS[1].url.to_owned()));
     }
 
     #[test]
@@ -776,13 +804,105 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_panicking_fetch_leaves_the_queue_drainable() {
+        let _guard = xdg_lock();
+        xdg();
+        urls();
+        // One row panics inside the fetch; that worker dies, but the rest of
+        // the table still has to come back and `pending` still has to reach
+        // zero, or a caller waiting on it would hang for good.
+        let panicky = presets::PRESETS[freetsa_index()].url;
+        let fetch: super::Fetch = Arc::new(move |url, _| {
+            if url == panicky {
+                panic!("the fixture panics here");
+            }
+            std::fs::read(FREETSA_ROOT).map_err(|error| error.to_string())
+        });
+        let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
+        let results = wait(&prober);
+        assert_eq!(results.len(), presets::PRESETS.len() - 1);
+    }
+
+    #[test]
+    fn refresh_mid_run_reports_a_row_twice() {
+        let _guard = xdg_lock();
+        xdg();
+        urls();
+        // The gate parks every worker inside its fetch, so no row can finish
+        // before the refresh: the mid-run case is the only one that can leave a
+        // row both in flight and queued again.
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let fetch: super::Fetch = {
+            let gate = Arc::clone(&gate);
+            Arc::new(move |_, _| {
+                let (open, wake) = &*gate;
+                let mut ready = open.lock().unwrap();
+                while !*ready {
+                    ready = wake.wait(ready).unwrap();
+                }
+                drop(ready);
+                std::fs::read(FREETSA_ROOT).map_err(|error| error.to_string())
+            })
+        };
+        let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
+        prober.refresh(&[]);
+        // Every row is outstanding once before and once after the refresh, and
+        // none has finished, so both runs are all still pending.
+        assert_eq!(prober.pending(), 2 * presets::PRESETS.len());
+        assert!(prober.drain().is_empty());
+
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        let mut indices: Vec<usize> = wait(&prober).into_iter().map(|(index, _)| index).collect();
+        indices.sort_unstable();
+        assert!(
+            indices.windows(2).any(|pair| pair[0] == pair[1]),
+            "an index is reported twice"
+        );
+    }
+
+    #[test]
     fn refresh_queues_everything_again() {
         let _guard = xdg_lock();
         xdg();
+        urls();
         let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[]);
         wait(&prober);
         prober.refresh(&[]);
-        assert!(prober.pending() > 0);
+        assert_eq!(prober.pending(), presets::PRESETS.len());
         wait(&prober);
+    }
+
+    #[test]
+    fn an_answer_without_a_date_leaves_the_cache_untouched() {
+        let _guard = xdg_lock();
+        xdg();
+        let _ = forget("freetsa");
+        let failing = super::Prober::start(
+            &presets::PRESETS,
+            Arc::new(|_, _| Err("down".to_owned())),
+            &[],
+        );
+        let results = wait(&failing);
+        assert!(
+            results
+                .iter()
+                .all(|(_, served)| matches!(served, super::Served::Failed))
+        );
+        assert!(cached("freetsa", jiff::Timestamp::now()).is_none());
+
+        // A readable reply that names a root the authority does not publish is
+        // `Unpublished`, and it may not write a date either.
+        urls();
+        let _ = forget("aped");
+        let aped: &'static Preset = presets::find("aped").expect("preset");
+        let unpublished =
+            super::Prober::start(std::slice::from_ref(aped), answering(FREETSA_ROOT), &[]);
+        let results = wait(&unpublished);
+        assert!(matches!(
+            results.as_slice(),
+            [(0, super::Served::Unpublished)]
+        ));
+        assert!(cached("aped", jiff::Timestamp::now()).is_none());
     }
 }
