@@ -10,7 +10,9 @@
 //! verifies), the CA serial lives in its own file (`-CAcreateserial` races in the
 //! shared temp directory) and CA extensions come from a config section (1.1.1
 //! refuses `-addext basicConstraints`, which it adds itself), while the tests
-//! for SHA-1 and explicit parameters ask for those shapes on purpose.
+//! for SHA-1 and explicit parameters ask for those shapes on purpose. They are
+//! signed with `-cades`, because the verifier requires the ESS
+//! signing-certificate attribute and `cms -sign` leaves it out by default.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -357,6 +359,37 @@ fn without_policy_field(tst_info: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&body[..version_end]);
     out.extend_from_slice(tail);
     out
+}
+
+/// Drop the `tsa` field from a TSTInfo, keeping the DER valid.
+///
+/// The throwaway tokens reuse the fixture's TSTInfo, which carries FreeTSA's
+/// `tsa` name; under a throwaway signer that name is not the signer's and the
+/// token would be refused as `tsa-name`. The field is the final one (`a0`, long
+/// form), so it and anything after it — extensions in some replies, which are
+/// informational — goes. The `SEQUENCE` length is written afresh instead of
+/// patching its digits.
+fn remove_tsa(tst: &mut Vec<u8>) {
+    assert_eq!(tst[0], 0x30, "TSTInfo is a SEQUENCE");
+    let (sequence_len, sequence_length_octets) = der_len(tst, 1);
+    let body_start = 1 + sequence_length_octets;
+    assert_eq!(body_start + sequence_len, tst.len());
+
+    let start = tst
+        .windows(2)
+        .rposition(|window| window[0] == 0xa0 && window[1] == 0x82)
+        .expect("the fixture TSTInfo carries a tsa name");
+    let (tsa_len, tsa_length_octets) = der_len(tst, start + 1);
+    assert_eq!(start + 1 + tsa_length_octets + tsa_len, tst.len());
+
+    let mut body = tst[body_start..start].to_vec();
+    let mut out = vec![0x30];
+    der::Length::try_from(body.len())
+        .expect("the body fits a DER length")
+        .encode(&mut out)
+        .expect("the length encodes");
+    out.append(&mut body);
+    *tst = out;
 }
 
 /// Re-encode `token` with its TSTInfo replaced by `transform` of the old one.
@@ -788,11 +821,16 @@ fn throwaway_tsa_token_under(
     // `openssl ts -reply` cannot be used: it rejects any signer whose EKU is not
     // both critical and sole, which is exactly what the negative cases vary.
     // `openssl cms -sign` accepts them; `-certfile` puts the chain in the token.
+    // `-cades` writes the ESS signing-certificate attribute the verifier
+    // requires, which plain `cms -sign` leaves out.
     //
     // The certificates start "now", so the fixture's 05:38Z genTime would be
     // before their notBefore; the stamp is moved to now (same length) and only
     // then signed.
     let mut tst = tst_info(&token());
+    // The fixture's `tsa` names FreeTSA and would not match the throwaway
+    // signer; the ESS identifier below is written by openssl and does match.
+    remove_tsa(&mut tst);
     let now = Timestamp::now()
         .to_zoned(jiff::tz::TimeZone::UTC)
         .datetime();
@@ -826,6 +864,7 @@ fn throwaway_tsa_token_under(
         chain.as_os_str(),
         "-md".as_ref(),
         digest.as_ref(),
+        "-cades".as_ref(),
         "-outform".as_ref(),
         "DER".as_ref(),
         "-econtent_type".as_ref(),
@@ -863,6 +902,59 @@ fn token_cannot_supply_its_own_anchor() {
     assert!(
         verify::token(&record, &imprint(), wide_range(), &own).is_valid(),
         "throwaway token is otherwise well formed"
+    );
+}
+
+#[test]
+fn a_throwaway_token_carries_the_signer_identifier_and_verifies() {
+    const OID_SIGNING_CERTIFICATE_V2: der::asn1::ObjectIdentifier =
+        der::asn1::ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
+
+    let dir = scratch();
+    let (token, ca_pem) = throwaway_tsa_token(dir.path(), "critical,timeStamping");
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    assert!(
+        signed_attribute_oids(&record.token).contains(&OID_SIGNING_CERTIFICATE_V2),
+        "the token carries the identifier the verifier requires"
+    );
+    assert!(
+        verify::token(&record, &imprint(), wide_range(), &anchors).is_valid(),
+        "the identifier names the signer: {:?}",
+        verify::token(&record, &imprint(), wide_range(), &anchors)
+    );
+}
+
+#[test]
+fn a_flipped_cert_hash_is_ess_mismatch_not_a_signature_error() {
+    let dir = scratch();
+    let (token, ca_pem) = throwaway_tsa_token(dir.path(), "critical,timeStamping");
+    let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
+    let mut record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    let signer = git_time_core::verify::signer_certificate(&record.token).expect("signer resolves");
+    let hash = digest(Alg::Sha256, &signer);
+    let at = find(&record.token, &hash);
+    record.token[at] ^= 0x01;
+
+    // Flipping the hash also breaks the signature over the attributes; the
+    // identifier has to be judged first and say what actually moved.
+    assert_eq!(
+        verify::token(&record, &imprint(), wide_range(), &anchors),
+        TokenVerdict::Invalid(Invalid::EssMismatch)
     );
 }
 

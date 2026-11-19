@@ -356,9 +356,23 @@ fn judge_tokens(
                 }
                 // The token's own reason is the verdict; a missing pin is worth
                 // spelling out because that is what the reader has to restore.
-                let detail = match anchors.anchor(&record.id) {
-                    None => Some(format!("no anchor pinned for `{}`", record.id)),
-                    Some(_) => Some("the token does not chain to the pinned anchor".to_owned()),
+                let detail = match invalid {
+                    Invalid::EssMissing => {
+                        Some("the token carries no ESS signer identifier".to_owned())
+                    }
+                    Invalid::EssMismatch => {
+                        Some("the ESS signer identifier names another certificate".to_owned())
+                    }
+                    Invalid::EssMalformed => {
+                        Some("the ESS signer identifier is malformed".to_owned())
+                    }
+                    Invalid::TsaName => {
+                        Some("the TSTInfo tsa name is not the signer's subject".to_owned())
+                    }
+                    _ => match anchors.anchor(&record.id) {
+                        None => Some(format!("no anchor pinned for `{}`", record.id)),
+                        Some(_) => Some("the token does not chain to the pinned anchor".to_owned()),
+                    },
                 };
                 evidence.per_tsa.push(TsaEvidence {
                     id: record.id.clone(),

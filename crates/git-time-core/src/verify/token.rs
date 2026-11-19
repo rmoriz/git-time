@@ -20,18 +20,25 @@
 //!
 //! 1. the CMS structure parses ([`Invalid::Malformed`]);
 //! 2. the record's TSA id is pinned ([`Invalid::Untrusted`]);
-//! 3. the CMS signature, the chain to the pinned root, and the timestamping EKU
+//! 3. the signed signing-certificate attribute names the signer
+//!    ([`Invalid::EssMissing`], [`Invalid::EssMismatch`],
+//!    [`Invalid::EssMalformed`]), and the TSTInfo `tsa` name, when present, is
+//!    the signer's ([`Invalid::TsaName`]). These come before the signature
+//!    deliberately: the `sid` is outside it, so the attribute is the only signed
+//!    binding to the certificate, and a token whose binding was patched has to
+//!    say so instead of merely failing to verify;
+//! 4. the CMS signature, the chain to the pinned root, and the timestamping EKU
 //!    hold at the token's own genTime ([`Invalid::Untrusted`], or
 //!    [`Invalid::Malformed`] for a structurally unusable signature); the EKU
 //!    must be critical and name no purpose but timestamping, which is stricter
 //!    than `webpki` alone (see [`sole_timestamping_eku`]);
-//! 4. the record's imprint algorithm agrees with its imprint, and the TSTInfo
+//! 5. the record's imprint algorithm agrees with its imprint, and the TSTInfo
 //!    imprint equals the expected imprint ([`Invalid::Imprint`]);
-//! 5. the TSTInfo nonce equals the recorded one ([`Invalid::Nonce`]);
-//! 6. the TSTInfo policy equals the recorded one, when one was recorded
+//! 6. the TSTInfo nonce equals the recorded one ([`Invalid::Nonce`]);
+//! 7. the TSTInfo policy equals the recorded one, when one was recorded
 //!    ([`Invalid::Policy`]);
-//! 7. genTime lies inside the caller's range ([`Invalid::CertNotValidAtGenTime`]);
-//! 8. genTime is not after the signer certificate's `notAfter`
+//! 8. genTime lies inside the caller's range ([`Invalid::CertNotValidAtGenTime`]);
+//! 9. genTime is not after the signer certificate's `notAfter`
 //!    ([`Invalid::Expired`]). `webpki` already rejects a signer outside its
 //!    validity at genTime, so this is shadowed in practice and kept as
 //!    belt-and-braces ([`expired`] has its own unit test).
@@ -97,8 +104,8 @@ use cms::cert::CertificateChoices;
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier};
 use der::TagNumber;
-use der::asn1::{GeneralizedTime, ObjectIdentifier, OctetStringRef};
-use der::{Decode, Encode, Reader, SliceReader, Tag};
+use der::asn1::{GeneralizedTime, Ia5String, ObjectIdentifier, OctetString, OctetStringRef};
+use der::{Decode, Encode, Reader, Sequence, SliceReader, Tag};
 use jiff::Timestamp;
 use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
 use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
@@ -109,7 +116,10 @@ use sha2::{Digest as _, Sha256, Sha384, Sha512};
 use sigstore_tsa::TsaAuthority;
 use sigstore_types::DerCertificate;
 use x509_cert::Certificate;
-use x509_cert::ext::pkix::{ExtendedKeyUsage, SubjectKeyIdentifier};
+use x509_cert::attr::{Attribute, Attributes};
+use x509_cert::ext::pkix::name::GeneralName;
+use x509_cert::ext::pkix::{ExtendedKeyUsage, SubjectAltName, SubjectKeyIdentifier};
+use x509_cert::spki::AlgorithmIdentifierOwned;
 
 use crate::imprint::{Alg, Digest};
 use crate::store::TokenRecord;
@@ -123,6 +133,11 @@ const OID_COMMON_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.3"
 const OID_SUBJECT_KEY_ID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.14");
 const OID_EXTENDED_KEY_USAGE: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.37");
 const OID_KP_TIME_STAMPING: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.8");
+const OID_SIGNING_CERTIFICATE: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.12");
+const OID_SIGNING_CERTIFICATE_V2: ObjectIdentifier =
+    ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.16.2.47");
+const OID_SUBJECT_ALT_NAME: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.17");
 const OID_SHA1: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.14.3.2.26");
 const OID_SHA256: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.1");
 const OID_SHA384: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.2.2");
@@ -186,6 +201,17 @@ pub enum Invalid {
     Malformed,
     /// genTime is after the signer certificate's `notAfter`.
     Expired,
+    /// The token carries neither a `SigningCertificate` nor a
+    /// `SigningCertificateV2` signed attribute.
+    EssMissing,
+    /// A signed signing-certificate attribute names a certificate other than
+    /// the one that signed.
+    EssMismatch,
+    /// A signing-certificate attribute is present but not one identifier with
+    /// one supported hash over `certs[0]`.
+    EssMalformed,
+    /// The TSTInfo's `tsa` field does not name the signer.
+    TsaName,
 }
 
 impl Invalid {
@@ -200,6 +226,10 @@ impl Invalid {
             Self::Policy => "policy",
             Self::Malformed => "malformed",
             Self::Expired => "expired",
+            Self::EssMissing => "ess-missing",
+            Self::EssMismatch => "ess-mismatch",
+            Self::EssMalformed => "ess-malformed",
+            Self::TsaName => "tsa-name",
         }
     }
 }
@@ -382,6 +412,10 @@ struct Parsed {
     signer: Certificate,
     not_after: Timestamp,
     intermediates: Vec<DerCertificate>,
+    /// The signed attributes as parsed. The set is not the bytes the signature
+    /// covers — [`Parsed::signed_attrs`] is — but reading it here keeps the
+    /// identifier check off the re-encoded form.
+    attributes: Attributes,
     signed_attrs: Vec<u8>,
     signature: Vec<u8>,
     digest_alg: ObjectIdentifier,
@@ -394,12 +428,41 @@ struct Tst {
     imprint: Vec<u8>,
     nonce: Option<Vec<u8>>,
     gen_time: Timestamp,
+    tsa: Option<GeneralName>,
+}
+
+/// The `certs` of a `SigningCertificate` or `SigningCertificateV2` attribute.
+///
+/// The two differ only in the identifier's `hashAlgorithm` field, so both
+/// decode through the same shape (see [`EssId`]).
+#[derive(Sequence)]
+struct EssIds {
+    certs: Vec<EssId>,
+}
+
+/// One `ESSCertID` (RFC 2634) or `ESSCertIDv2` (RFC 5035).
+///
+/// v1 has no `hashAlgorithm` field and is always SHA-1; v2 omits the field for
+/// SHA-256. `issuerSerial` limits the path further and is not read here.
+#[derive(Sequence)]
+struct EssId {
+    #[asn1(optional = "true")]
+    hash_algorithm: Option<AlgorithmIdentifierOwned>,
+    cert_hash: OctetString,
+    #[asn1(optional = "true")]
+    _issuer_serial: Option<der::Any>,
 }
 
 impl Parsed {
     /// Parse the CMS structure: signer, chain, signed attributes and TSTInfo.
     fn parse(token: &[u8]) -> Result<Self, Invalid> {
         let signed_data = parse_signed_data(token)?;
+
+        // One signer info: the signature, the digest and the attributes all come
+        // from it, and a second one would have to be picked between.
+        if signed_data.signer_infos.0.len() != 1 {
+            return Err(Invalid::Malformed);
+        }
 
         let econtent = signed_data
             .encap_content_info
@@ -447,6 +510,7 @@ impl Parsed {
         let attributes: Vec<x509_cert::attr::Attribute> =
             signed_attributes.iter().cloned().collect();
         let signed_attrs = as_set(&attributes)?;
+        let attributes = Attributes::from_der(&signed_attrs).map_err(|_| Invalid::Malformed)?;
 
         Ok(Self {
             tst,
@@ -454,18 +518,26 @@ impl Parsed {
             signer,
             not_after,
             intermediates,
+            attributes,
             signed_attrs,
             signature: signer_info.signature.as_bytes().to_vec(),
             digest_alg: signer_info.digest_alg.oid,
         })
     }
 
-    /// Authenticate the token: CMS signature, chain to the pinned root, and the
-    /// timestamping EKU at the token's own genTime.
+    /// Authenticate the token: the signed signer identifier, then the CMS
+    /// signature, chain to the pinned root, and the timestamping EKU at the
+    /// token's own genTime.
     ///
     /// The pinned root is the only material taken from `anchor`; the signer and
     /// intermediates are the token's, and are pinned to `authority.leaf`.
     fn authenticate(&self, anchor: &crate::trust::Anchor) -> Result<(), Invalid> {
+        // Before the signature: the identifier is what says *which* certificate
+        // the signed bytes belong to, so a token that names another one is
+        // answered as that rather than as a broken signature.
+        signer_identification(&self.attributes, &self.signer)?;
+        tsa_name(self.tst.tsa.as_ref(), &self.signer)?;
+
         let signer_der = self.signer.to_der().map_err(|_| Invalid::Malformed)?;
 
         // The token's own chain first, then whatever else the pin allows. The
@@ -502,14 +574,12 @@ impl Parsed {
     /// Verify the CMS signature over the signed attributes with the signer key,
     /// after binding the signed attributes to the TSTInfo they claim to cover.
     fn verify_signature(&self) -> Result<(), Invalid> {
-        let attributes = x509_cert::attr::Attributes::from_der(&self.signed_attrs)
-            .map_err(|_| Invalid::Malformed)?;
-        let message_digest = message_digest(&attributes)?;
+        let message_digest = message_digest(&self.attributes)?;
         let computed = hash(&self.digest_alg, &self.tst_info_der)?;
         if message_digest != computed {
             return Err(Invalid::Malformed);
         }
-        content_type(&attributes)?;
+        content_type(&self.attributes)?;
 
         let spki = &self.signer.tbs_certificate.subject_public_key_info;
         let Some(algorithm) = signature_algorithm(
@@ -779,6 +849,139 @@ fn content_type(attributes: &x509_cert::attr::Attributes) -> Result<(), Invalid>
     }
 }
 
+/// Check the ESS signing-certificate attributes against the signer.
+///
+/// RFC 3161 §2.4.2 requires a signed `SigningCertificate` attribute
+/// (`ESSCertID`, SHA-1) and RFC 5816 §2.2.1 widens that to
+/// `SigningCertificateV2` (`ESSCertIDv2`, any hash, SHA-256 when the field is
+/// omitted). The `sid` that the signer is looked up by is not covered by the
+/// signature; this attribute is, and it is therefore the only signed binding
+/// between the TSTInfo and the certificate that signed it. A token without one
+/// is refused, and so is one naming another certificate.
+///
+/// Both attributes are judged even when one of them matched: a token carrying
+/// both claims both, and neither excuses the other. Only `certs[0]` is the
+/// signer; further identifiers constrain the path.
+fn signer_identification(attributes: &Attributes, signer: &Certificate) -> Result<(), Invalid> {
+    let v1: Vec<&Attribute> = attributes
+        .iter()
+        .filter(|attribute| attribute.oid == OID_SIGNING_CERTIFICATE)
+        .collect();
+    let v2: Vec<&Attribute> = attributes
+        .iter()
+        .filter(|attribute| attribute.oid == OID_SIGNING_CERTIFICATE_V2)
+        .collect();
+
+    if v1.is_empty() && v2.is_empty() {
+        return Err(Invalid::EssMissing);
+    }
+    if v1.len() > 1 || v2.len() > 1 {
+        return Err(Invalid::EssMalformed);
+    }
+
+    let signer_der = signer.to_der().map_err(|_| Invalid::EssMalformed)?;
+    for attribute in v1.iter() {
+        ess_identifier(attribute, OID_SHA1, &signer_der)?;
+    }
+    for attribute in v2.iter() {
+        // No algorithm field means SHA-256; a named one is used as it is and an
+        // unsupported one is refused further down.
+        ess_identifier(attribute, OID_SHA256, &signer_der)?;
+    }
+    Ok(())
+}
+
+/// Whether one signing-certificate attribute's first identifier names the
+/// certificate whose DER is `signer`.
+///
+/// `default_algorithm` is the hash the attribute means when it names none
+/// (SHA-1 for v1, SHA-256 for v2).
+fn ess_identifier(
+    attribute: &Attribute,
+    default_algorithm: ObjectIdentifier,
+    signer: &[u8],
+) -> Result<(), Invalid> {
+    if attribute.values.len() != 1 {
+        return Err(Invalid::EssMalformed);
+    }
+    let value = attribute.values.get(0).ok_or(Invalid::EssMalformed)?;
+    let encoded = value.to_der().map_err(|_| Invalid::EssMalformed)?;
+    let ids = EssIds::from_der(&encoded).map_err(|_| Invalid::EssMalformed)?;
+    let Some(first) = ids.certs.first() else {
+        return Err(Invalid::EssMalformed);
+    };
+
+    let algorithm = first
+        .hash_algorithm
+        .as_ref()
+        .map_or(default_algorithm, |algorithm| algorithm.oid);
+    let computed = hash(&algorithm, signer).map_err(|_| Invalid::EssMalformed)?;
+    if computed == first.cert_hash.as_bytes() {
+        Ok(())
+    } else {
+        Err(Invalid::EssMismatch)
+    }
+}
+
+/// Whether the TSTInfo's `tsa` field names the signer.
+///
+/// RFC 3161 makes the field optional and informational, but when a TSA writes
+/// it, it must be about the certificate that signed: a `directoryName` is
+/// compared as DER against the signer's subject, and a `dNSName` must be one of
+/// the signer's subject alternative names. Any other `GeneralName` choice is
+/// not something a certificate can be held to here, so it is refused rather
+/// than guessed at.
+fn tsa_name(tsa: Option<&GeneralName>, signer: &Certificate) -> Result<(), Invalid> {
+    let Some(tsa) = tsa else {
+        return Ok(());
+    };
+    match tsa {
+        GeneralName::DirectoryName(name) => {
+            let name = name.to_der().map_err(|_| Invalid::TsaName)?;
+            let subject = signer
+                .tbs_certificate
+                .subject
+                .to_der()
+                .map_err(|_| Invalid::TsaName)?;
+            if name == subject {
+                Ok(())
+            } else {
+                Err(Invalid::TsaName)
+            }
+        }
+        GeneralName::DnsName(wanted) => {
+            if dns_names(signer).iter().any(|name| name == wanted) {
+                Ok(())
+            } else {
+                Err(Invalid::TsaName)
+            }
+        }
+        _ => Err(Invalid::TsaName),
+    }
+}
+
+/// The `dNSName`s in a certificate's subject alternative name extension.
+///
+/// A malformed extension contributes nothing rather than failing: the SAN is a
+/// second way to name the signer, and the subject comparison is unaffected.
+fn dns_names(certificate: &Certificate) -> Vec<Ia5String> {
+    let mut names = Vec::new();
+    for extension in certificate.tbs_certificate.extensions.iter().flatten() {
+        if extension.extn_id != OID_SUBJECT_ALT_NAME {
+            continue;
+        }
+        let Ok(alt_names) = SubjectAltName::from_der(extension.extn_value.as_bytes()) else {
+            continue;
+        };
+        for name in alt_names.0 {
+            if let GeneralName::DnsName(name) = name {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
 /// Whether the certificate's extended key usage is critical and names exactly
 /// one purpose, `id-kp-timeStamping`.
 ///
@@ -881,10 +1084,23 @@ impl Tst {
         }
 
         // The tail may hold a `[0]` TSA name and `[1]` extensions, nothing else.
+        let mut tsa = None;
         while let Some(tag) = next_tag(&mut reader)? {
             match tag {
                 Tag::ContextSpecific {
-                    number: TagNumber::N0 | TagNumber::N1,
+                    number: TagNumber::N0,
+                    ..
+                } => {
+                    if tsa.is_some() {
+                        return Err(Invalid::Malformed);
+                    }
+                    // EXPLICIT even under `IMPLICIT TAGS`: `GeneralName` is a
+                    // CHOICE, so the field wraps its DER.
+                    let content = tlv(&mut reader, tag)?;
+                    tsa = Some(GeneralName::from_der(content).map_err(|_| Invalid::Malformed)?);
+                }
+                Tag::ContextSpecific {
+                    number: TagNumber::N1,
                     ..
                 } => {
                     tlv_full(&mut reader, tag)?;
@@ -900,6 +1116,7 @@ impl Tst {
             imprint,
             nonce,
             gen_time,
+            tsa,
         })
     }
 }
@@ -1025,6 +1242,9 @@ fn next_tag(reader: &mut SliceReader<'_>) -> Result<Option<Tag>, Invalid> {
 #[cfg(test)]
 mod tests {
     use std::process::{Command, Stdio};
+    use std::str::FromStr;
+
+    use x509_cert::name::Name;
 
     use super::*;
 
@@ -1141,6 +1361,7 @@ mod tests {
             imprint: vec![0; 32],
             nonce: None,
             gen_time: Timestamp::from_second(0).expect("in range"),
+            tsa: None,
         };
 
         assert!(imprint_matches(Alg::Sha256, &imprint, &tst));
@@ -1153,10 +1374,17 @@ mod tests {
     /// Only the extension line varies; everything else that `webpki` might care
     /// about is held constant, so a verdict difference comes from the EKU.
     fn certificate_with_eku(eku: &str) -> Certificate {
+        certificate("/CN=eku-test", eku, None)
+    }
+
+    /// The same, under `subject`, with `san` as a subject alternative name
+    /// extension when one is given.
+    fn certificate(subject: &str, eku: &str, san: Option<&str>) -> Certificate {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let key = dir.path().join("key.pem");
         let certificate = dir.path().join("certificate.pem");
-        let status = Command::new("openssl")
+        let mut command = Command::new("openssl");
+        command
             .args([
                 "req",
                 "-x509",
@@ -1173,11 +1401,15 @@ mod tests {
             .arg(&key)
             .arg("-out")
             .arg(&certificate)
-            .args(["-days", "2", "-subj", "/CN=eku-test"])
+            .args(["-days", "2", "-subj", subject])
             .arg("-addext")
             .arg("basicConstraints=critical,CA:FALSE")
             .arg("-addext")
-            .arg(eku)
+            .arg(eku);
+        if let Some(san) = san {
+            command.arg("-addext").arg(san);
+        }
+        let status = command
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -1188,6 +1420,331 @@ mod tests {
         let der = DerCertificate::from_pem(std::str::from_utf8(&der).expect("certificate is PEM"))
             .expect("certificate parses");
         Certificate::from_der(der.as_bytes()).expect("certificate parses")
+    }
+
+    /// An attribute carrying already-encoded values.
+    fn attribute_of(oid: ObjectIdentifier, values: Vec<Vec<u8>>) -> Attribute {
+        let values = values
+            .iter()
+            .map(|value| der::Any::from_der(value).expect("value parses"))
+            .collect::<Vec<_>>();
+        Attribute {
+            oid,
+            values: der::asn1::SetOfVec::try_from(values).expect("values form a set"),
+        }
+    }
+
+    /// One identifier for `certificate`, hashed with `digest`.
+    ///
+    /// The `hashAlgorithm` field is left out: v1 has no such field and a v2
+    /// without one means SHA-256.
+    fn ess_id(certificate: &Certificate, digest: ObjectIdentifier) -> EssId {
+        let der = certificate.to_der().expect("certificate encodes");
+        EssId {
+            hash_algorithm: None,
+            cert_hash: OctetString::new(hash(&digest, &der).expect("digest is supported"))
+                .expect("hash fits"),
+            _issuer_serial: None,
+        }
+    }
+
+    /// The `SigningCertificate` (v1) or `SigningCertificateV2` (v2) attribute
+    /// for `certificate`, under `oid`.
+    ///
+    /// v1 has no algorithm field and is always SHA-1; a v2 naming an algorithm
+    /// hashes with it and a v2 without one means SHA-256.
+    fn ess(oid: ObjectIdentifier, certificate: &Certificate, algorithm: Option<&str>) -> Attribute {
+        let algorithm = algorithm.map(|oid| AlgorithmIdentifierOwned {
+            oid: ObjectIdentifier::new(oid).expect("algorithm OID"),
+            parameters: None,
+        });
+        let digest = if oid == OID_SIGNING_CERTIFICATE {
+            OID_SHA1
+        } else {
+            algorithm
+                .as_ref()
+                .map_or(OID_SHA256, |algorithm| algorithm.oid)
+        };
+        let mut id = ess_id(certificate, digest);
+        id.hash_algorithm = if oid == OID_SIGNING_CERTIFICATE {
+            None
+        } else {
+            algorithm
+        };
+        let ids = EssIds { certs: vec![id] };
+        attribute_of(oid, vec![ids.to_der().expect("identifiers encode")])
+    }
+
+    /// Run `signer_identification` over `attributes`.
+    fn identification(attributes: Vec<Attribute>, signer: &Certificate) -> Result<(), Invalid> {
+        let attributes = Attributes::try_from(attributes).expect("attributes form a set");
+        signer_identification(&attributes, signer)
+    }
+
+    #[test]
+    fn no_signer_identifier_is_ess_missing() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        assert_eq!(
+            identification(Vec::new(), &signer),
+            Err(Invalid::EssMissing)
+        );
+    }
+
+    #[test]
+    fn a_v1_identifier_naming_the_signer_is_accepted() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        assert_eq!(
+            identification(vec![ess(OID_SIGNING_CERTIFICATE, &signer, None)], &signer),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_v2_identifier_without_an_algorithm_is_sha256() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        assert_eq!(
+            identification(
+                vec![ess(OID_SIGNING_CERTIFICATE_V2, &signer, None)],
+                &signer
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn both_identifiers_naming_the_signer_are_accepted() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        assert_eq!(
+            identification(
+                vec![
+                    ess(OID_SIGNING_CERTIFICATE, &signer, None),
+                    ess(OID_SIGNING_CERTIFICATE_V2, &signer, None),
+                ],
+                &signer
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_v2_identifier_naming_another_certificate_is_a_mismatch() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let other = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        // A match on the v1 attribute does not excuse the v2 one.
+        assert_eq!(
+            identification(
+                vec![
+                    ess(OID_SIGNING_CERTIFICATE, &signer, None),
+                    ess(OID_SIGNING_CERTIFICATE_V2, &other, None),
+                ],
+                &signer
+            ),
+            Err(Invalid::EssMismatch)
+        );
+    }
+
+    #[test]
+    fn a_v1_identifier_naming_another_certificate_is_a_mismatch() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let other = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        assert_eq!(
+            identification(vec![ess(OID_SIGNING_CERTIFICATE, &other, None)], &signer),
+            Err(Invalid::EssMismatch)
+        );
+    }
+
+    #[test]
+    fn a_v2_identifier_with_the_wrong_algorithm_is_a_mismatch() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        // The hash is SHA-256 while the attribute says SHA-512.
+        let mut id = ess_id(&signer, OID_SHA256);
+        id.hash_algorithm = Some(AlgorithmIdentifierOwned {
+            oid: OID_SHA512,
+            parameters: None,
+        });
+
+        assert_eq!(
+            identification(
+                vec![attribute_of(
+                    OID_SIGNING_CERTIFICATE_V2,
+                    vec![
+                        EssIds { certs: vec![id] }
+                            .to_der()
+                            .expect("identifiers encode")
+                    ]
+                )],
+                &signer
+            ),
+            Err(Invalid::EssMismatch)
+        );
+    }
+
+    #[test]
+    fn a_v2_identifier_with_an_unsupported_algorithm_is_malformed() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        // MD5, which `hash` does not know.
+        let id = ess_id(&signer, OID_SHA256);
+        let mut id = id;
+        id.hash_algorithm = Some(AlgorithmIdentifierOwned {
+            oid: ObjectIdentifier::new_unwrap("1.2.840.113549.2.5"),
+            parameters: None,
+        });
+
+        assert_eq!(
+            identification(
+                vec![attribute_of(
+                    OID_SIGNING_CERTIFICATE_V2,
+                    vec![
+                        EssIds { certs: vec![id] }
+                            .to_der()
+                            .expect("identifiers encode")
+                    ]
+                )],
+                &signer
+            ),
+            Err(Invalid::EssMalformed)
+        );
+    }
+
+    #[test]
+    fn two_identifiers_of_one_version_are_malformed() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let other = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        // Identical values would be one DER element twice and cannot be built
+        // as a set; the two attributes differ in the certificate they name.
+        assert_eq!(
+            identification(
+                vec![
+                    ess(OID_SIGNING_CERTIFICATE_V2, &signer, None),
+                    ess(OID_SIGNING_CERTIFICATE_V2, &other, None),
+                ],
+                &signer
+            ),
+            Err(Invalid::EssMalformed)
+        );
+    }
+
+    #[test]
+    fn an_identifier_attribute_with_two_values_is_malformed() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let other = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let values = [&signer, &other]
+            .into_iter()
+            .map(|certificate| {
+                EssIds {
+                    certs: vec![ess_id(certificate, OID_SHA256)],
+                }
+                .to_der()
+                .expect("identifiers encode")
+            })
+            .collect();
+
+        assert_eq!(
+            identification(
+                vec![attribute_of(OID_SIGNING_CERTIFICATE_V2, values)],
+                &signer
+            ),
+            Err(Invalid::EssMalformed)
+        );
+    }
+
+    #[test]
+    fn an_empty_cert_sequence_is_malformed() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let empty = EssIds { certs: Vec::new() };
+        let empty = empty.to_der().expect("encodes");
+
+        assert_eq!(
+            identification(
+                vec![attribute_of(OID_SIGNING_CERTIFICATE_V2, vec![empty])],
+                &signer
+            ),
+            Err(Invalid::EssMalformed)
+        );
+    }
+
+    #[test]
+    fn a_trailing_identifier_limits_the_path_but_is_not_the_signer() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let other = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let ids = EssIds {
+            certs: vec![ess_id(&signer, OID_SHA256), ess_id(&other, OID_SHA256)],
+        };
+
+        assert_eq!(
+            identification(
+                vec![attribute_of(
+                    OID_SIGNING_CERTIFICATE_V2,
+                    vec![ids.to_der().expect("encodes")]
+                )],
+                &signer
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_absent_tsa_name_is_accepted() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+
+        assert_eq!(tsa_name(None, &signer), Ok(()));
+    }
+
+    #[test]
+    fn the_signers_own_subject_is_accepted_as_tsa_name() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let name = GeneralName::DirectoryName(signer.tbs_certificate.subject.clone());
+
+        assert_eq!(tsa_name(Some(&name), &signer), Ok(()));
+    }
+
+    #[test]
+    fn another_subject_is_a_tsa_name_failure() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let name = GeneralName::DirectoryName(Name::from_str("CN=another").expect("DN parses"));
+
+        assert_eq!(tsa_name(Some(&name), &signer), Err(Invalid::TsaName));
+    }
+
+    #[test]
+    fn a_dns_name_among_the_san_names_is_accepted() {
+        let signer = certificate(
+            "/CN=eku-test",
+            "extendedKeyUsage=critical,timeStamping",
+            Some("subjectAltName=DNS:tsa.example"),
+        );
+        let name = GeneralName::DnsName(Ia5String::new("tsa.example").expect("DNS name"));
+
+        assert_eq!(tsa_name(Some(&name), &signer), Ok(()));
+    }
+
+    #[test]
+    fn a_dns_name_outside_the_san_names_is_a_tsa_name_failure() {
+        let signer = certificate(
+            "/CN=eku-test",
+            "extendedKeyUsage=critical,timeStamping",
+            Some("subjectAltName=DNS:tsa.example"),
+        );
+        let name = GeneralName::DnsName(Ia5String::new("other.example").expect("DNS name"));
+
+        assert_eq!(tsa_name(Some(&name), &signer), Err(Invalid::TsaName));
+    }
+
+    #[test]
+    fn another_general_name_choice_is_a_tsa_name_failure() {
+        let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
+        let name = GeneralName::UniformResourceIdentifier(
+            Ia5String::new("https://tsa.example").expect("URI"),
+        );
+
+        assert_eq!(tsa_name(Some(&name), &signer), Err(Invalid::TsaName));
     }
 
     #[test]
