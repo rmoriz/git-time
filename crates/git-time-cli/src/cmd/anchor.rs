@@ -301,8 +301,8 @@ fn list(repo: &Repo, json: bool) -> Exit {
 /// authority.
 ///
 /// The lines are sorted by id and then fingerprint, so the order the bundle
-/// happens to hold is not drift and a rotation only ever appends next to the
-/// retired root.
+/// happens to hold is not drift: a rotation removes the retired root's line and
+/// adds the new one in its sorted place next to it.
 fn pin(repo: &Repo) -> Exit {
     let mut lines: Vec<(String, String)> = Vec::new();
     let mut problems = Vec::new();
@@ -362,19 +362,24 @@ fn check(repo: &Repo) -> Exit {
     let mut recorded: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     // A line with an id but no fingerprint: the id is named, the value is not.
     let mut unparseable: BTreeSet<String> = BTreeSet::new();
-    for line in body.lines().filter(|line| !line.trim().is_empty()) {
+    for line in body.lines() {
+        // Indentation and trailing blanks belong to neither field.
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
         match line.split_once(' ') {
             Some((id, fingerprint)) if !fingerprint.trim().is_empty() => {
                 recorded
-                    .entry(id.to_owned())
+                    .entry(id.trim().to_owned())
                     .or_default()
                     .insert(fingerprint.trim().to_owned());
             }
             Some((id, _)) => {
-                unparseable.insert(id.to_owned());
+                unparseable.insert(id.trim().to_owned());
             }
             None => {
-                unparseable.insert(line.trim().to_owned());
+                unparseable.insert(line.to_owned());
             }
         }
     }
