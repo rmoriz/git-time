@@ -1292,6 +1292,62 @@ fn anchor_list_names_every_root_with_its_date() {
     assert_eq!(value[0]["roots"][1]["fingerprint"], second, "{json}");
 }
 
+/// The authority line names one certificate: the first *root*. A bundle that
+/// puts the authority's leaf first must not pair the leaf's fingerprint with the
+/// root's date.
+#[test]
+fn the_authority_line_takes_fingerprint_and_date_from_the_first_root() {
+    let repo = Repo::with_pinned_stub();
+    let leaf = repo.authority.dir.path().join("leaf.pem");
+    let mut bundle = std::fs::read(&leaf).expect("the leaf");
+    bundle.extend(std::fs::read(&repo.authority.ca).expect("the root"));
+    std::fs::write(repo.anchors().join("stub.pem"), bundle).expect("write the bundle");
+
+    let root_fingerprint = fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let leaf_fingerprint = fingerprint(&first_der(
+        &std::fs::read_to_string(&leaf).expect("the leaf PEM"),
+    ));
+    assert_ne!(root_fingerprint, leaf_fingerprint, "the two differ");
+
+    for command in [["anchor", "list"], ["tsa", "list"]] {
+        let listing = ok(&repo.run_time(&command));
+        let authority = listing.lines().next().expect("the authority line");
+        assert!(
+            authority.contains(&root_fingerprint),
+            "{command:?}: {listing}"
+        );
+        assert!(
+            !authority.contains(&leaf_fingerprint),
+            "{command:?}: {listing}"
+        );
+    }
+}
+
+/// A bundle the store rejects still says so, instead of reading as an empty one
+/// next to a `pinned:true` the fingerprint no longer backs.
+#[test]
+fn anchor_list_names_an_unreadable_bundle() {
+    let repo = Repo::with_pinned_stub();
+    std::fs::write(repo.anchors().join("stub.pem"), "prose, not a bundle\n").expect("write prose");
+
+    let listing = ok(&repo.run_time(&["anchor", "list"]));
+    let lines: Vec<&str> = listing.lines().collect();
+    assert!(lines[0].contains("pinned:false"), "{listing}");
+    assert_eq!(lines[1].trim(), "(bundle unreadable)", "{listing}");
+    assert!(!listing.contains(" root "), "{listing}");
+
+    // The JSON says the same by having no fingerprint and no roots.
+    let json = ok(&repo.run_time(&["anchor", "list", "--json"]));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("list --json is JSON");
+    assert!(value[0]["fingerprint"].is_null(), "{json}");
+    assert_eq!(value[0]["pinned"], false, "{json}");
+    assert_eq!(
+        value[0]["roots"].as_array().map(Vec::len),
+        Some(0),
+        "{json}"
+    );
+}
+
 #[test]
 fn check_and_pin_name_an_unparseable_anchor() {
     let repo = Repo::with_pinned_stub();
@@ -1658,6 +1714,27 @@ fn preset_list_reads_the_date_from_a_pinned_unpublished_bundle() {
     assert!(swisssign.contains("2020-02-01 expired"), "{listing}");
     assert!(!swisssign.contains("not pinned"), "{listing}");
     assert!(swisssign.contains("(anchored)"), "{listing}");
+}
+
+/// A bundle is append-ordered, not date-ordered: a retired root left in front
+/// must not hide the live one's later date behind it.
+#[test]
+fn preset_list_shows_the_newest_live_root_of_a_mixed_bundle() {
+    let repo = Repo::new();
+    repo.init();
+    let stale = stale_ca(repo.path());
+    let mut bundle = std::fs::read(freetsa_root()).expect("the fixture root");
+    bundle.extend(std::fs::read(&stale).expect("the stale CA"));
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::write(repo.anchors().join("swisssign.pem"), bundle).expect("pin the bundle");
+
+    let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
+    let swisssign = listing
+        .lines()
+        .find(|line| line.starts_with("swisssign "))
+        .unwrap_or_else(|| panic!("the preset line: {listing}"));
+    assert!(swisssign.contains("2041-03-07"), "{listing}");
+    assert!(!swisssign.contains("2020-02-01"), "{listing}");
 }
 
 #[test]

@@ -275,7 +275,7 @@ struct Row {
     alg: String,
     anchor: PathBuf,
     anchored: bool,
-    /// The fingerprint of the bundle's first certificate, when it parses.
+    /// The fingerprint of the bundle's first root, when it loads.
     fingerprint: Option<String>,
     insecure_http: bool,
     /// Every root of the bundle, in file order.
@@ -321,9 +321,13 @@ fn list(repo: &Repo, json: bool) -> Exit {
                 |anchor| anchor.path.clone(),
             );
         let anchored = pinned(&id, &anchor);
-        let fingerprint =
-            crate::cmd::anchor::first_certificate_at(&anchor).map(|der| anchors::fingerprint(&der));
         let roots = anchors::roots(&anchor);
+        // The authority line speaks about its first root, as the text listing
+        // does: fingerprint and date describe the same certificate.
+        let fingerprint = roots
+            .as_ref()
+            .and_then(|roots| roots.first())
+            .map(|root| root.fingerprint.clone());
         rows.push(Row {
             id,
             url,
@@ -435,9 +439,9 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 
 /// Print the built-in presets and whether their anchor is pinned here.
 ///
-/// The date comes from the local bundle where there is one, newest root first:
-/// for a preset that publishes no fingerprint that bundle is the only place the
-/// date exists at all. A published root that is not pinned here has no
+/// The date comes from the local bundle where there is one, newest live root
+/// first: for a preset that publishes no fingerprint that bundle is the only
+/// place the date exists at all. A published root that is not pinned here has no
 /// certificate to read and says `-`; `not pinned` is for a preset with neither.
 fn preset_list(_repo: &Repo) -> Exit {
     // One instant for the whole listing: every date is judged as of one moment.
@@ -445,17 +449,21 @@ fn preset_list(_repo: &Repo) -> Exit {
     for preset in &presets::PRESETS {
         let anchor = anchors::dir().join(format!("{}.pem", preset.name));
         // Only a local certificate can say when it expires, so nothing is
-        // fetched here. The last root is the newest after a rotation.
-        let expiry = anchors::roots(&anchor)
-            .and_then(|roots| roots.last().cloned())
-            .map(|root| anchors::expiry_text(&root.not_after, now))
-            .unwrap_or_else(|| {
-                if preset.fingerprints.is_empty() {
-                    "not pinned".to_owned()
-                } else {
-                    "-".to_owned()
-                }
-            });
+        // fetched here. Bundle order is not date order after an append, so the
+        // newest root that is still valid is the one shown.
+        let expiry = match anchors::roots(&anchor) {
+            Some(roots) => {
+                looming(&roots, now).map(|root| anchors::expiry_text(&root.not_after, now))
+            }
+            None => None,
+        }
+        .unwrap_or_else(|| {
+            if preset.fingerprints.is_empty() {
+                "not pinned".to_owned()
+            } else {
+                "-".to_owned()
+            }
+        });
         println!(
             "{} {} {} {} {} {} ({})",
             preset.name,
@@ -957,6 +965,27 @@ fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
     )?;
     println!("disabled {id}");
     Ok(())
+}
+
+/// The root a listing shows: the newest one still valid at `now`, and the
+/// newest of all when the whole bundle is dead.
+///
+/// Bundle order is not date order — a rotation appends — so `last()` alone can
+/// pick a retired root while a live one sits next to it.
+#[must_use]
+pub(crate) fn looming(
+    roots: &[anchors::RootRow],
+    now: jiff::Timestamp,
+) -> Option<&anchors::RootRow> {
+    let live = roots
+        .iter()
+        .filter(|root| !anchors::expired(&root.not_after, now))
+        .max_by(|left, right| left.not_after.cmp(&right.not_after));
+    live.or_else(|| {
+        roots
+            .iter()
+            .max_by(|left, right| left.not_after.cmp(&right.not_after))
+    })
 }
 
 /// Whether `id`'s anchor at `path` loads.

@@ -247,7 +247,20 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     {
                         let valid = entry.roots_at(now);
                         roots = entry.roots.len();
-                        expired = roots - valid.len();
+                        // `roots_at` filters both ends, so a root whose window
+                        // has not opened yet is not valid — but it is not
+                        // expired either. Only a `notAfter` that is past counts.
+                        expired = entry
+                            .roots
+                            .iter()
+                            .filter(|root| {
+                                x509_cert::Certificate::from_der(root.as_bytes())
+                                    .ok()
+                                    .is_some_and(|certificate| {
+                                        anchors::expired(&anchors::not_after(&certificate), now)
+                                    })
+                            })
+                            .count();
                         pinned.insert(
                             id.clone(),
                             entry
@@ -263,8 +276,10 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                                      git time tsa restore {id} --accept <id>=<fp>)"
                                 ));
                             } else {
-                                let latest = entry
-                                    .roots
+                                // Only a root that is valid now can be the one
+                                // in use, so a future-dated root must not push
+                                // the deadline past it.
+                                let latest = valid
                                     .iter()
                                     .filter_map(|root| {
                                         x509_cert::Certificate::from_der(root.as_bytes()).ok()
@@ -326,9 +341,16 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
         }
     }
     for (id, fingerprint) in unpinned {
+        // `restore` needs a `time.tsa.<id>` section to write into; an id the
+        // config has lost is configured by its preset instead.
+        let remedy = if ids.contains(&id) {
+            format!("git time tsa restore {id} --accept {id}={fingerprint}")
+        } else {
+            format!("git time tsa preset add {id}")
+        };
         report.problem(format!(
             "HEAD names `anchor {id}` fingerprint {fingerprint}, which is not pinned \
-             (git time tsa restore {id} --accept {id}={fingerprint})"
+             ({remedy})"
         ));
     }
     // An anchor for an id without a url is invisible to the policy; say so.

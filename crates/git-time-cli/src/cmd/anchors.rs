@@ -731,6 +731,16 @@ mod tests {
         assert_eq!(expiry_label("2026-01-01", at(2026, 1, 1)), "(expires soon)");
     }
 
+    /// The space is only the separator of a label: a quiet date is not padded.
+    #[test]
+    fn expiry_text_spaces_only_when_a_label_follows() {
+        assert_eq!(
+            expiry_text("2020-02-01", at(2026, 1, 1)),
+            "2020-02-01 expired"
+        );
+        assert_eq!(expiry_text("2030-01-01", at(2026, 1, 1)), "2030-01-01");
+    }
+
     #[test]
     fn eighty_nine_days_out_is_soon() {
         assert_eq!(expiry_label("2026-03-31", at(2026, 1, 1)), "(expires soon)");

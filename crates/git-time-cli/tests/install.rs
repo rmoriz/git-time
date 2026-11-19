@@ -323,6 +323,40 @@ fn stale_ca(dir: &Path) -> PathBuf {
     ca
 }
 
+/// A self-signed CA whose validity window opens in 2030, so a root-list reader
+/// has to tell "not yet" apart from "expired".
+fn future_ca(dir: &Path) -> PathBuf {
+    let key = dir.join("future-key.pem");
+    let ca = dir.join("future-ca.pem");
+    openssl(&[
+        "req",
+        "-x509",
+        "-sha256",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-pkeyopt",
+        "ec_param_enc:named_curve",
+        "-nodes",
+        "-keyout",
+        &pstr(&key),
+        "-out",
+        &pstr(&ca),
+        "-not_before",
+        "20300101000000Z",
+        "-not_after",
+        "20310101000000Z",
+        "-subj",
+        "/CN=future-ca",
+        "-config",
+        &ca_config(dir),
+        "-extensions",
+        "v3_ca",
+    ]);
+    ca
+}
+
 fn openssl(args: &[&str]) {
     let output = Command::new("openssl")
         .args(args)
@@ -1143,6 +1177,43 @@ fn doctor_problems_no_root_valid_now() {
     assert_eq!(value["anchors"][0]["expired"], 1, "{value}");
 }
 
+/// A root that is not valid *yet* is not an expired root, and it must not
+/// become the deadline the informational line prints either.
+#[test]
+fn doctor_does_not_count_a_future_root_as_expired() {
+    let repo = Repo::new();
+    let bundle = repo.path().join("mixed.pem");
+    let mut bytes = Vec::new();
+    for ca in [
+        stale_ca(repo.authority.dir.path()),
+        repo.authority.ca.clone(),
+        future_ca(repo.authority.dir.path()),
+    ] {
+        bytes.extend(std::fs::read(&ca).expect("read a CA"));
+    }
+    std::fs::write(&bundle, bytes).expect("write the mixed bundle");
+    repo.config("time.tsa.stub.anchor", &pstr(&bundle));
+    assert!(repo.install().status.success());
+
+    let json = repo.run_time(&["doctor", "--json"]);
+    let value: serde_json::Value =
+        serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
+    assert_eq!(value["anchors"][0]["roots"], 3, "{value}");
+    assert_eq!(
+        value["anchors"][0]["expired"], 1,
+        "only the closed root is expired: {value}"
+    );
+
+    // The live root is the newest one valid now, so it is the deadline; the
+    // future root's date is later and must not win.
+    let stdout = text(&repo.run_time(&["doctor"]).stdout);
+    let line = stdout
+        .lines()
+        .find(|line| line.contains("root(s), latest notAfter"))
+        .unwrap_or_else(|| panic!("the count line: {stdout}"));
+    assert!(!line.contains("2031-01-01"), "{line}");
+}
+
 /// The expiry sits next to the fingerprint, so a reader sees the stale root
 /// before they see the problem line further down.
 #[test]
@@ -1192,6 +1263,48 @@ fn doctor_problems_a_head_anchoring_an_unpinned_root() {
         "{}",
         text(&doctor.stdout)
     );
+}
+
+/// An id the config has lost has no `time.tsa.<id>` section for `restore` to
+/// write into, so the hint is the preset that configures it.
+#[test]
+fn doctor_suggests_a_preset_for_an_unconfigured_anchored_id() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.commit("base");
+    let fingerprint = fingerprint_colon(&first_der(&read(&repo.authority.ca)));
+    repo.unset("time.tsa.stub.url");
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    let expected = format!(
+        "HEAD names `anchor stub` fingerprint {fingerprint}, which is not pinned \
+         (git time tsa preset add stub)"
+    );
+    assert!(
+        text(&doctor.stdout).contains(&expected),
+        "{}",
+        text(&doctor.stdout)
+    );
+}
+
+/// The whole happy path in one run: a commit sealed after `install` names a root
+/// that *is* pinned, so doctor has nothing to report. The commit predates
+/// install in `Repo::new`, so this is the guard for the fingerprint comparison
+/// the block check does.
+#[test]
+fn a_sealed_commit_under_a_pinned_root_keeps_doctor_quiet() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.commit("sealed");
+
+    let doctor = repo.run_time(&["doctor"]);
+    let stdout = text(&doctor.stdout);
+    assert_eq!(doctor.status.code(), Some(0), "{stdout}");
+    assert!(!stdout.contains("problem:"), "{stdout}");
+    // The block really does name the root it was judged against.
+    let block = text(&git(repo.path(), &["cat-file", "commit", "HEAD"]));
+    assert!(block.contains("X-RFC3161-Anchor: id=stub"), "{block}");
 }
 
 #[test]

@@ -25,7 +25,7 @@ use std::process::{Command, Stdio};
 use git_time_core::presets::Preset;
 
 use crate::cmd::anchors;
-use crate::cmd::tsa::parse_choice;
+use crate::cmd::tsa::{looming, parse_choice};
 
 /// The keys the selector understands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,7 +301,8 @@ fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestam
 /// The local bundle is read first, because for a preset that publishes no root
 /// it is the only copy: such an authority is exactly where a hidden date hurts.
 /// The date is what a reader weighs a rotation by, so it sits where the choice
-/// is made.
+/// is made — and it is the newest live root's, since a bundle's order is
+/// append order and not date order.
 fn trust(preset: &Preset, roots: Option<&[anchors::RootRow]>, now: jiff::Timestamp) -> String {
     if let Some(roots) = roots.filter(|roots| !roots.is_empty()) {
         if roots
@@ -310,7 +311,7 @@ fn trust(preset: &Preset, roots: Option<&[anchors::RootRow]>, now: jiff::Timesta
         {
             return "EXPIRED".to_owned();
         }
-        if let Some(root) = roots.last() {
+        if let Some(root) = looming(roots, now) {
             return format!("pin {}", anchors::expiry_text(&root.not_after, now));
         }
     }
@@ -854,6 +855,51 @@ mod tests {
                 at(2026, 1, 1)
             ),
             "pin 2030-01-01"
+        );
+        // Bundle order is append order, not date order: a retired root appended
+        // behind a live one must not become the date the reader weighs.
+        assert_eq!(
+            super::trust(
+                preset,
+                Some(&[root("2030-01-01"), root("2020-02-01")]),
+                at(2026, 1, 1)
+            ),
+            "pin 2030-01-01"
+        );
+    }
+
+    /// A pinned, live root renders as `pin <day>` in the trust column, and the
+    /// column keeps the width `TRUST_WIDTH` gives it.
+    #[test]
+    fn the_frame_prints_a_pinned_date_in_the_trust_column() {
+        let xdg = tempfile::TempDir::new().expect("xdg dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
+        let anchors = xdg.path().join("git-time/anchors");
+        std::fs::create_dir_all(&anchors).expect("anchors dir");
+        // The fixture root closes in 2041, so the date is a live one.
+        std::fs::write(
+            anchors.join("digicert.pem"),
+            include_bytes!("../../../git-time-core/tests/fixtures/freetsa_root.pem"),
+        )
+        .expect("pin a root");
+
+        let preset = &presets::PRESETS[1..2]; // digicert: published, pinned, http
+        let rendered = frame(&picked(), preset, 24, 80);
+        let line = shards(&rendered)
+            .into_iter()
+            .find(|line| line.trim_start().starts_with("> ["))
+            .expect("the cursor row")
+            .to_owned();
+        assert!(line.contains("pin 2041-03-07"), "{line:?}");
+        // `http` starts one space past the column, which is `TRUST_WIDTH` wide.
+        let column = |marker: &str| {
+            line.find(marker)
+                .unwrap_or_else(|| panic!("`{marker}` in {line:?}"))
+        };
+        assert_eq!(
+            column("http") - column("pin "),
+            super::TRUST_WIDTH + 1,
+            "{line:?}"
         );
     }
 

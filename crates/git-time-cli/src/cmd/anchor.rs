@@ -9,11 +9,13 @@
 //! `tsa list` and doctor can name them as unusable instead of as never fetched.
 //!
 //! `list` names each configured anchor with the fingerprint and `notAfter` of
-//! its first certificate, then one line per root of the bundle. The first
-//! certificate is the trust anchor, so a `notAfter` in the past is a cheap stale
-//! signal; a chained bundle lists every root it holds, so an appended one shows
-//! up as a second line. `--json` carries the same fields for a machine reader,
-//! the roots as an array.
+//! its first root, then one line per root of the bundle. Both fields describe
+//! that one certificate, so a bundle that names an intermediate first cannot
+//! pair a root's date with the intermediate's fingerprint. A `notAfter` in the
+//! past is a cheap stale signal; a chained bundle lists every root it holds, so
+//! an appended one shows up as a second line. A bundle the store rejects is one
+//! `  (bundle unreadable)` line instead of silently losing its roots. `--json`
+//! carries the same fields for a machine reader, the roots as an array.
 //!
 //! `pin` writes `time.anchors-lock` in the repository root, one
 //! `<id> <sha256-fingerprint>` line per root of every authority; `--check`
@@ -247,7 +249,7 @@ pub(crate) fn keep_unparsed(staging: &Path, target: &Path) {
 struct Row {
     id: String,
     path: PathBuf,
-    /// The fingerprint of the first certificate, when it parses.
+    /// The fingerprint of the first root, when the bundle loads.
     fingerprint: Option<String>,
     /// Its `notAfter` as `YYYY-MM-DD`.
     not_after: Option<String>,
@@ -266,22 +268,17 @@ fn list(repo: &Repo, json: bool) -> Exit {
     let rows: Vec<Row> = configured
         .iter()
         .map(|anchor| {
-            let first = first_certificate_at(&anchor.path).and_then(|der| {
-                let certificate = Certificate::from_der(&der).ok()?;
-                Some((anchors::fingerprint(&der), certificate))
-            });
-            let (fingerprint, not_after) = match first {
-                Some((fingerprint, certificate)) => {
-                    (Some(fingerprint), Some(anchors::not_after(&certificate)))
-                }
-                None => (None, None),
-            };
+            let roots = anchors::roots(&anchor.path);
+            // Fingerprint and date come from the same certificate — the first
+            // root — so a bundle that lists an intermediate first cannot show
+            // the intermediate's fingerprint next to a root's date.
+            let first = roots.as_ref().and_then(|roots| roots.first());
             Row {
                 id: anchor.id.clone(),
                 path: anchor.path.clone(),
-                fingerprint,
-                not_after,
-                roots: anchors::roots(&anchor.path),
+                fingerprint: first.map(|root| root.fingerprint.clone()),
+                not_after: first.map(|root| root.not_after.clone()),
+                roots,
             }
         })
         .collect();
@@ -333,6 +330,11 @@ fn list(repo: &Repo, json: bool) -> Exit {
                     root.fingerprint,
                     anchors::expiry_text(&root.not_after, now),
                 );
+            }
+            // A bundle that exists but that the store rejects pins nothing, so
+            // the missing root lines would otherwise read as an empty bundle.
+            if row.roots.is_none() && row.path.exists() {
+                println!("  (bundle unreadable)");
             }
         }
     }
@@ -506,7 +508,8 @@ pub(crate) fn root_certificates(path: &Path) -> Option<Vec<Vec<u8>>> {
 
 /// The DER of `path`'s first certificate, when it parses as one.
 ///
-/// Shared with `tsa list`, so both listings name the same fingerprint.
+/// A listing takes its fingerprint from the first *root* instead; this is what
+/// `tsa select` digests after a pin, where the first block is what was written.
 pub(crate) fn first_certificate_at(path: &Path) -> Option<Vec<u8>> {
     let bytes = std::fs::read(path).ok()?;
     let der = first_certificate(&bytes)?;
