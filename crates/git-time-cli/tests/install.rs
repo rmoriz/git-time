@@ -289,6 +289,40 @@ impl Authority {
     }
 }
 
+/// A self-signed CA whose validity window closed in 2020, so no reader of the
+/// bundle finds a root that is valid now.
+fn stale_ca(dir: &Path) -> PathBuf {
+    let key = dir.join("stale-key.pem");
+    let ca = dir.join("stale-ca.pem");
+    openssl(&[
+        "req",
+        "-x509",
+        "-sha256",
+        "-newkey",
+        "ec",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-pkeyopt",
+        "ec_param_enc:named_curve",
+        "-nodes",
+        "-keyout",
+        &pstr(&key),
+        "-out",
+        &pstr(&ca),
+        "-not_before",
+        "20200101000000Z",
+        "-not_after",
+        "20200201000000Z",
+        "-subj",
+        "/CN=stale-ca",
+        "-config",
+        &ca_config(dir),
+        "-extensions",
+        "v3_ca",
+    ]);
+    ca
+}
+
 fn openssl(args: &[&str]) {
     let output = Command::new("openssl")
         .args(args)
@@ -1076,6 +1110,59 @@ fn doctor_names_an_anchor_that_is_not_a_certificate() {
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
     assert!(
         text(&doctor.stdout).contains("unparseable anchor"),
+        "{}",
+        text(&doctor.stdout)
+    );
+}
+
+#[test]
+fn doctor_problems_no_root_valid_now() {
+    let repo = Repo::new();
+    let stale = stale_ca(repo.authority.dir.path());
+    repo.config("time.tsa.stub.anchor", &pstr(&stale));
+    assert!(repo.install().status.success());
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    let stdout = text(&doctor.stdout);
+    assert!(
+        stdout.contains("`anchor stub` has no root valid now"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("accept a fresh one: git time tsa restore stub --accept <id>=<fp>)"),
+        "the way out is spelled out: {stdout}"
+    );
+
+    // The counts are part of the JSON shape, expired included.
+    let json = repo.run_time(&["doctor", "--json"]);
+    assert_eq!(json.status.code(), Some(1), "{}", text(&json.stdout));
+    let value: serde_json::Value =
+        serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
+    assert_eq!(value["anchors"][0]["roots"], 1, "{value}");
+    assert_eq!(value["anchors"][0]["expired"], 1, "{value}");
+}
+
+#[test]
+fn doctor_problems_a_head_anchoring_an_unpinned_root() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.commit("base");
+    let fingerprint = fingerprint_colon(&first_der(&read(&repo.authority.ca)));
+
+    // Move the pinned bundle away: HEAD already names its root, so from now on
+    // the line records evidence this machine cannot check.
+    let moved = repo.path().join("moved-ca.pem");
+    std::fs::rename(&repo.authority.ca, &moved).expect("move the anchor away");
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    let expected = format!(
+        "HEAD names `anchor stub` fingerprint {fingerprint}, which is not pinned \
+         (git time tsa restore stub --accept stub={fingerprint})"
+    );
+    assert!(
+        text(&doctor.stdout).contains(&expected),
         "{}",
         text(&doctor.stdout)
     );

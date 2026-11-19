@@ -7,18 +7,23 @@
 //! authorities are configured, and each anchor's path and SHA-256 fingerprint.
 //!
 //! These things make it exit `1`: no authority at all, an anchor that is missing,
-//! unreadable or not a parseable certificate bundle, a gate that disagrees with
-//! the hooks name by name, an unknown `time.gate` value, a shim or preserve that
-//! lost its execute bit, and a dangling symlink at a hook name. A shim that
+//! unreadable or not a parseable certificate bundle, an anchor bundle with no
+//! root valid now, a HEAD block naming a root this machine has not pinned, a gate
+//! that disagrees with the hooks name by name, an unknown `time.gate` value, a
+//! shim or preserve that lost its execute bit, and a dangling symlink at a hook
+//! name. A shim that
 //! cannot reach the binary is one too. Everything else is reported without
 //! failing — a foreign hook is normal, an absent hook is what an uninstalled
 //! repository looks like. `--json` prints the report as one object instead of the
 //! lines.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+use der::Decode as _;
 use git_time_core::repo::Repo;
-use git_time_core::trust::AnchorStore;
+use git_time_core::store;
+use git_time_core::trust::{self, AnchorStore};
 use serde_json::{Map, Value, json};
 
 use crate::cmd::{Exit, anchors, hooks, open};
@@ -167,6 +172,11 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
 
     let configured = anchors::configured(repo)?;
     let mut anchor_reports = Vec::with_capacity(ids.len());
+    // The roots each id may still vouch with, by fingerprint. A bundle that
+    // fails to load pins nothing, so a block naming it is reported below.
+    let mut pinned: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // One instant for the whole run: every bundle is judged as of one moment.
+    let now = jiff::Timestamp::now();
     for id in &ids {
         match configured.iter().find(|anchor| &anchor.id == id) {
             None => {
@@ -180,6 +190,8 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "fingerprint": Value::Null,
                     "missing": true,
                     "unparseable": false,
+                    "roots": 0,
+                    "expired": 0,
                 }));
             }
             Some(anchor) => match std::fs::read(&anchor.path) {
@@ -198,6 +210,8 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                         "fingerprint": Value::Null,
                         "missing": true,
                         "unparseable": false,
+                        "roots": 0,
+                        "expired": 0,
                     }));
                 }
                 Ok(bytes) => {
@@ -210,11 +224,62 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                         "anchor {id}: {} sha256 {fingerprint}",
                         anchor.path.display()
                     ));
+                    let mut roots = 0;
+                    let mut expired = 0;
                     if let Err(ref error) = parse {
                         report.problem(format!(
                             "unparseable anchor for `{id}` at {}: {error}",
                             anchor.path.display()
                         ));
+                    } else if let Ok(store) = &parse
+                        && let Some(entry) = store.anchor(id)
+                    {
+                        let valid = entry.roots_at(now);
+                        roots = entry.roots.len();
+                        expired = roots - valid.len();
+                        pinned.insert(
+                            id.clone(),
+                            entry
+                                .roots
+                                .iter()
+                                .map(|root| trust::fingerprint(root.as_bytes()))
+                                .collect(),
+                        );
+                        if roots > 0 {
+                            if valid.is_empty() {
+                                report.problem(format!(
+                                    "`anchor {id}` has no root valid now (accept a fresh one: \
+                                     git time tsa restore {id} --accept <id>=<fp>)"
+                                ));
+                            } else {
+                                let latest = entry
+                                    .roots
+                                    .iter()
+                                    .filter_map(|root| {
+                                        x509_cert::Certificate::from_der(root.as_bytes()).ok()
+                                    })
+                                    .filter_map(|certificate| {
+                                        i64::try_from(
+                                            certificate
+                                                .tbs_certificate
+                                                .validity
+                                                .not_after
+                                                .to_unix_duration()
+                                                .as_secs(),
+                                        )
+                                        .ok()
+                                    })
+                                    .max()
+                                    .and_then(|second| jiff::Timestamp::from_second(second).ok())
+                                    .map_or_else(
+                                        || "-".to_owned(),
+                                        |at| at.strftime("%Y-%m-%d").to_string(),
+                                    );
+                                report.say(format!(
+                                    "anchor {id}: {roots} root(s), latest notAfter {latest}"
+                                ));
+                            }
+                        }
                     }
                     anchor_reports.push(json!({
                         "id": id,
@@ -222,10 +287,38 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                         "fingerprint": fingerprint,
                         "missing": false,
                         "unparseable": parse.is_err(),
+                        "roots": roots,
+                        "expired": expired,
                     }));
                 }
             },
         }
+    }
+    // HEAD's own block names the roots its evidence was checked against. A
+    // fingerprint this machine has not pinned makes that evidence unreadable
+    // later, which is exactly the rotation a human has to accept now.
+    let mut unpinned: BTreeSet<(String, String)> = BTreeSet::new();
+    if let Ok(Some(oid)) = repo.resolve_ref("HEAD")
+        && let Ok((object, _)) = repo.read_commit(&oid)
+        && let Some(trailer) = object.pre_image(store::PREFIX).trailer
+        && let Ok(Some(block)) = store::decode(&trailer)
+    {
+        for (id, fingerprints) in &block.anchors {
+            for fingerprint in fingerprints {
+                if !pinned
+                    .get(id)
+                    .is_some_and(|known| known.contains(fingerprint))
+                {
+                    unpinned.insert((id.clone(), fingerprint.clone()));
+                }
+            }
+        }
+    }
+    for (id, fingerprint) in unpinned {
+        report.problem(format!(
+            "HEAD names `anchor {id}` fingerprint {fingerprint}, which is not pinned \
+             (git time tsa restore {id} --accept {id}={fingerprint})"
+        ));
     }
     // An anchor for an id without a url is invisible to the policy; say so.
     for anchor in &configured {
