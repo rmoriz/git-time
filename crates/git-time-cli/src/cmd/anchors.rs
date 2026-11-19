@@ -550,7 +550,9 @@ pub(crate) fn pem_block(der: &[u8]) -> Vec<u8> {
     out.into_bytes()
 }
 
-/// Every TSA id configured under `time.tsa.<id>.url`, in id order.
+/// Every TSA id configured under `time.tsa.<id>.url` or `time.tsa.<id>.anchor`,
+/// in id order. An `anchor`-key-only section is still locked, so a lock written
+/// before the key was dropped does not start reporting drift.
 pub fn tsa_ids(repo: &Repo) -> Result<Vec<String>, Exit> {
     let mut ids = Vec::new();
     for (key, _value) in listing(repo)? {
@@ -560,7 +562,7 @@ pub fn tsa_ids(repo: &Repo) -> Result<Vec<String>, Exit> {
         let Some((id, field)) = rest.rsplit_once('.') else {
             continue;
         };
-        if field == "url" && !ids.iter().any(|seen: &String| seen == id) {
+        if matches!(field, "url" | "anchor") && !ids.iter().any(|seen: &String| seen == id) {
             ids.push(id.to_owned());
         }
     }

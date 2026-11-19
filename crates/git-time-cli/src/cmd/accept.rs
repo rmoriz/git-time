@@ -114,8 +114,9 @@ pub(crate) fn matches(accept: &str, der: &[u8]) -> bool {
 
 /// What applying a fetched bundle came to.
 pub(crate) enum Applied {
-    /// The bundle was expected and nothing was pinned yet: the fetch is the
-    /// first pin, and what matched is named.
+    /// The bundle was written without appending anything: either it is the
+    /// first pin, or a repeated fetch whose merge adds no root (only chain
+    /// material is new). What matched is named.
     Replaced {
         /// The published value that matched, when one did.
         matched: Option<&'static str>,
@@ -311,21 +312,21 @@ pub(crate) fn apply(
         pinned: served.iter().any(|root| pinned_roots.contains(root)),
     };
     let accepted = accept.is_some_and(|value| served.iter().any(|root| matches(value, root)));
-    // The root the run is about: a served root that is **not** pinned yet, else
-    // the first root any expectation describes, else the first served one. A
-    // rotation is recorded from this value, so a re-fetch that brings a new root
-    // must print that root, not one the file already has. It is always a root, so
-    // "the fetched root is ..." stays true — a leaf first in the file is neither.
+    // The root the run is about: the accepted one if `--accept` named one, else a
+    // served root that is **not** pinned yet, else the first root any expectation
+    // describes, else the first served one. A rotation is recorded from this
+    // value, so a re-fetch that brings a new root must print that root, not one
+    // the file already has. It is always a root, so "the fetched root is ..."
+    // stays true — a leaf first in the file is neither.
     let is_pinned = |root: &[u8]| pinned_roots.iter().any(|pinned| pinned == root);
-    let found_root = served
-        .iter()
-        .find(|root| !is_pinned(root))
+    let found_root = accept
+        .and_then(|value| served.iter().find(|root| matches(value, root)))
+        .or_else(|| served.iter().find(|root| !is_pinned(root)))
         .or_else(|| {
             served.iter().find(|root| {
                 let root = root.as_slice();
                 named.iter().any(|value| matches(value, root))
                     || fingerprint_matches(published, root).is_some()
-                    || accept.is_some_and(|value| matches(value, root))
             })
         })
         .cloned()

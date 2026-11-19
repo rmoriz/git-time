@@ -5,7 +5,7 @@
 //! owns (`ours`, `chained`, `foreign`, `absent`, `not-executable`, `dangling`),
 //! whether `time.gate` agrees with each installed `pre-*` hook, how many
 //! authorities are configured, and each anchor's path, SHA-256 fingerprint and
-//! first certificate's expiry.
+//! first root's expiry.
 //!
 //! These things make it exit `1`: no authority at all, an anchor that is missing,
 //! unreadable or not a parseable certificate bundle, an anchor bundle with no
@@ -229,6 +229,15 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                 }));
             }
             Ok(bytes) => {
+                // The policy needs the key, not just a resolvable bundle: a
+                // url-only section is refused as `Missing anchor` at seal and
+                // verify, so one that holds a bundle is still a problem here.
+                let anchored = repo
+                    .config_non_empty(&format!("time.tsa.{id}.anchor"))
+                    .map_err(Exit::config)?;
+                let url = repo
+                    .config_non_empty(&format!("time.tsa.{id}.url"))
+                    .map_err(Exit::config)?;
                 // The same load the policy does, so a bundle that is only
                 // PEM-shaped is a problem here rather than `Untrusted` at
                 // the next commit.
@@ -245,6 +254,19 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "anchor {id}: {} sha256 {fingerprint}{expiry}",
                     path.display()
                 ));
+                if anchored.is_none() {
+                    report.problem(format!(
+                        "anchor {id}: no `time.tsa.{id}.anchor` configured, so the policy \
+                         refuses it (run: git time tsa add {id} --anchor {})",
+                        path.display()
+                    ));
+                }
+                if url.is_none() {
+                    report.problem(format!(
+                        "anchor {id}: no `time.tsa.{id}.url` configured, so the policy \
+                         refuses it (run: git time tsa add <url> --id {id})"
+                    ));
+                }
                 let mut roots = 0;
                 let mut expired = 0;
                 if let Err(ref error) = parse {
@@ -366,7 +388,10 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
     }
     // An anchor for an id without a url is invisible to the policy; say so.
     for anchor in &configured {
-        if !ids.contains(&anchor.id) {
+        let url = repo
+            .config_non_empty(&format!("time.tsa.{}.url", anchor.id))
+            .map_err(Exit::config)?;
+        if url.is_none() {
             report.say(format!(
                 "anchor {}: {} (no url configured, unused)",
                 anchor.id,

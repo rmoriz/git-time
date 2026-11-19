@@ -1414,14 +1414,19 @@ fn doctor_suggests_a_preset_for_an_unconfigured_anchored_id() {
 
     let doctor = repo.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
-    // `stub` is not a preset either, so the hint is the `add` that configures
-    // it; nothing can be fetched until a URL is written.
-    let expected = format!(
-        "HEAD names `anchor stub` fingerprint {fingerprint}, which is not pinned \
-         (git time tsa add <url> --id stub)"
-    );
+    // The policy refuses the section for the missing url, so doctor does too and
+    // names the `add` that writes one; there is nothing to fetch until then.
+    let expected = "anchor stub: no `time.tsa.stub.url` configured, so the policy refuses it \
+         (run: git time tsa add <url> --id stub)";
     assert!(
-        text(&doctor.stdout).contains(&expected),
+        text(&doctor.stdout).contains(expected),
+        "{}",
+        text(&doctor.stdout)
+    );
+    // The root the block names is still pinned, so it is not reported unpinned.
+    let unpinned = format!("HEAD names `anchor stub` fingerprint {fingerprint}");
+    assert!(
+        !text(&doctor.stdout).contains(&unpinned),
         "{}",
         text(&doctor.stdout)
     );
