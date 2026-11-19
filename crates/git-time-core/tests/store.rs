@@ -313,7 +313,7 @@ fn anchor_fingerprints_must_be_sha256_hex() {
         assert!(
             matches!(
                 decode(encoded.as_bytes()),
-                Err(DecodeError::InvalidField { .. })
+                Err(DecodeError::InvalidField { ref field, .. }) if field == "anchor.sha256"
             ),
             "{fingerprints:?} must be rejected"
         );
@@ -356,6 +356,101 @@ fn anchor_fields_are_strictly_ordered() {
             ),
             "{value:?} must be rejected"
         );
+    }
+}
+
+#[test]
+fn a_repeated_fingerprint_on_one_line_collapses_to_one() {
+    let fingerprint = fp(0xab);
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{PREFIX}Anchor: id=x; sha256={fingerprint},{fingerprint}\n{PREFIX}Fail: id=x; reason=y\n",
+        imprint().to_trailer_value()
+    );
+    let decoded = decode(encoded.as_bytes())
+        .expect("decodes")
+        .expect("has a block");
+    assert_eq!(decoded.anchors["x"], vec![fingerprint.clone()]);
+
+    let re_encoded = String::from_utf8(encode(&decoded, usize::MAX).expect("fits")).expect("ASCII");
+    let line = re_encoded
+        .lines()
+        .find(|line| line.starts_with(&format!("{PREFIX}Anchor:")))
+        .expect("the anchor survives");
+    assert_eq!(
+        line,
+        format!("{PREFIX}Anchor: id=x; sha256={fingerprint}"),
+        "the repeat must be rendered once"
+    );
+}
+
+#[test]
+fn an_anchor_line_without_id_is_rejected() {
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{PREFIX}Anchor: sha256={}\n{PREFIX}Fail: id=x; reason=y\n",
+        imprint().to_trailer_value(),
+        fp(1)
+    );
+    match decode(encoded.as_bytes()) {
+        Err(DecodeError::InvalidField { field, .. }) => assert_eq!(field, "anchor.id"),
+        other => panic!("expected a missing `id`, got {other:?}"),
+    }
+}
+
+#[test]
+fn thirty_two_non_hex_octets_are_rejected() {
+    let value = vec!["GG"; 32].join(":");
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{PREFIX}Anchor: id=x; sha256={value}\n{PREFIX}Fail: id=x; reason=y\n",
+        imprint().to_trailer_value()
+    );
+    match decode(encoded.as_bytes()) {
+        Err(DecodeError::InvalidField { field, .. }) => assert_eq!(field, "anchor.sha256"),
+        other => panic!("expected an invalid fingerprint, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_anchor_line_after_the_token_it_names_decodes() {
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{PREFIX}Token: ver=1; id=x; alg=sha256; nonce=9c1f; tst=KLUv_SQAAQAAmenYUQ\n{PREFIX}Anchor: id=x; sha256={}\n",
+        imprint().to_trailer_value(),
+        fp(1)
+    );
+    let decoded = decode(encoded.as_bytes())
+        .expect("line order does not decide the reference")
+        .expect("has a block");
+    assert_eq!(decoded.anchors["x"], vec![fp(1)]);
+}
+
+#[test]
+fn encode_refuses_a_noncanonical_fingerprint_an_empty_list_and_a_ghost_id() {
+    let mut lowercase = block();
+    lowercase.tokens.truncate(1);
+    lowercase
+        .anchors
+        .insert("freetsa".to_owned(), vec![fp(0xab).to_lowercase()]);
+    match encode(&lowercase, usize::MAX) {
+        Err(EncodeError::Invalid { field, .. }) => assert_eq!(field, "anchor.sha256"),
+        other => panic!("expected an invalid fingerprint, got {other:?}"),
+    }
+
+    let mut empty = block();
+    empty.tokens.truncate(1);
+    empty.anchors.insert("freetsa".to_owned(), Vec::new());
+    match encode(&empty, usize::MAX) {
+        Err(EncodeError::Invalid { field, reason, .. }) => {
+            assert_eq!(field, "anchor.sha256");
+            assert!(reason.contains("at least one"), "{reason}");
+        }
+        other => panic!("expected an empty list, got {other:?}"),
+    }
+
+    let mut ghost = block();
+    ghost.tokens.truncate(1);
+    ghost.anchors.insert("ghost".to_owned(), vec![fp(1)]);
+    match encode(&ghost, usize::MAX) {
+        Err(EncodeError::Invalid { field, .. }) => assert_eq!(field, "anchor.id"),
+        other => panic!("expected a ghost id, got {other:?}"),
     }
 }
 

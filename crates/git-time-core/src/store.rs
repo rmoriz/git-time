@@ -321,7 +321,7 @@ pub fn decode(bytes: &[u8]) -> Result<Option<TrailerBlock>, DecodeError> {
             && !failures.iter().any(|failure| &failure.id == id)
         {
             return Err(DecodeError::InvalidField {
-                field: "Anchor".to_owned(),
+                field: "anchor.id".to_owned(),
                 reason: format!("`{id}` names no Token or Fail in this block"),
             });
         }
@@ -552,8 +552,17 @@ fn parse_object(value: &[u8]) -> Result<String, DecodeError> {
 fn parse_anchor(value: &[u8]) -> Result<(String, Vec<String>), DecodeError> {
     let fields = pairs(value, "Anchor")?;
     let mut cursor = 0;
-    let id = text(require(&fields, &mut cursor, b"id")?, "Anchor.id")?;
-    let list = require(&fields, &mut cursor, b"sha256")?;
+    let id = text(
+        require(&fields, &mut cursor, b"id").map_err(|_| DecodeError::InvalidField {
+            field: "anchor.id".to_owned(),
+            reason: "field missing or out of order".to_owned(),
+        })?,
+        "anchor.id",
+    )?;
+    let list = require(&fields, &mut cursor, b"sha256").map_err(|_| DecodeError::InvalidField {
+        field: "anchor.sha256".to_owned(),
+        reason: "field missing or out of order".to_owned(),
+    })?;
     if cursor != fields.len() {
         return Err(DecodeError::InvalidField {
             field: "Anchor".to_owned(),
@@ -562,7 +571,11 @@ fn parse_anchor(value: &[u8]) -> Result<(String, Vec<String>), DecodeError> {
     }
     let mut fingerprints = Vec::new();
     for part in list.split(|byte| *byte == b',') {
-        fingerprints.push(fingerprint(part)?);
+        let value = fingerprint(part)?;
+        // A repeat inside one line collapses; first-seen order is kept.
+        if !fingerprints.contains(&value) {
+            fingerprints.push(value);
+        }
     }
     Ok((id, fingerprints))
 }
@@ -580,7 +593,7 @@ fn fingerprint(value: &[u8]) -> Result<String, DecodeError> {
             .any(|octet| octet.len() != 2 || octet.iter().any(|byte| nibble(*byte).is_none()))
     {
         return Err(DecodeError::InvalidField {
-            field: "sha256".to_owned(),
+            field: "anchor.sha256".to_owned(),
             reason: "expected 32 colon-separated hex octets".to_owned(),
         });
     }
