@@ -34,6 +34,9 @@ unable to hold two generations.
   fetch.
 - Evidence says which anchor it needs, so a future verifier can tell the
   difference between "you lack the root" and "this token is forged".
+- The token's signed signer identifier is enforced (either RFC 3161's
+  `SigningCertificate` or RFC 5816's `SigningCertificateV2`) before anything
+  about roots or windows is decided.
 
 ## Non-goals
 
@@ -45,6 +48,9 @@ unable to hold two generations.
   yes; the lock diff and `doctor` make noticing cheap.
 - Sealing a commit whose tokens are older than every pinned root without
   re-fetching (that is the `UNTRUSTED` path, by design).
+- Enforcing the path limits that `certs[1..]` declare. They are accepted and
+  ignored; only `certs[0]` is judged.
+- Re-signing or repairing a token whose ESS attribute is wrong.
 
 ## Anti-goals
 
@@ -66,6 +72,11 @@ unable to hold two generations.
   embedded in it.
 - `Invalid` is `Copy`, its `as_str()` is a stable machine string published in
   `docs/format.md`, and `commit.rs` derives the `UNTRUSTED` verdict from it.
+- RFC 3161 §2.4.2 requires a signed `SigningCertificate` attribute; RFC 5816
+  §2.2.1 permits `ESSCertID` or `ESSCertIDv2` instead. `docs/format.md:273`
+  already demands the check; the code does not perform it. The SignerInfo `sid`
+  is not covered by the signature, so that attribute is the only signed link
+  between the TSTInfo and the signing certificate.
 
 ## Approaches considered
 
@@ -85,6 +96,29 @@ is trusted only by a root that was valid when the token was made *and* that a
 human let in.
 
 ## Design
+
+### The signer identifier
+
+Bringing the verifier up to the RFCs it cites is a precondition of the rest, not
+a neighbour of it: rotation changes *which* certificate may back a token, so the
+binding between token and certificate has to be sound before it moves.
+
+- At least one of `SigningCertificate` (`ESSCertID`, SHA-1) and
+  `SigningCertificateV2` (`ESSCertIDv2`, algorithm field, `sha256` default) MUST
+  be a signed attribute. None is `EssMissing`.
+- Every present one is independently evaluated; `certs[0]` hashes the signer's
+  whole DER and must equal `cert_hash`. A mismatch is `EssMismatch`, and with
+  both present a conflict is a refusal (RFC 5035 §7 permits that). Certificates
+  after `certs[0]` limit the path and are not required to be the signer.
+- Two instances of one attribute, more than one value in one attribute, an empty
+  `certs` or an unsupported hash algorithm is `EssMalformed`.
+- The TSTInfo `tsa` hint, when present, must name one of the signer's subject
+  names (a matching `directoryName` or SAN `dNSName`); otherwise `TsaName`.
+- A second `signerInfo` is `Malformed` (RFC 3161: no signatures but the TSA's).
+
+All four are `bad-token` and none is `untrusted`: the token itself is
+inconsistent, which is not a trust question. They are judged before the
+signature, so a byte-patched token reports the identifier it broke.
 
 ### Bundle layout
 
@@ -115,8 +149,9 @@ returns the whole generation set.
    `AnchorNotPinned` itself, `commit.rs` never post-processes an evidence line.
 3. Every candidate becomes a `webpki` trust anchor; one `verify_for_usage` call
    with all of them, the same `required_if_present` EKU rule as today.
-4. Everything else — imprint, nonce, ESS, `genTime` window, signer EKU — is
-   unchanged.
+4. Everything else is unchanged: imprint, nonce, `genTime` window, signer EKU.
+   The signer identifier above is judged inside `authenticate`, before the
+   signature, so its own refusals are not masked by a broken signature.
 
 ### Block line
 
@@ -292,13 +327,25 @@ whose newer root is fine.
 | second `install` after an accept | no mismatch, both roots kept |
 | malformed or duplicated `Anchor` line | block rejected |
 | restore on a block naming a root the preset no longer publishes | reported, needs `--accept id=fp` |
+| token with no ESS signer identifier | `bad-token`, `ess-missing` |
+| ESS attribute naming another certificate | `bad-token`, `ess-mismatch` |
+| both ESS flavors, both naming the signer | passes |
+| both ESS flavors, conflicting | `ess-mismatch` |
+| two attributes, two values, empty `certs`, unsupported algorithm | `ess-malformed` |
+| `tsa` naming another DN | `bad-token`, `tsa-name` |
+| two `signerInfo` structures | `malformed` |
 | `tsa list`/`tsa select` on a pinned expired root | `YYYY-MM-DD expired` / `EXPIRED` |
 | `tsa preset list` on a preset that was never pinned | `not pinned`, no network |
 | a root expiring in 30 days | `(expires soon)` |
 
 ## Compatibility
 
-Additive at every layer: old bundles are valid (all certificates classified by
+One deliberate tightening: a token without a signer identifier, or one naming
+another certificate, stops verifying. Every conforming TSA sends the attribute
+and `format.md` already required it, so the only tokens lost are ones a strict
+reader refused anyway.
+
+Apart from that, additive at every layer: old bundles are valid (all certificates classified by
 self-signedness, the existing single-root file keeps working), old blocks decode,
 old readers keep verifying what they could verify before. Nothing is written in
 a place an older binary cannot read.

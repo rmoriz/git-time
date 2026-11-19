@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let a timestamp authority rotate its root without breaking old evidence: several pinned roots per id, each valid only inside its own window, an explicit accept step, and a signed block line naming the root a token needs.
+**Goal:** Let a timestamp authority rotate its root without breaking old evidence: several pinned roots per id, each valid only inside its own window, an explicit accept step, a signed block line naming the root a token needs — and a token verifier that enforces the signer identifier RFC 3161 and 5816 require.
 
-**Architecture:** The trust store holds a root list per id instead of one root. Verification candidates are the roots valid at the token's `genTime`, intersected with the fingerprints the block names. Bundles are appended only after a human passes `--accept <id>=<fp>`. Every display that names an authority also names its root's expiry date.
+**Architecture:** The trust store holds a root list per id instead of one root. Verification candidates are the roots valid at the token's `genTime`, intersected with the fingerprints the block names. Bundles are appended only after a human passes `--accept <id>=<fp>`. Every display that names an authority also names its root's expiry date. The token's ESS signing-certificate attribute (v1 or v2) and its `tsa` hint are checked from the first task on, so rotation lands on a verifier that already does what the RFCs say.
 
 **Tech Stack:** Rust 2021, `x509-cert`, `der`, `webpki` (via `sigstore-tsa`), `clap`.
 
@@ -18,20 +18,128 @@
 - `docs/format.md` is normative, version `1`, additive-only; its appendix must equal `tests/fixtures/format_example.commit` byte for byte.
 - The `--openssl` script stays `openssl`-only: no `git`, no `awk`, no `zstd`.
 - Verification stays fail-closed: unknown root, unknown line, unknown shape is a refusal.
+- Token fixtures are minted with `openssl cms -sign -cades` (OpenSSL 3 or newer, which is what CI has; the test module docs say so). `-cades` is what puts the signer identifier into the token; LibreSSL before 3.6 cannot.
 - Entity names: `git time`, `time.tsa.<id>.*`, `Invalid`, `Verdict`, `TrustError`.
 - Every new public item gets a doc comment in the file's voice, and `cargo clippy --all-targets -D warnings` stays clean.
 
 ## Review Focus
 
-1. **A bundle whose first certificate is not self-signed** (a mis-fetched intermediate): must be `TrustError::NoRoot`, not a silent anchor.
-2. **A root whose `notAfter` equals the token's `genTime` exactly**: candidates are half-open-inclusive at both ends (`notBefore <= genTime <= notAfter`), boundary test required.
-3. **A block naming an id that has no token and no `Fail`**: a decode error, not an ignored line.
-4. **Duplicate `Anchor:` line for one id, and duplicate fingerprints inside one line**: refused / collapsed, respectively.
-5. **A pinned root with the same subject as another (re-key)**: both stay, fingerprint decides.
+1. **A token whose ESS attribute names another certificate**: the sid is unprotected, so this is the substitution the attribute exists for — refused with `ess-mismatch`, never a chain-only pass.
+2. **Both ESS flavors present and conflicting**: refused (RFC 5035 §7 permits it); both matching is accepted, since one certificate yields one hash.
+3. **A bundle whose first certificate is not self-signed** (a mis-fetched intermediate): must be `TrustError::NoRoot`, not a silent anchor.
+4. **A root whose `notAfter` equals the token's `genTime` exactly**: candidates are half-open-inclusive at both ends (`notBefore <= genTime <= notAfter`), boundary test required.
+5. **A block naming an id that has no token and no `Fail`**: a decode error, not an ignored line.
+6. **Duplicate `Anchor:` line for one id, and duplicate fingerprints inside one line**: refused / collapsed, respectively.
+7. **A pinned root with the same subject as another (re-key)**: both stay, fingerprint decides.
 
 ---
 
-### Task 1: Trust store holds a root list
+### Task 1: A token has to identify its signer
+
+RFC 3161 §2.4.2 requires a signed `SigningCertificate` attribute; RFC 5816 §2.2.1 widens that to either `SigningCertificate` (`ESSCertID`, SHA-1) or `SigningCertificateV2` (`ESSCertIDv2`, any hash, `sha256` when the field is omitted). Today neither is looked at: a token with no attribute, or one naming another certificate, verifies. The `sid` the signer is found by is *not* covered by the signature, so the attribute is the only signed binding between the TSTInfo and that certificate.
+
+**Files:**
+- Modify: `crates/git-time-core/src/verify/token.rs` (OIDs, `Invalid`, `Tst`, `Parsed`, `authenticate`, new `signer_identification` and `tsa_name`)
+- Modify: `crates/git-time-core/src/verify/commit.rs` (a `detail` sentence per new reason)
+- Test: `crates/git-time-core/src/verify/token.rs` (unit tests of both functions), `crates/git-time-core/tests/verify_token.rs` (wiring)
+
+**Interfaces:**
+- Consumes: `hash()`, `Parsed.attributes`, `certificate_with_eku` (unit tests).
+- Produces:
+  - `OID_SIGNING_CERTIFICATE` = `1.2.840.113549.1.9.16.2.12`, `OID_SIGNING_CERTIFICATE_V2` = `…2.47`
+  - `Invalid::{EssMissing, EssMismatch, EssMalformed, TsaName}`, `as_str()` = `ess-missing`, `ess-mismatch`, `ess-malformed`, `tsa-name`; all four are `bad-token`, none counts as `untrusted`
+  - `fn signer_identification(attributes: &Attributes, signer: &Certificate) -> Result<(), Invalid>`
+  - `fn tsa_name(tsa: Option<&GeneralName>, signer: &Certificate) -> Result<(), Invalid>`
+  - `Parsed.attributes: Attributes`; `Tst.tsa: Option<GeneralName>`; `parse` refuses `signer_infos.len() != 1` with `Invalid::Malformed`
+
+- [ ] **Step 1: Write the failing unit tests** in the `mod tests` of `token.rs`
+
+Two builders beside `certificate_with_eku`, using `der::Sequence` structs that are also used for decoding:
+
+```rust
+#[derive(der::Sequence)]
+struct EssIds { certs: Vec<EssId> }
+#[derive(der::Sequence)]
+struct EssId {
+    #[asn1(optional = "true")]
+    hash_algorithm: Option<AlgorithmIdentifierOwned>, // absent for v1 and for the v2 default
+    cert_hash: OctetString,
+    #[asn1(optional = "true")]
+    issuer_serial: Option<der::Any>,
+}
+fn ess(oid: ObjectIdentifier, certificate: &Certificate, algorithm: Option<&str>) -> Attribute
+```
+
+`ess` hashes `certificate.to_der()` with `hash()` (SHA-1 for v1, SHA-256 when no algorithm is given), encodes `EssIds`, and wraps it in an `Attribute`.
+
+| Test | Expectation |
+|---|---|
+| no attribute | `EssMissing` |
+| v1 naming the signer | `Ok` |
+| v2 without `hashAlgorithm` naming the signer | `Ok` (SHA-256 default) |
+| v1 and v2, both naming the signer | `Ok` |
+| v1 and v2, the v2 one naming another certificate | `EssMismatch` |
+| v1 naming another certificate | `EssMismatch` |
+| v2 whose hash matches but algorithm is `sha512` while the hash is SHA-256 | `EssMismatch` |
+| v2 with an unsupported algorithm OID (e.g. `1.2.840.113549.2.5`) | `EssMalformed` |
+| two `SigningCertificateV2` attributes | `EssMalformed` |
+| one attribute with two `AttributeValue`s | `EssMalformed` |
+| empty `certs` sequence | `EssMalformed` |
+| `certs[0]` correct, a second id naming another certificate | `Ok` (those limit the path, they are not the signer) |
+
+`tsa_name` tests: `None` → `Ok`; the signer's own subject DN → `Ok`; another DN → `TsaName`; a `dNSName` present in the signer's SAN → `Ok`; a `dNSName` absent from it → `TsaName`.
+
+- [ ] **Step 2: Two wiring tests** in `tests/verify_token.rs`, and a helper fix
+
+The throwaway tokens reuse the FreeTSA fixture's TSTInfo, so they carry FreeTSA's `tsa` DN under a throwaway signer and would now be `TsaName`. Add `fn remove_tsa(tst: &mut Vec<u8>)` beside the genTime rewrite: the fixture's `tsa` is the final field (`0xa0`, long form: `a0 82 01 13 a4 82 01 0f …`), so take the bytes before it, drop the old `30` header, and prepend a freshly encoded `SEQUENCE` header (`der::Length::encode`) instead of patching length digits. Anything after the `[0]` field — extensions in some replies — is informational and goes with it. The fixture token itself keeps its `tsa` and is the positive case; `genuine_token_with_pinned_root_is_valid` must stay green.
+
+```rust
+#[test]
+fn a_throwaway_token_carries_the_signer_identifier_and_verifies() {
+    // -cades token, pinned CA: Valid (proves the wiring and the positive path).
+}
+
+#[test]
+fn a_flipped_cert_hash_is_ess_mismatch_not_a_signature_error() {
+    // locate SHA-256(signer DER) inside the token bytes, flip one byte, expect
+    // EssMismatch — the identifier is judged before the signature it would break.
+}
+```
+
+- [ ] **Step 3: Run, expect failures**
+
+Run: `cargo test --offline -p git-time-core --test verify_token -- signer_identifier flipped_cert_hash`
+Expected: FAIL to compile (`EssMissing` and friends missing).
+
+- [ ] **Step 4: Implement**
+
+Add `-cades` to the sign invocation in `throwaway_tsa_token_under` and say why in the module docs. Add the OIDs, the variants and their `as_str` strings, and the two functions:
+
+- `signer_identification`: collect the attributes of both OIDs; none → `EssMissing`; more than one of either OID → `EssMalformed`; an attribute without exactly one value → `EssMalformed`; decode `EssIds`, empty `certs` → `EssMalformed`; for `certs[0]`, take `hash()` of the signer's DER with SHA-1 (v1) or the `hashAlgorithm` OID, defaulting to SHA-256 (v2) — an unsupported algorithm is `EssMalformed` — and compare against `cert_hash`, mismatch → `EssMismatch`. Every present attribute must pass.
+- `tsa_name`: `None` → `Ok`; `DirectoryName` must equal the signer's subject; `DnsName` must appear among the signer's SAN `dNSName`s; anything else → `TsaName`.
+- `Parsed::parse`: keep the parsed `Attributes` on the struct, reject a second signer info, and read `tsa` from the TSTInfo into `Tst`. The tag stays EXPLICIT even under `IMPLICIT TAGS`, because `GeneralName` is a CHOICE — `#[asn1(context_specific = "0")]` on a `GeneralName` field.
+- `authenticate`: `signer_identification(&self.attributes, &self.signer)` and `tsa_name(self.tst.tsa.as_ref(), &self.signer)` before `verify_signature`, so the identifier is judged before the bytes it names are trusted and the patched-token test sees its own reason.
+- `commit.rs::judge_tokens`: one `detail` sentence per new reason, ahead of the anchor fallback (`the token carries no ESS signer identifier`, `the ESS signer identifier names another certificate`, `the ESS signer identifier is malformed`, `the TSTInfo tsa name is not the signer's subject`).
+
+- [ ] **Step 5: Run the whole core suite, then commit**
+
+Run: `cargo test --offline -p git-time-core`
+Expected: PASS.
+
+```bash
+git add -A
+git commit -m "verify: the token has to name its signer
+
+RFC 3161 has always required a signed signingCertificate attribute, and 5816
+widened it to the SHA-2 flavor; we checked neither. The sid a signer is found
+by is outside the signature, so the attribute is the only signed link between
+the TSTInfo and that certificate — accepting a token without one, or one naming
+a different certificate, was the fail-open corner of the verifier."
+```
+
+---
+
+### Task 2: Trust store holds a root list
 
 **Files:**
 - Modify: `crates/git-time-core/src/trust.rs`
@@ -106,7 +214,7 @@ Detail: `TrustError` gains a `NoRoot` variant with the same `Display` style as `
 - [ ] **Step 4: Run the three tests, then the whole core suite**
 
 Run: `cargo test --offline -p git-time-core`
-Expected: PASS. Compile errors in `verify/token.rs` and `doctor` are expected next task; fix only signature breaks (`anchor.root` → `anchor.roots[0]`) so the workspace builds.
+Expected: PASS. Call sites of `anchor.root` (`verify/token.rs`, `verify/commit.rs`, `doctor.rs`) are expected to break; fix only those by taking `roots[0]` so the workspace builds — the candidate filter is Task 4.
 
 - [ ] **Step 5: Commit**
 
@@ -122,7 +230,7 @@ between old and new evidence."
 
 ---
 
-### Task 2: The block carries an `Anchor` line
+### Task 3: The block carries an `Anchor` line
 
 **Files:**
 - Modify: `crates/git-time-core/src/store.rs` (`TrailerBlock`, `render`, decode/validation)
@@ -188,7 +296,7 @@ it keeps a swapped bundle from silently re-pointing history."
 
 ---
 
-### Task 3: Roots are candidates only inside their own window
+### Task 4: Roots are candidates only inside their own window
 
 **Files:**
 - Modify: `crates/git-time-core/src/verify/token.rs` (`Invalid`, `token`, `Parsed::authenticate`, `verify_chain`)
@@ -285,7 +393,7 @@ property of the root, so it is checked before the chain is even attempted."
 
 ---
 
-### Task 4: The seal writes the line
+### Task 5: The seal writes the line
 
 **Files:**
 - Modify: `crates/git-time-core/src/seal.rs:254-310`
@@ -332,7 +440,7 @@ would name the dead one and make the fresh commit unverifiable on sight."
 
 ---
 
-### Task 5: Verify reports the two new reasons
+### Task 6: Verify reports the two new reasons
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/verify.rs` (hints in `print_human`, `--json` fields)
@@ -385,7 +493,7 @@ can be exact and name the command that fixes it."
 
 ---
 
-### Task 6: A preset knows every fingerprint it published
+### Task 7: A preset knows every fingerprint it published
 
 **Files:**
 - Modify: `crates/git-time-core/src/presets.rs` (type, all 22 entries, module docs)
@@ -432,7 +540,7 @@ either a release or a spurious mismatch warning for every fetch afterwards."
 
 ---
 
-### Task 7: Accepting a rotation is an explicit step
+### Task 8: Accepting a rotation is an explicit step
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/anchor.rs` (`fetch`, `Command::Fetch`)
@@ -499,7 +607,7 @@ accepted explicitly by fingerprint."
 
 ---
 
-### Task 8: The lock records every root
+### Task 9: The lock records every root
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/anchor.rs:230-300` (`pin`, `check`)
@@ -545,7 +653,7 @@ are named separately now."
 
 ---
 
-### Task 9: Doctor sees an overdue rotation
+### Task 10: Doctor sees an overdue rotation
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/doctor.rs:200-230`
@@ -592,7 +700,7 @@ should be noticed in."
 
 ---
 
-### Task 10: The audit script gets the right root and the right time
+### Task 11: The audit script gets the right root and the right time
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/verify.rs` (`Payload`, `payload`, the `OPENSSL_HEADER` probe, `OPENSSL_TOKEN`)
@@ -649,7 +757,7 @@ it, the NOTE says the run judged at now."
 
 ---
 
-### Task 11: Show expiry dates where authorities are chosen
+### Task 12: Show expiry dates where authorities are chosen
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/anchors.rs` (helper), `tsa.rs` (`list`, `preset_list`), `picker.rs` (`row`, `TRUST_WIDTH`), `doctor.rs`, `anchor.rs::list`
@@ -698,14 +806,14 @@ no certificate here to read."
 
 ---
 
-### Task 12: Make the format document and fixture match
+### Task 13: Make the format document and fixture match
 
 **Files:**
 - Modify: `docs/format.md` (§2 grammar, §3 order, §8 verifier steps, reason table, appendix), `crates/git-time-core/tests/format_doc.rs`, `crates/git-time-core/tests/fixtures/format_example.commit`
 - Test: `crates/git-time-core/tests/format_doc.rs`
 
 **Interfaces:**
-- Consumes: the codec from Task 2.
+- Consumes: the codec from Task 3.
 
 - [ ] **Step 1: Add the failing document assertions**
 
@@ -714,7 +822,10 @@ no certificate here to read."
 fn the_anchor_line_is_documented_before_the_tokens() { /* §2 has the grammar, §3 the position before `Token` */ }
 
 #[test]
-fn the_reason_table_lists_both_root_refusals() { /* no-root-at-gen-time, anchor-not-pinned */ }
+fn the_reason_table_lists_every_new_refusal() { /* the four ESS/tsa kinds and the two root kinds */ }
+
+#[test]
+fn the_ess_rule_names_both_attributes_and_the_default() { /* §8: either attribute, sha256 default, certs[0] only */ }
 ```
 
 - [ ] **Step 2: Run, expect failures**
@@ -724,7 +835,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Write it**
 
-Grammar (`Anchor: id=<TOKEN>; sha256=<FP>[,...]`, both required, id must occur in a `Token` or `Fail`), the position in §3 before `Token`, the optionality rule (absent → no filter; unknown to older readers → ignored, §9), the candidate rule (`notBefore <= genTime <= notAfter`, intersection with named), the two new values in the §3 `invalid-<kind>` list, and the appendix/fixture byte-for-byte with one `Anchor` line added.
+§8's existing ESS sentence stays and gains the detail (at least one of the two attributes, each present one evaluated, `certs[0]` only, `sha256` default); grammar (`Anchor: id=<TOKEN>; sha256=<FP>[,...]`, both required, id must occur in a `Token` or `Fail`), the position in §3 before `Token`, the optionality rule (absent → no filter; unknown to older readers → ignored, §9), the candidate rule (`notBefore <= genTime <= notAfter`, intersection with named), all six new values in the §3 `invalid-<kind>` list (`ess-missing`, `ess-mismatch`, `ess-malformed`, `tsa-name`, `no-root-at-gen-time`, `anchor-not-pinned`), and the appendix/fixture byte-for-byte with one `Anchor` line added.
 
 - [ ] **Step 4: Run the format suite**
 
@@ -735,15 +846,18 @@ Expected: PASS.
 
 ```bash
 git add -A
-git commit -m "format: specify the anchor line and the two root refusals
+git commit -m "format: specify the anchor line, and bind the verifier to the RFCs
 
-Without it a third-party reader cannot tell a missing root from a forgery, and
-the worked example would stop being a valid block at the first rotation."
+Without the line a third-party reader cannot tell a missing root from a
+forgery, and the worked example would stop being a valid block at the first
+rotation. The signer identifier the code now enforces gets the same treatment:
+the document already demanded it, it never said which attributes satisfy it or
+what a conflict means."
 ```
 
 ---
 
-### Task 13: End-to-end rotation, docs and release notes
+### Task 14: End-to-end rotation, docs and release notes
 
 **Files:**
 - Modify: `crates/git-time-cli/tests/verify_cli.rs` (full scenario), `docs/manual.md`, `docs/git-time.1`, `README.md`, `docs/STATUS.md`
@@ -794,6 +908,7 @@ git push origin HEAD
 
 ## Self-Review
 
-- Spec coverage: bundle layout → T1; verification/window/named filter → T3; block line → T2, T4; accept → T7; lock → T8; doctor → T9; `--openssl` → T10; expiry display → T11; format → T12; presets → T6; end-to-end → T13.
-- The two review-focus items not yet referenced are pinned by T1 (`NoRoot`) and T2 (`ghost` id, duplicates); the re-key case is T1's dedupe-by-DER plus T3's fingerprint intersection.
+- Spec coverage: signer identifier → T1; bundle layout → T2; verification/window/named filter → T4; block line → T3, T5; accept → T8; lock → T9; doctor → T10; `--openssl` → T11; expiry display → T12; format → T13; presets → T7; end-to-end → T14.
+- The review-focus items not referenced in a task body are pinned by T2 (`NoRoot`), T3 (`ghost` id, duplicates), T4's fingerprint intersection (re-key), and T1's mismatch/both-present cases.
+- Spec coverage of the RFC pair: v1 and v2 both accepted, both-present, five refusals — T1.
 - Types named once: `roots`, `append`, `roots_at`, `IsRoot`… (`is_self_signed`), `named`, `anchors`, `fingerprints`, `accept::parse`, `accept::one_or_id`, `not_after`, `expiry_label`. Later tasks use those names only.
