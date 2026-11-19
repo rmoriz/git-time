@@ -214,6 +214,13 @@ directory, which it removes again \-\- also when it is interrupted: a signal
 stops it with 130/143/129 and only
 .B EXIT
 cleans up.
+Before it recurses, the cleanup checks that the path is absolute and below a
+directory, so a lost
+.B $scratch
+cannot widen into
+.B rm \-rf /
+or
+.BR "rm \-rf ." .
 The script carries its payload: the pre\-image of the commit is printed into it
 as clear text and the tokens follow base64\-encoded, so it does not read the
 repository and a reader sees the commit being judged.

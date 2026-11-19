@@ -95,6 +95,8 @@ crypto. The command runs nothing itself and exits `0` once the script is printed
 `openssl` with its `ts` command and nothing else — no `git`, no `zstd` — and writes only into one
 `mktemp -d` directory that it removes again, also when it is interrupted: a signal stops it with
 `130`/`143`/`129` and only `EXIT` cleans up, so `rm -rf` runs once and never against a stale path.
+Before it recurses, the cleanup checks that the path is absolute and below a directory — the only
+shape `mktemp` returns — so a lost `$scratch` cannot turn into `rm -rf /` or `rm -rf .`.
 
 The script carries its payload: the commit's pre-image is printed into it as clear text, with the
 tokens base64-encoded below it. It therefore reads no repository, and a reader sees the commit

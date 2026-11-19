@@ -1412,11 +1412,8 @@ fn openssl_prints_a_script_with_one_verify_per_token() {
     assert!(script.starts_with("#!/bin/sh\n"), "{script}");
     assert!(script.contains("set -eu"), "{script}");
     assert!(script.contains("mktemp -d) || exit 1"), "{script}");
-    // Cleanup hangs off EXIT only; the signals exit, so their trap runs it once.
-    assert!(
-        script.contains("trap 'rm -rf \"${scratch:-}\"' EXIT"),
-        "{script}"
-    );
+    // Cleanup hangs off EXIT only; the signals exit, so their trap runs once.
+    assert!(script.contains("trap cleanup EXIT"), "{script}");
     assert!(!script.contains("EXIT HUP INT TERM"), "{script}");
     for line in [
         "trap 'exit 130' INT",
@@ -1532,7 +1529,8 @@ fn a_tampered_pre_image_fails_the_openssl_script() {
 }
 
 /// Exactly one directory is made, and it is gone again afterwards; an
-/// interrupt stops the script and still cleans up.
+/// interrupt stops the script and still cleans up, and a path that is not the
+/// `mktemp` shape is never handed to `rm -rf`.
 #[test]
 fn the_openssl_script_cleans_its_scratch_directory() {
     if !script_tools() {
@@ -1558,6 +1556,11 @@ fn the_openssl_script_cleans_its_scratch_directory() {
             .stderr(Stdio::piped());
         command
     }
+
+    assert!(
+        script.contains("/*/*) rm -rf -- \"$scratch\""),
+        "the path is checked before it is removed: {script}"
+    );
 
     std::fs::write(&path, &script).expect("write the script");
     let output = run(&path, repo.path(), tmp.path())
@@ -1594,6 +1597,19 @@ fn the_openssl_script_cleans_its_scratch_directory() {
         0,
         "the scratch directory is removed on TERM too"
     );
+
+    // No mktemp output at all: nothing may be deleted, and the run must still
+    // end, not die in the trap.
+    let canary = repo.path().join("canary");
+    std::fs::write(&canary, "still here").expect("write canary");
+    let bare = script.replace("scratch=$(mktemp -d) || exit 1", "scratch=");
+    std::fs::write(&path, &bare).expect("write the bare script");
+    let output = run(&path, repo.path(), tmp.path())
+        .output()
+        .expect("runs sh");
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert!(canary.exists(), "a stray `rm -rf` would take this");
+    assert!(tmp.path().exists());
 }
 
 /// A gate is decided when the script is generated: it is named, counted, and

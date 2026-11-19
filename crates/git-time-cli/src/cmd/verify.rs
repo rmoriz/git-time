@@ -430,14 +430,23 @@ const OPENSSL_HEADER: &str = r##"#!/bin/sh
 # re-checked.
 #
 # Everything the script writes goes into one mktemp -d directory, removed on
-# exit. Only EXIT cleans up: the signals exit with their usual code and the EXIT
-# trap then runs once, so a Ctrl-C stops the script instead of leaving it
-# working against a deleted directory — and `rm -rf` can never widen past the
-# mktemp path, because an empty $scratch is spelled out.
+# exit. Only EXIT cleans up: the signals exit with their usual code, so the
+# trap runs once and a Ctrl-C stops the script instead of leaving it working
+# against a deleted directory.
 set -eu
 
 scratch=$(mktemp -d) || exit 1
-trap 'rm -rf "${scratch:-}"' EXIT
+
+# `rm -rf` is only as safe as its argument, and a recursion into `/` is slow to
+# undo. So the path is checked first: it has to be absolute and below a
+# directory, which is what mktemp returns and nothing else here can be. `--`
+# keeps a leading dash from being read as an option.
+cleanup() {
+    case $scratch in
+    /*/*) rm -rf -- "$scratch" ;;
+    esac
+}
+trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
