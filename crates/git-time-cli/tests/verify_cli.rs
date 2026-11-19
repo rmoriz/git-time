@@ -1225,6 +1225,7 @@ fn history_survives_a_rotation_end_to_end() {
     git(repo.path(), &["config", "time.tsa.stub.url", &url]);
     let serve_b = format!("cat {}", pstr(&rotated.bundle()));
     let b = certificate_fingerprint(&rotated.bundle());
+    assert_ne!(a, b, "a rotation is a different root");
 
     // Fail-closed: the fetch alone is not a trust decision.
     let refused = fetch(&repo, &url, &serve_b, &[]);
@@ -1258,29 +1259,64 @@ fn history_survives_a_rotation_end_to_end() {
         .map(|anchor| anchor.roots.len());
     assert_eq!(both, Some(2), "the retired root stays next to the new one");
 
-    // The old commit is untouched by the rotation and still verifies.
+    // The accepted root is written first. Every build before the anchor line
+    // takes the first certificate as *the* anchor, so that reader now checks
+    // new evidence and fails the old commit; a current reader reads the line.
+    let (new_first_dir, new_first) = certificate_at(&stored, 0);
+    assert_eq!(
+        certificate_fingerprint(&new_first),
+        b,
+        "the fresh root leads the bundle"
+    );
+    let (retired_dir, retired_second) = certificate_at(&stored, 1);
+    assert_eq!(
+        certificate_fingerprint(&retired_second),
+        a,
+        "the retired root follows it"
+    );
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.anchor", &pstr(&new_first)],
+    );
+    let older_reader = verify(&repo, &old, &[]);
+    let older = lines(&older_reader);
+    assert_eq!(older_reader.status.code(), Some(1), "{older:?}");
+    assert!(
+        older.iter().any(|line| line.contains("UNTRUSTED")),
+        "the old block is unverified on a first-certificate reader: {older:?}"
+    );
+    drop(new_first_dir);
+    drop(retired_dir);
+
+    // With the whole bundle the old commit still verifies.
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.anchor", &pstr(&stored)],
+    );
     let surviving = verify(&repo, &old, &[]);
     assert_eq!(surviving.status.code(), Some(0), "{:?}", lines(&surviving));
     assert!(first_line(&surviving).contains("PASS"));
 
-    // The lock diff is one added line; the retired root's line survives.
+    // The lock diff is one added line, and the retired root's line survives.
+    // The file is sorted by id and fingerprint, so the pair may be in either
+    // order depending on the fingerprints; both lines must be there, sorted.
     let pin = run_time(repo.path(), &["anchor", "pin"]);
     assert!(pin.status.success(), "{}", text(&pin.stderr));
     let lock_after =
         std::fs::read_to_string(repo.path().join("time.anchors-lock")).expect("the lock");
-    let before: Vec<&str> = lock_before.lines().collect();
-    let after: Vec<&str> = lock_after.lines().collect();
-    assert_eq!(after.len(), before.len() + 1, "{lock_after}");
-    let b_lock = b.replace(':', "").to_ascii_lowercase();
-    let added_line = after
-        .iter()
-        .find(|line| !before.contains(line))
-        .expect("the new root's line is the only addition");
-    assert_eq!(*added_line, format!("stub {b_lock}"), "{lock_after}");
-    assert!(
-        after.contains(&before[0]),
-        "the old line survives: {lock_after}"
-    );
+    let written: Vec<&str> = lock_after.lines().collect();
+    let mut sorted = written.clone();
+    sorted.sort_unstable();
+    assert_eq!(written, sorted, "the lock is sorted: {lock_after}");
+    let mut both = vec![
+        format!("stub {}", a.replace(':', "").to_ascii_lowercase()),
+        format!("stub {}", b.replace(':', "").to_ascii_lowercase()),
+    ];
+    both.sort_unstable();
+    let mut actual: Vec<String> = written.iter().map(|line| (*line).to_owned()).collect();
+    actual.sort_unstable();
+    assert_eq!(actual, both, "{lock_after}");
+    assert_eq!(written.len(), 2, "one line added, the old one kept");
 
     // A new commit is stamped by B, and its block says so.
     let new = repo.commit("under root b");
@@ -1909,6 +1945,23 @@ fn pem_bodies(pem: &str) -> Vec<String> {
 fn pem_body(path: &Path) -> String {
     let pem = text(&std::fs::read(path).expect("read the certificate"));
     pem_bodies(&pem).remove(0)
+}
+
+/// A PEM file holding only certificate `index` of the bundle at `path`. The
+/// temp dir comes back with it so the file lives as long as the caller needs.
+fn certificate_at(path: &Path, index: usize) -> (TempDir, PathBuf) {
+    let pem = text(&std::fs::read(path).expect("read the bundle"));
+    let body = pem_bodies(&pem).remove(index);
+    let dir = TempDir::new().expect("a certificate of its own");
+    let single = dir.path().join("one.pem");
+    let mut armored = String::from("-----BEGIN CERTIFICATE-----\n");
+    for chunk in body.as_bytes().chunks(64) {
+        armored.push_str(&String::from_utf8_lossy(chunk));
+        armored.push('\n');
+    }
+    armored.push_str("-----END CERTIFICATE-----\n");
+    std::fs::write(&single, armored).expect("write the certificate");
+    (dir, single)
 }
 
 /// The `anchor.b64` heredoc of `script`, decoded to PEM.

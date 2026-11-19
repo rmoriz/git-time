@@ -374,23 +374,24 @@ takes the bare fingerprint. `install` and `tsa restore` can address several auth
 take `--accept <id>=<fingerprint>`, repeatable; a bare value is accepted only when exactly one
 authority is in play, and otherwise the ids are named.
 
-The accepted root is **appended** ahead of the retired one, never written over it. Old tokens keep
+The accepted root is written ahead of the retired one, never over it. Old tokens keep
 chaining to the root that signed them, and each root only vouches for tokens inside its own
 validity window. Verification intersects the pinned roots with the fingerprints the commit's block
 names, so a new root never blesses an old token and an old root never vouches for a new one. The
 block line (`X-RFC3161-Anchor`) is covered by the commit signature and names the roots valid at the
 token's `genTime`.
 
-The append changes `time.anchors-lock`, one line per root. Review it and commit it with the
-rotation: the diff is the record of the decision and what later reviewers see.
+The append adds one line per root to `time.anchors-lock`. The lock is sorted by id and fingerprint,
+so the retired line moves down and appears again after the new one; the diff is the record of the
+decision and what later reviewers see. Review it and commit it with the rotation. `git time anchor
+pin --check` reports the same change as `added` and `removed` lines and exits `1` until the lock is
+updated, which is what makes a rotation visible in CI.
 
 ```diff
-  tsa-example-net f1c6c6fe6969cfb65118326f162c3f25886f493e9e8186599cf233bcaade129a
+- tsa-example-net f1c6c6fe6969cfb65118326f162c3f25886f493e9e8186599cf233bcaade129a
 + tsa-example-net 010a2d31e7873a9d92dadb7f9a7a5b03ddfdafa6eef32defbd4508594e4b700
++ tsa-example-net f1c6c6fe6969cfb65118326f162c3f25886f493e9e8186599cf233bcaade129a
 ```
-
-`git time anchor pin --check` reports the same change as an `added` line per new root and exits `1`
-until the lock is updated, which is what makes a rotation visible in CI.
 
 `doctor` names a rotation twice: ``anchor <id>`` `has no root valid now` when every pinned root
 has expired — the next seal's tokens would be `UNTRUSTED` — and ``HEAD names `anchor <id>`
@@ -403,11 +404,12 @@ named roots out of the evidence, pins a preset when the fetched root is the publ
 otherwise reports the new root for an `--accept <id>=<fingerprint>`. Presets only: an id of your own
 is named with the `tsa add`/`anchor fetch` steps.
 
-A reader on an older `git-time` still decodes the block — the `X-RFC3161-Anchor` line is unknown to
-it and ignored — and judges the token against the first certificate of the pinned bundle. Old
-evidence therefore keeps verifying there as long as the retired root is still first; a commit
-sealed later under the new root is `UNTRUSTED` on that reader. That is the state before this
-feature: upgrade the reader rather than change the evidence.
+An older `git-time` still decodes the block, but it does not know the `X-RFC3161-Anchor` line: it
+ignores it and takes the first certificate of the pinned bundle as *the* anchor, the way this
+feature's predecessors did. Because the fresh root is written first, that reader verifies evidence
+sealed under the new root and fails the old blocks that name the retired one. A current `git-time`
+reads the line, picks the named root and verifies both. Keep the retired root in the bundle — and in
+the lock — while older readers have to keep checking; otherwise upgrading the reader is the fix.
 
 ## Operational notes
 

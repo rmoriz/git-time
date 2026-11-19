@@ -625,8 +625,10 @@ Write
 in the repository root, one
 .I id fingerprint
 line per root of every configured authority, or compare the anchors against it.
-One line per root makes a rotation a pair of lines in the diff, one removed
-and one added, instead of an in-place update of a value nobody can review..TP
+The file is sorted by id and fingerprint, so a rotation moves the retired line
+down and adds a line for the new root, instead of updating a value in place
+that nobody can review.
+.TP
 .B \-\-check
 Compare instead of writing, naming every missing, unparseable, added, removed
 and unrecorded id.
@@ -805,7 +807,10 @@ The pinned bundles, by default
 .B $XDG_CONFIG_HOME/git\-time/anchors
 or
 .BR ~/.config/git\-time/anchors .
-The first certificate of a bundle is the anchor.
+Self\-signed certificates are the anchors.
+An older reader takes the first certificate as the only anchor; the block's
+.B X\-RFC3161\-Anchor
+line narrows which root is used.
 .TP
 .B time.anchors\-lock
 In the repository root, written by
@@ -917,7 +922,7 @@ may address several authorities and take
 .BI \-\-accept " id=fingerprint" ,
 repeatable; a bare value needs exactly one authority in play.
 .PP
-The accepted root is appended ahead of the retired one, never written over it.
+The accepted root is written ahead of the retired one, never over it.
 Each root only vouches for tokens inside its own validity window, and the
 verifier intersects the pinned roots with the fingerprints the block names, so
 a new root never blesses an old token and an old root never vouches for a new
@@ -927,12 +932,16 @@ by the commit signature.
 .PP
 The append adds one line per root to
 .BR time.anchors\-lock .
+The file is sorted by id and fingerprint, so the retired line moves down and
+appears again after the line for the new root.
 Review the diff and commit it with the rotation: it is the record of the
 decision.
 .B anchor pin \-\-check
-reports the same change as an
+reports the same change as
 .B added
-line and exits 1 until the lock is updated, which is what makes a rotation
+and
+.B removed
+lines and exits 1 until the lock is updated, which is what makes a rotation
 visible in CI.
 .PP
 .B doctor
@@ -954,12 +963,18 @@ only with an
 .PP
 An older
 .B git\-time
-still decodes the block: it ignores the
+still decodes the block, but it does not know the
 .B X\-RFC3161\-Anchor
-line and judges the token against the first certificate of the bundle.
-Old evidence keeps verifying there while the retired root is still first; a
-commit sealed later under the new root is UNTRUSTED on that reader.
-That is the state before this feature, and upgrading the reader is the fix.
+line: it ignores it and takes the first certificate of the pinned bundle as
+.B "the anchor,"
+the way this feature's predecessors did.
+The fresh root is written first, so that reader verifies evidence sealed under
+the new root and fails old blocks that name the retired root.
+A current
+.B git\-time
+reads the line, picks the named root and verifies both.
+Keep the retired root in the bundle and in the lock while older readers have to
+keep checking; otherwise upgrading the reader is the fix.
 .SH "SECURITY CONSIDERATIONS"
 The pinned anchors are the trust store.
 A token is only as good as the bundle pinned under its id, so pin deliberately
