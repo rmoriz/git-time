@@ -6,7 +6,8 @@
 //! 1. the commit is still the tip, and it is a commit;
 //! 2. the pre-image is extracted and stamped by every configured TSA that has a
 //!    pinned anchor;
-//! 3. every token is verified against the pinned anchors before it is kept;
+//! 3. every token is verified against the pinned anchors before it is kept, and
+//!    the roots that vouched at its genTime are written down beside it;
 //! 4. the object is rebuilt and the rewrite is *proved*: stripping the new
 //!    trailer and signature must reproduce the sealed pre-image byte for byte,
 //!    both before signing and on the final bytes;
@@ -36,7 +37,7 @@
 //! `refs/notes/rfc3161`, or both. A note-stored seal keeps only the imprint in
 //! the commit, so the object stays small while the evidence lives beside it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -48,7 +49,7 @@ use crate::policy::{OnFailure, Policy, Store};
 use crate::repo::{CasOutcome, Head, Repo, RepoError, run_git};
 use crate::sigcheck::{self, SigHeader, SignatureState};
 use crate::store::{self, FailureRecord, TokenRecord, TrailerBlock};
-use crate::trust::AnchorStore;
+use crate::trust::{self, AnchorStore};
 use crate::tsa::{PoolPolicy, StampRequest, TsaBackend, TsaError, pool};
 use crate::verify::{self, TokenVerdict};
 
@@ -254,6 +255,9 @@ pub async fn seal(
 
     let window = gen_time_window(committer_time(&object));
     let mut tokens = Vec::with_capacity(outcome.tokens.len());
+    // The roots each verified id was checked against, sorted and de-duplicated
+    // until the block wants a list.
+    let mut anchor_roots: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut failures: Vec<FailureRecord> = anchor_failures;
     failures.extend(
         outcome
@@ -280,7 +284,20 @@ pub async fn seal(
             bytes: digest(record.alg, &pre.bytes),
         };
         match verify::token(&record, &expected, window.clone(), anchors, &[]) {
-            TokenVerdict::Valid { .. } => tokens.push(record),
+            TokenVerdict::Valid { gen_time, .. } => {
+                // The roots that vouched, at the token's own genTime: a
+                // backfilled commit is stamped now, so the committer-time root
+                // may already be retired. An id with no anchor or no root in the
+                // window cannot get here — the verdict proved one exists — but a
+                // missing entry stays empty rather than invented.
+                if let Some(anchor) = anchors.anchor(&record.id) {
+                    let prints = anchor_roots.entry(record.id.clone()).or_default();
+                    for root in anchor.roots_at(gen_time) {
+                        prints.insert(trust::fingerprint(root.as_bytes()));
+                    }
+                }
+                tokens.push(record);
+            }
             TokenVerdict::Invalid(invalid) => failures.push(FailureRecord {
                 id: record.id,
                 reason: format!("invalid-{}", invalid.as_str()),
@@ -294,6 +311,19 @@ pub async fn seal(
         failures.clear();
     }
 
+    // An `Anchor` line whose id has no record left is a ghost `encode` refuses.
+    // Because a line is only collected from a token that verified, the clear
+    // above cannot take a referent away today; the filter keeps that true if the
+    // collection ever widens. Sorted sets render as sorted lists.
+    anchor_roots.retain(|id, _| {
+        tokens.iter().any(|token| &token.id == id)
+            || failures.iter().any(|failure| &failure.id == id)
+    });
+    let anchor_roots: BTreeMap<String, Vec<String>> = anchor_roots
+        .into_iter()
+        .map(|(id, prints)| (id, prints.into_iter().collect()))
+        .collect();
+
     if tokens.is_empty() && !policy.record_failures {
         return Ok(SealOutcome::Skipped(SkipReason::NoTokensRecorded));
     }
@@ -301,7 +331,7 @@ pub async fn seal(
     let block = TrailerBlock {
         imprint: imprint.clone(),
         object: Some(object_id),
-        anchors: BTreeMap::new(),
+        anchors: anchor_roots,
         tokens,
         failures,
         extra: Vec::new(),

@@ -287,11 +287,10 @@ impl Authority {
     }
 }
 
-/// Run openssl with `args` and assert it succeeded.
-fn openssl(args: &[&str]) {
+/// Run openssl with `args` and return its stdout.
+fn openssl_bytes(args: &[&str]) -> Vec<u8> {
     let output = Command::new("openssl")
         .args(args)
-        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .output()
         .expect("openssl is available");
@@ -300,6 +299,21 @@ fn openssl(args: &[&str]) {
         "openssl {args:?} failed: {}",
         text(&output.stderr)
     );
+    output.stdout
+}
+
+/// Run openssl with `args` and assert it succeeded, discarding stdout.
+fn openssl(args: &[&str]) {
+    let _ = openssl_bytes(args);
+}
+
+/// The fingerprint a block has to name for the authority's pinned root.
+///
+/// Taken from the DER of the very certificate the test pinned, so the assertion
+/// is about the value, not a hand-copied string.
+fn root_fingerprint(authority: &Authority) -> String {
+    let der = openssl_bytes(&["x509", "-in", &pstr(&authority.ca), "-outform", "DER"]);
+    git_time_core::trust::fingerprint(&der)
 }
 
 fn pstr(path: &Path) -> String {
@@ -601,6 +615,40 @@ fn block_imprint(bytes: &[u8]) -> git_time_core::imprint::Digest {
         alg: Alg::Sha256,
         bytes: bytes.to_vec(),
     }
+}
+
+/// A sealed block says which root its token was checked against, and the
+/// verifier takes the block at its word: the line is what keeps a later
+/// verification from having to guess.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sealed_block_names_the_roots_valid_at_the_tokens_time() {
+    let (_dir, repo, oid) = repo_with_commit();
+    let authority = Arc::new(Authority::new());
+    let stub = Stub::spawn(Mode::Grant, Some(Arc::clone(&authority))).await;
+    configure_tsa(&repo, "stub", &stub, &authority.bundle());
+    let expected = root_fingerprint(&authority);
+
+    let policy = policy(&repo);
+    let outcome = run(&repo, &policy, &oid).await.expect("seals");
+    let SealOutcome::Sealed { oid: sealed, .. } = outcome else {
+        panic!("expected a seal, got {outcome:?}");
+    };
+
+    let (after, _) = read(&repo, &sealed);
+    let block = block(&after);
+    assert_eq!(block.anchors.get("stub"), Some(&vec![expected.clone()]));
+
+    // The line is in the trailer, spelled exactly as the pin spells it.
+    let trailer = text(&after.pre_image(store::PREFIX).trailer.expect("trailer"));
+    assert!(
+        trailer.contains(&format!("X-RFC3161-Anchor: id=stub; sha256={expected}")),
+        "{trailer}"
+    );
+
+    // And a verification of the sealed object still gets through: the written
+    // line names a root that is pinned.
+    let evidence = verify::commit(&repo, policy.anchors(), &sealed, &policy).expect("verifies");
+    assert_eq!(evidence.verdict, Verdict::Sealed, "{:?}", evidence.per_tsa);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
