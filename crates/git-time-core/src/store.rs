@@ -2,10 +2,12 @@
 //! a commit message, and the way back.
 //!
 //! The block is the artifact's proof side. It records the imprint (what was
-//! timestamped), one line per TSA answer (`Token`), one line per TSA that was
-//! asked and failed (`Fail`), and the object the tokens were taken over. The
-//! wire format is fixed: one field per line, fields separated by `; `, tokens in
-//! the order `ver`, `id`, `alg`, `policy` (optional), `nonce`, `tst`.
+//! timestamped), the root fingerprints each TSA's tokens were verified with
+//! (`Anchor`, before the first `Token`), one line per TSA answer (`Token`), one
+//! line per TSA that was asked and failed (`Fail`), and the object the tokens
+//! were taken over. The wire format is fixed: one field per line, fields
+//! separated by `; `, tokens in the order `ver`, `id`, `alg`, `policy`
+//! (optional), `nonce`, `tst`.
 //!
 //! Encoding is fail-closed on values that would break the format (a `;`, a
 //! space, a newline), and it honours a byte budget by dropping the single
@@ -31,12 +33,15 @@
 //! capping what a crafted frame header can reserve.
 //!
 //! ```
+//! use std::collections::BTreeMap;
+//!
 //! use git_time_core::imprint::{Alg, Digest, digest};
 //! use git_time_core::store::{FailureRecord, TokenRecord, TrailerBlock, decode, encode};
 //!
 //! let block = TrailerBlock {
 //!     imprint: Digest { alg: Alg::Sha256, bytes: digest(Alg::Sha256, b"pre-image") },
 //!     object: None,
+//!     anchors: BTreeMap::new(),
 //!     tokens: vec![TokenRecord {
 //!         id: "freetsa".to_owned(),
 //!         alg: Alg::Sha256,
@@ -62,6 +67,7 @@
 //! }]);
 //! ```
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::io::Read as _;
 
@@ -151,6 +157,19 @@ pub struct TrailerBlock {
     pub imprint: Digest,
     /// The commit object the tokens were taken over, when known.
     pub object: Option<String>,
+    /// The trust-anchor fingerprints each id's tokens were verified with, by id.
+    ///
+    /// One `Anchor` line per id, rendered after `Object` and before the first
+    /// `Token`: `X-RFC3161-Anchor: id=<id>; sha256=<FP>[,<FP>...]`. A
+    /// fingerprint is 32 colon-separated hex octets in [`trust::fingerprint`]'s
+    /// uppercase spelling; decode accepts either case and normalizes to upper.
+    /// The fields are positional — `id` first, then `; `, then `sha256`, then
+    /// the comma-separated list. An empty list part fails both ways, a repeated
+    /// `Anchor` line for one id fails decode, and an id that names neither a
+    /// [`TokenRecord`] nor a [`FailureRecord`] of the block fails both ways.
+    ///
+    /// [`trust::fingerprint`]: crate::trust::fingerprint
+    pub anchors: BTreeMap<String, Vec<String>>,
     /// The TSA answers.
     pub tokens: Vec<TokenRecord>,
     /// The TSA failures.
@@ -214,11 +233,13 @@ pub fn encode(block: &TrailerBlock, max_bytes: usize) -> Result<Vec<u8>, EncodeE
 /// handed in, and one trailing CR per line is ignored. `Ok(None)` means the
 /// input has no `X-RFC3161-` line at all.
 ///
-/// Fails closed on a malformed line, a malformed value, a duplicate `Imprint`
-/// or `Object`, and on an `Imprint` that is missing altogether.
+/// Fails closed on a malformed line, a malformed value, a duplicate `Imprint`,
+/// `Object` or `Anchor`, an `Anchor` naming no token or failure of the block,
+/// and on an `Imprint` that is missing altogether.
 pub fn decode(bytes: &[u8]) -> Result<Option<TrailerBlock>, DecodeError> {
     let mut imprint: Option<Digest> = None;
     let mut object: Option<String> = None;
+    let mut anchors: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut tokens = Vec::new();
     let mut failures = Vec::new();
     let mut extra: Vec<(String, String)> = Vec::new();
@@ -266,6 +287,14 @@ pub fn decode(bytes: &[u8]) -> Result<Option<TrailerBlock>, DecodeError> {
                 }
                 object = Some(parse_object(value)?);
             }
+            b"Anchor" => {
+                let (id, fingerprints) = parse_anchor(value)?;
+                if anchors.insert(id, fingerprints).is_some() {
+                    return Err(DecodeError::Malformed(format!(
+                        "duplicate `{PREFIX}Anchor` field"
+                    )));
+                }
+            }
             b"Token" => tokens.push(parse_token(value)?),
             b"Fail" => failures.push(parse_failure(value)?),
             _ => {
@@ -285,10 +314,23 @@ pub fn decode(bytes: &[u8]) -> Result<Option<TrailerBlock>, DecodeError> {
     let Some(imprint) = imprint else {
         return Err(DecodeError::MissingImprint);
     };
+    // The reference is checked after the whole block, so line order does not
+    // decide whether an anchor is a ghost.
+    for id in anchors.keys() {
+        if !tokens.iter().any(|token| &token.id == id)
+            && !failures.iter().any(|failure| &failure.id == id)
+        {
+            return Err(DecodeError::InvalidField {
+                field: "Anchor".to_owned(),
+                reason: format!("`{id}` names no Token or Fail in this block"),
+            });
+        }
+    }
 
     Ok(Some(TrailerBlock {
         imprint,
         object,
+        anchors,
         tokens,
         failures,
         extra,
@@ -313,6 +355,30 @@ fn validate(block: &TrailerBlock) -> Result<Validated<'_>, EncodeError> {
         });
     }
     let mut nonces = Vec::with_capacity(block.tokens.len());
+    for (id, fingerprints) in &block.anchors {
+        value_text("anchor.id", id, None)?;
+        if fingerprints.is_empty() {
+            return Err(EncodeError::Invalid {
+                field: "anchor.sha256",
+                token: None,
+                reason: "expected at least one fingerprint",
+            });
+        }
+        for value in fingerprints {
+            check_fingerprint(value)?;
+        }
+        // An anchor that decode would call a ghost is unreadable, so it cannot
+        // be rendered either.
+        if !block.tokens.iter().any(|token| &token.id == id)
+            && !block.failures.iter().any(|failure| &failure.id == id)
+        {
+            return Err(EncodeError::Invalid {
+                field: "anchor.id",
+                token: None,
+                reason: "names no token or failure in this block",
+            });
+        }
+    }
     for (index, token) in block.tokens.iter().enumerate() {
         let nonce = hex(&token.nonce);
         value_text("id", &token.id, Some(index))?;
@@ -377,7 +443,7 @@ fn is_extra_name(name: &[u8]) -> bool {
 }
 
 fn is_known_name(name: &str) -> bool {
-    matches!(name, "Imprint" | "Object" | "Token" | "Fail")
+    matches!(name, "Imprint" | "Object" | "Anchor" | "Token" | "Fail")
 }
 
 fn value_text(field: &'static str, value: &str, token: Option<usize>) -> Result<(), EncodeError> {
@@ -427,14 +493,21 @@ fn render(
     tokens: &[(&TokenRecord, String)],
     failures: &[FailureRecord],
 ) -> Vec<String> {
-    let mut lines: Vec<String> =
-        Vec::with_capacity(2 + tokens.len() + failures.len() + block.extra.len());
+    let mut lines: Vec<String> = Vec::with_capacity(
+        2 + block.anchors.len() + tokens.len() + failures.len() + block.extra.len(),
+    );
     lines.push(format!(
         "{PREFIX}Imprint: {}",
         block.imprint.to_trailer_value()
     ));
     if let Some(object) = &block.object {
         lines.push(format!("{PREFIX}Object: {object}"));
+    }
+    for (id, fingerprints) in &block.anchors {
+        lines.push(format!(
+            "{PREFIX}Anchor: id={id}{SEPARATOR}sha256={}",
+            fingerprints.join(",")
+        ));
     }
     for (_, value) in tokens {
         lines.push(format!("{PREFIX}Token: {value}"));
@@ -470,6 +543,61 @@ fn parse_object(value: &[u8]) -> Result<String, DecodeError> {
         });
     }
     Ok(object)
+}
+
+/// Parse an `Anchor` value: `id=<id>; sha256=<FP>[,<FP>...]`.
+///
+/// The normalizer already returns the canonical spelling, so this is also the
+/// only place a wire fingerprint becomes a field value.
+fn parse_anchor(value: &[u8]) -> Result<(String, Vec<String>), DecodeError> {
+    let fields = pairs(value, "Anchor")?;
+    let mut cursor = 0;
+    let id = text(require(&fields, &mut cursor, b"id")?, "Anchor.id")?;
+    let list = require(&fields, &mut cursor, b"sha256")?;
+    if cursor != fields.len() {
+        return Err(DecodeError::InvalidField {
+            field: "Anchor".to_owned(),
+            reason: "unexpected trailing field".to_owned(),
+        });
+    }
+    let mut fingerprints = Vec::new();
+    for part in list.split(|byte| *byte == b',') {
+        fingerprints.push(fingerprint(part)?);
+    }
+    Ok((id, fingerprints))
+}
+
+/// Normalize one fingerprint to `trust::fingerprint`'s spelling: exactly 32
+/// colon-separated hex octets, uppercase.
+///
+/// A SHA-1 fingerprint is 20 octets and is refused: the `sha256` field names
+/// its own width.
+fn fingerprint(value: &[u8]) -> Result<String, DecodeError> {
+    let octets: Vec<&[u8]> = value.split(|byte| *byte == b':').collect();
+    if octets.len() != 32
+        || octets
+            .iter()
+            .any(|octet| octet.len() != 2 || octet.iter().any(|byte| nibble(*byte).is_none()))
+    {
+        return Err(DecodeError::InvalidField {
+            field: "sha256".to_owned(),
+            reason: "expected 32 colon-separated hex octets".to_owned(),
+        });
+    }
+    Ok(String::from_utf8(value.to_ascii_uppercase()).expect("hex is ASCII"))
+}
+
+/// Reject a fingerprint the encoder would write in anything but the canonical
+/// spelling, so one block always re-encodes to the same bytes.
+fn check_fingerprint(value: &str) -> Result<(), EncodeError> {
+    match fingerprint(value.as_bytes()) {
+        Ok(canonical) if canonical == value => Ok(()),
+        _ => Err(EncodeError::Invalid {
+            field: "anchor.sha256",
+            token: None,
+            reason: "expected 32 colon-separated uppercase hex octets",
+        }),
+    }
 }
 
 fn parse_token(value: &[u8]) -> Result<TokenRecord, DecodeError> {

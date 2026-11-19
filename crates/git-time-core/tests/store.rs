@@ -10,6 +10,7 @@ use git_time_core::store::{
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 /// Tracks the largest single allocation made on the current thread, so the
@@ -100,6 +101,7 @@ fn block() -> TrailerBlock {
     TrailerBlock {
         imprint: imprint(),
         object: Some(oid()),
+        anchors: BTreeMap::new(),
         tokens: vec![
             token("freetsa", 1, 300),
             token("digicert", 2, 300),
@@ -108,6 +110,12 @@ fn block() -> TrailerBlock {
         failures: Vec::new(),
         extra: Vec::new(),
     }
+}
+
+/// A fingerprint in its canonical spelling: 32 uppercase hex octets, colon
+/// separated, exactly as `trust::fingerprint` prints one.
+fn fp(octet: u8) -> String {
+    vec![format!("{octet:02X}"); 32].join(":")
 }
 
 fn lines(block: &TrailerBlock) -> Vec<String> {
@@ -223,6 +231,132 @@ fn decode_accepts_uppercase_nonce_hex() {
         .expect("decodes")
         .expect("has a block");
     assert_eq!(decoded.tokens[0].nonce, vec![0x9c, 0x1f, 0x3a, 0xb2]);
+}
+
+#[test]
+fn an_anchor_line_round_trips_in_place() {
+    let mut original = block();
+    original.tokens.truncate(1);
+    original
+        .anchors
+        .insert("freetsa".to_owned(), vec![fp(0xab), fp(0xcd)]);
+
+    let encoded = String::from_utf8(encode(&original, usize::MAX).expect("fits")).expect("ASCII");
+    let lines: Vec<&str> = encoded.split('\n').collect();
+    assert_eq!(
+        lines[2],
+        format!(
+            "{PREFIX}Anchor: id=freetsa; sha256={},{}",
+            fp(0xab),
+            fp(0xcd)
+        )
+    );
+    assert!(
+        lines[3].starts_with(&format!("{PREFIX}Token: ")),
+        "the anchor must come before the token: {}",
+        lines[3]
+    );
+
+    let decoded = decode(encoded.as_bytes())
+        .expect("decodes")
+        .expect("has a block");
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn anchor_fingerprints_normalize_to_uppercase() {
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{PREFIX}Anchor: id=x; sha256={}\n{PREFIX}Fail: id=x; reason=y\n",
+        imprint().to_trailer_value(),
+        fp(0xab).to_lowercase()
+    );
+    let decoded = decode(encoded.as_bytes())
+        .expect("decodes")
+        .expect("has a block");
+    assert_eq!(decoded.anchors["x"], vec![fp(0xab)]);
+}
+
+#[test]
+fn an_anchor_line_naming_no_token_or_fail_rejects_the_block() {
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{PREFIX}Anchor: id=ghost; sha256={}\n",
+        imprint().to_trailer_value(),
+        fp(1)
+    );
+    assert!(matches!(
+        decode(encoded.as_bytes()),
+        Err(DecodeError::InvalidField { .. })
+    ));
+}
+
+#[test]
+fn a_duplicate_anchor_line_rejects_the_block() {
+    let anchor = format!("{PREFIX}Anchor: id=x; sha256={}", fp(1));
+    let encoded = format!(
+        "{PREFIX}Imprint: {}\n{anchor}\n{anchor}\n{PREFIX}Fail: id=x; reason=y\n",
+        imprint().to_trailer_value()
+    );
+    assert!(matches!(
+        decode(encoded.as_bytes()),
+        Err(DecodeError::Malformed(_))
+    ));
+}
+
+#[test]
+fn anchor_fingerprints_must_be_sha256_hex() {
+    let sha1 = vec!["AB"; 20].join(":");
+    for fingerprints in ["nothex", sha1.as_str(), ""] {
+        let encoded = format!(
+            "{PREFIX}Imprint: {}\n{PREFIX}Anchor: id=x; sha256={fingerprints}\n{PREFIX}Fail: id=x; reason=y\n",
+            imprint().to_trailer_value()
+        );
+        assert!(
+            matches!(
+                decode(encoded.as_bytes()),
+                Err(DecodeError::InvalidField { .. })
+            ),
+            "{fingerprints:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn an_empty_fingerprint_part_rejects_the_block() {
+    for value in [format!("{},,{}", fp(1), fp(2)), format!("{},", fp(1))] {
+        let encoded = format!(
+            "{PREFIX}Imprint: {}\n{PREFIX}Anchor: id=x; sha256={value}\n{PREFIX}Fail: id=x; reason=y\n",
+            imprint().to_trailer_value()
+        );
+        assert!(
+            matches!(
+                decode(encoded.as_bytes()),
+                Err(DecodeError::InvalidField { .. })
+            ),
+            "{value:?} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn anchor_fields_are_strictly_ordered() {
+    let good = fp(1);
+    for value in [
+        format!("sha256={good}; id=x"),
+        format!("id=x; algo=sha256; sha256={good}"),
+        format!("id=x; sha256={good}; extra=1"),
+    ] {
+        let encoded = format!(
+            "{PREFIX}Imprint: {}\n{PREFIX}Anchor: {value}\n{PREFIX}Fail: id=x; reason=y\n",
+            imprint().to_trailer_value()
+        );
+        assert!(
+            matches!(
+                decode(encoded.as_bytes()),
+                Err(DecodeError::InvalidField { .. })
+            ),
+            "{value:?} must be rejected"
+        );
+    }
 }
 
 #[test]

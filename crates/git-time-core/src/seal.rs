@@ -36,6 +36,7 @@
 //! `refs/notes/rfc3161`, or both. A note-stored seal keeps only the imprint in
 //! the commit, so the object stays small while the evidence lives beside it.
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -300,6 +301,7 @@ pub async fn seal(
     let block = TrailerBlock {
         imprint: imprint.clone(),
         object: Some(object_id),
+        anchors: BTreeMap::new(),
         tokens,
         failures,
         extra: Vec::new(),
@@ -319,6 +321,7 @@ pub async fn seal(
         let stamp_only = TrailerBlock {
             imprint,
             object: None,
+            anchors: BTreeMap::new(),
             tokens: Vec::new(),
             failures: Vec::new(),
             extra: Vec::new(),

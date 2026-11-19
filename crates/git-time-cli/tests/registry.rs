@@ -483,6 +483,7 @@ impl Repo {
                 bytes: vec![0; 32],
             },
             object: None,
+            anchors: std::collections::BTreeMap::new(),
             tokens: ids
                 .iter()
                 .map(|id| git_time_core::store::TokenRecord {
