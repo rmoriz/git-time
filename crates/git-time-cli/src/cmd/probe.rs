@@ -9,8 +9,12 @@
 // The worker and the picker that read this arrive in a later change.
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use der::Encode as _;
 use git_time_core::presets::Preset;
@@ -160,10 +164,194 @@ pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Serv
     Served::Known(chosen.clone())
 }
 
+/// How many bundles are fetched at once.
+///
+/// One thread per row would put twenty-odd sockets in front of the picker's
+/// first frame; four keep the frame free, and a hang only costs a quarter of
+/// the table instead of all of it.
+pub const PROBE_THREADS: usize = 4;
+
+/// One fetch: the bundle at `url`, with the certificates of `chain` appended.
+///
+/// Injected so a test answers from a fixture and never opens a socket.
+pub type Fetch = Arc<dyn Fn(&str, &[&str]) -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// The real fetch, on a runtime of its own per call.
+///
+/// The threads are detached, so a runtime shared between them would have to
+/// outlive every worker; building one per call is cheap next to the socket and
+/// keeps the lifetime local.
+#[must_use]
+pub fn network_fetch() -> Fetch {
+    Arc::new(|url, chain| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("cannot build the runtime: {error}"))?;
+        runtime.block_on(super::anchors::fetch_chain(url, chain))
+    })
+}
+
+/// The queue the threads take rows from.
+struct Queue {
+    rows: VecDeque<usize>,
+    /// Rows a thread has popped but not yet answered for: part of `pending`, so
+    /// a caller that waits for zero is not racing a reply still being fetched.
+    in_flight: usize,
+    closed: bool,
+}
+
+/// Everything the workers share with the `Prober` that owns them.
+struct Shared {
+    presets: &'static [Preset],
+    fetch: Fetch,
+    queue: Mutex<Queue>,
+    wake: Condvar,
+    failed: AtomicUsize,
+}
+
+/// A queue of rows being probed by detached threads, and their results.
+///
+/// The process exit ends the threads, so nothing is ever joined: a prober that
+/// is dropped closes the queue and lets the workers wind down on their own.
+pub struct Prober {
+    shared: Arc<Shared>,
+    results: Receiver<(usize, Served)>,
+}
+
+impl Prober {
+    /// Queue every preset except the `skip`ped indices and start the workers.
+    #[must_use]
+    pub fn start(presets: &'static [Preset], fetch: Fetch, skip: &[usize]) -> Self {
+        let mut rows = VecDeque::new();
+        enqueue(&mut rows, presets.len(), skip);
+        let shared = Arc::new(Shared {
+            presets,
+            fetch,
+            queue: Mutex::new(Queue {
+                rows,
+                in_flight: 0,
+                closed: false,
+            }),
+            wake: Condvar::new(),
+            failed: AtomicUsize::new(0),
+        });
+        let (sender, results) = mpsc::channel();
+        for _ in 0..PROBE_THREADS {
+            let shared = Arc::clone(&shared);
+            let sender = sender.clone();
+            std::thread::spawn(move || work(&shared, &sender));
+        }
+        Self { shared, results }
+    }
+
+    /// Queue every preset except the `skip`ped indices again, as it is.
+    pub fn refresh(&self, skip: &[usize]) {
+        {
+            let mut queue = lock(&self.shared);
+            enqueue(&mut queue.rows, self.shared.presets.len(), skip);
+        }
+        self.shared.wake.notify_all();
+    }
+
+    /// Every result that has arrived since the last call.
+    #[must_use]
+    pub fn drain(&self) -> Vec<(usize, Served)> {
+        self.results.try_iter().collect()
+    }
+
+    /// The rows still queued or in flight.
+    #[must_use]
+    pub fn pending(&self) -> usize {
+        let queue = lock(&self.shared);
+        queue.rows.len() + queue.in_flight
+    }
+
+    /// How many rows answered [`Served::Failed`] or [`Served::Unpublished`].
+    #[must_use]
+    pub fn failed(&self) -> usize {
+        self.shared.failed.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Prober {
+    fn drop(&mut self) {
+        let mut queue = lock(&self.shared);
+        queue.closed = true;
+        drop(queue);
+        self.shared.wake.notify_all();
+    }
+}
+
+/// Take the queue lock, ignoring a panic in a previous holder.
+fn lock(shared: &Shared) -> MutexGuard<'_, Queue> {
+    shared
+        .queue
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Append every index below `count` that is not in `skip`, in order.
+fn enqueue(rows: &mut VecDeque<usize>, count: usize, skip: &[usize]) {
+    rows.extend((0..count).filter(|index| !skip.contains(index)));
+}
+
+/// One worker: take a row, fetch it, judge it, store a date only if justified,
+/// and report the answer.
+fn work(shared: &Shared, sender: &Sender<(usize, Served)>) {
+    loop {
+        let index = {
+            let mut queue = lock(shared);
+            loop {
+                if queue.closed {
+                    return;
+                }
+                if let Some(index) = queue.rows.pop_front() {
+                    queue.in_flight += 1;
+                    break index;
+                }
+                queue = shared
+                    .wake
+                    .wait(queue)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        };
+
+        let preset = &shared.presets[index];
+        let now = jiff::Timestamp::now();
+        let served = match (shared.fetch)(preset.url, preset.chain) {
+            Ok(bundle) => {
+                let served = probed_from(preset, &bundle, now);
+                if let Served::Known(cached) = &served {
+                    let _ = store(preset.name, cached, now);
+                }
+                served
+            }
+            Err(_) => Served::Failed,
+        };
+        let counted = matches!(served, Served::Failed | Served::Unpublished);
+        // A row whose result the caller can no longer receive was not a failure
+        // of the probe, so it is only counted once the send worked.
+        let sent = sender.send((index, served)).is_ok();
+        if counted && sent {
+            shared.failed.fetch_add(1, Ordering::Relaxed);
+        }
+
+        let mut queue = lock(shared);
+        queue.in_flight -= 1;
+        drop(queue);
+        // A caller polling `pending` needs no wake, but a queue that is emptied
+        // from here should not leave anyone else's wait asleep on it.
+        shared.wake.notify_all();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::cell::RefCell;
     use std::path::Path;
     use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -488,5 +676,113 @@ pub(crate) mod tests {
             super::Served::Known(cached) => assert_eq!(cached.not_after, "2020-02-01"),
             other => panic!("{other:?}"),
         }
+    }
+
+    thread_local! {
+        /// The log the next `answering` closure on this thread writes to.
+        ///
+        /// A thread-local rather than an argument keeps the closure shape the
+        /// worker takes, and one log per test keeps two tests' fetches apart:
+        /// the presets are global, so a shared log could not attribute a URL.
+        static URLS: RefCell<Option<Arc<Mutex<Vec<String>>>>> = const { RefCell::new(None) };
+    }
+
+    /// A fresh URL log, armed for the `answering` closure built on this thread.
+    fn urls() -> Arc<Mutex<Vec<String>>> {
+        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        URLS.with(|slot| *slot.borrow_mut() = Some(Arc::clone(&log)));
+        log
+    }
+
+    /// A fetch that logs its URL and answers the PEM at `path` whatever it was
+    /// asked for: every row gets the same FreeTSA root.
+    fn answering(path: &'static str) -> super::Fetch {
+        let log = URLS
+            .with(|slot| slot.borrow_mut().take())
+            .unwrap_or_default();
+        Arc::new(move |url, _| {
+            log.lock().unwrap().push(url.to_owned());
+            std::fs::read(path).map_err(|error| error.to_string())
+        })
+    }
+
+    /// The row of the FreeTSA preset: the one fingerprint a fixture can match.
+    fn freetsa_index() -> usize {
+        presets::PRESETS
+            .iter()
+            .position(|preset| preset.name == "freetsa")
+            .expect("the freetsa preset")
+    }
+
+    /// Drain `prober` until nothing is queued or in flight, then answer what
+    /// came back.
+    ///
+    /// The worker is threaded, so this polls with a bound; `pending` counts the
+    /// rows in flight as well, which makes zero mean every reply is already in
+    /// the channel rather than merely picked up.
+    fn wait(prober: &super::Prober) -> Vec<(usize, super::Served)> {
+        for _ in 0..250 {
+            if prober.pending() == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(prober.pending(), 0, "the queue drains");
+        prober.drain()
+    }
+
+    #[test]
+    fn a_result_carries_the_index_and_is_stored() {
+        let _guard = xdg_lock();
+        xdg();
+        let _ = forget("freetsa");
+        let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[]);
+        let results = wait(&prober);
+        assert!(results.iter().any(|(index, served)| {
+            *index == freetsa_index() && matches!(served, super::Served::Known(_))
+        }));
+        assert!(super::cached("freetsa", jiff::Timestamp::now()).is_some());
+    }
+
+    #[test]
+    fn skipped_indices_are_not_fetched() {
+        let _guard = xdg_lock();
+        xdg();
+        let urls = urls();
+        let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[1]);
+        wait(&prober);
+        assert!(
+            !urls
+                .lock()
+                .unwrap()
+                .contains(&presets::PRESETS[1].url.to_owned())
+        );
+    }
+
+    #[test]
+    fn a_failing_fetch_counts_and_answers_failed() {
+        let prober = super::Prober::start(
+            &presets::PRESETS,
+            Arc::new(|_, _| Err("down".to_owned())),
+            &[],
+        );
+        let results = wait(&prober);
+        assert!(
+            results
+                .iter()
+                .all(|(_, served)| matches!(served, super::Served::Failed))
+        );
+        assert_eq!(prober.failed(), presets::PRESETS.len());
+    }
+
+    #[test]
+    fn refresh_queues_everything_again() {
+        let _guard = xdg_lock();
+        xdg();
+        let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[]);
+        wait(&prober);
+        prober.refresh(&[]);
+        assert!(prober.pending() > 0);
+        wait(&prober);
     }
 }
