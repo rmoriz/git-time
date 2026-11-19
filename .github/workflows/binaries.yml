@@ -154,7 +154,13 @@ jobs:
           ./dist-binaries/git-time-x86_64-apple-darwin --version
           ./dist-binaries/git-time-x86_64-apple-darwin --help >/dev/null
 
+      # A job that GitHub kills mid-step is already marked completed when the
+      # upload starts, and the artifact call then answers `403 job is completed`
+      # while the runner is still going. On a push that is a second red for the
+      # same accident; on a tag it stays loud.
       - name: Upload the artifacts
+        if: ${{ !cancelled() }}
+        continue-on-error: ${{ inputs.tolerant }}
         uses: actions/upload-artifact@v4
         with:
           name: git-time-macos
