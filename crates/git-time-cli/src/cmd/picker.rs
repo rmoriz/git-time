@@ -193,7 +193,9 @@ pub fn parse_key(bytes: &[u8]) -> Option<Key> {
 }
 
 const NAME_WIDTH: usize = 18;
-const TRUST_WIDTH: usize = 16;
+// Wide enough for `pin expires <day>`: a near expiry keeps both the word and
+// the date instead of being cut inside its own column.
+const TRUST_WIDTH: usize = 22;
 const HELP: &str = "space toggle  a all  n none  j/k or arrows move  enter save  q abort";
 
 /// One screen frame for a `rows` x `cols` terminal.
@@ -294,9 +296,14 @@ fn row(selection: &Selection, index: usize, preset: &Preset, now: jiff::Timestam
     )
 }
 
-/// The trust column: `pin <YYYY-MM-DD>` with its verdict for a pinned root,
-/// `EXPIRED` once none of the bundle's roots is valid at `now`, `tofu` without
-/// a published root, and `pin -` for one that is not pinned here.
+/// The trust column: `pin <YYYY-MM-DD>` for a pinned root, `pin expires
+/// <YYYY-MM-DD>` when that day is close, `EXPIRED` once none of the bundle's
+/// roots is valid at `now`, `tofu` without a published root, and `pin -` for one
+/// that is not pinned here.
+///
+/// The verdict leads the date instead of trailing it in parentheses: the column
+/// is narrow and cut, and `expires 2027-01-01` keeps both the word and the day
+/// readable where `2027-01-01 (expi…` loses the day first.
 ///
 /// The local bundle is read first, because for a preset that publishes no root
 /// it is the only copy: such an authority is exactly where a hidden date hurts.
@@ -312,7 +319,10 @@ fn trust(preset: &Preset, roots: Option<&[anchors::RootRow]>, now: jiff::Timesta
             return "EXPIRED".to_owned();
         }
         if let Some(root) = looming(roots, now) {
-            return format!("pin {}", anchors::expiry_text(&root.not_after, now));
+            return match anchors::expiry_label(&root.not_after, now) {
+                "(expires soon)" => format!("pin expires {}", root.not_after),
+                _ => format!("pin {date}", date = root.not_after),
+            };
         }
     }
     if preset.fingerprints.is_empty() {
@@ -829,10 +839,10 @@ mod tests {
             super::trust(preset, Some(&[root("2030-01-01")]), at(2026, 1, 1)),
             "pin 2030-01-01"
         );
-        // The verdict rides along while the day takes the room it needs.
+        // The verdict leads the day, so a cut column keeps both readable.
         assert_eq!(
             super::trust(preset, Some(&[root("2027-01-01")]), at(2026, 12, 1)),
-            "pin 2027-01-01 (expires soon)"
+            "pin expires 2027-01-01"
         );
     }
 

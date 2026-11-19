@@ -811,6 +811,23 @@ fn run_script(repo: &Repo, script: &str) -> Output {
     output
 }
 
+/// Run a generated script with a caller-chosen `$XDG_CONFIG_HOME`, so a test can
+/// put a bundle at the conventional anchor path.
+fn run_script_in(repo: &Repo, script: &str, xdg: &Path) -> Output {
+    let path = repo.path().join(".git/time-audit.sh");
+    std::fs::write(&path, script).expect("write the script");
+    Command::new("sh")
+        .arg(&path)
+        .current_dir(repo.path())
+        .env("XDG_CONFIG_HOME", xdg)
+        .envs(insulated_env().iter().copied())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("runs sh")
+}
+
 /// Parse a verify `--json` run.
 fn json_commits(output: &Output) -> Vec<Value> {
     let doc: Value = serde_json::from_slice(&output.stdout).expect("stdout is one JSON document");
@@ -2086,6 +2103,59 @@ fn the_script_embeds_only_the_root_the_token_names() {
     assert!(all.iter().any(|line| line.starts_with("PASS ")), "{all:?}");
 }
 
+/// A block that names a root this machine has not pinned must fail, even when
+/// the conventional bundle path would verify the token: the path is not the
+/// evidence. Only an unresolvable answer (no named root, unreadable genTime) may
+/// fall back.
+#[test]
+fn a_named_root_that_is_not_pinned_fails_although_the_path_would_verify() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let sealing = certificate_fingerprint(&repo.authority.bundle());
+    let oid = repo.head();
+    assert!(
+        repo.object(&oid)
+            .contains(&format!("X-RFC3161-Anchor: id=stub; sha256={sealing}")),
+        "the block names its root"
+    );
+
+    // Nothing is pinned for the id (the configured path is gone), but the
+    // conventional path holds the very root the block names.
+    repo.drop_anchor();
+    let xdg = TempDir::new().expect("an XDG with the bundle");
+    let candidates = xdg.path().join("git-time/anchors");
+    std::fs::create_dir_all(&candidates).expect("the anchor dir");
+    std::fs::write(
+        candidates.join("stub.pem"),
+        std::fs::read(repo.authority.bundle()).expect("the bundle"),
+    )
+    .expect("write the candidate");
+
+    let script = text(&verify(&repo, &oid, &["--openssl"]).stdout);
+    assert!(
+        script.contains(&format!("named_absent='{sealing}'")),
+        "the missing root is said: {script}"
+    );
+    assert!(
+        pem_bodies(&decoded_anchor(&script)).is_empty(),
+        "nothing is embedded"
+    );
+
+    let run = run_script_in(&repo, &script, xdg.path());
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(1), "{all:?}");
+    assert!(
+        all.iter().any(|line| line.contains(&sealing)
+            && line.starts_with("FAIL ")
+            && line.contains("none of which is pinned")),
+        "the failure names the root: {all:?}"
+    );
+    assert!(!all.iter().any(|line| line.starts_with("PASS ")), "{all:?}");
+}
+
 /// The validity check runs at the token's own genTime, not at wall clock, and
 /// an openssl whose `ts -verify` lacks `-attime` says which check it could not
 /// make instead of judging at now without a word.
@@ -2398,6 +2468,9 @@ fn a_message_that_is_not_utf8_falls_back_to_base64() {
 }
 
 /// A token whose authority has no anchor is a failure of its own.
+///
+/// The block names a root, so the failure is not the generic "no anchor
+/// available": it says which root is missing and does not quietly fall back.
 #[test]
 fn a_token_without_an_anchor_fails_the_openssl_script() {
     if !script_tools() {
@@ -2414,7 +2487,7 @@ fn a_token_without_an_anchor_fails_the_openssl_script() {
     assert_ne!(run.status.code(), Some(0), "{all:?}");
     assert!(
         all.iter()
-            .any(|line| line.contains("no anchor available for")),
+            .any(|line| line.contains("none of which is pinned")),
         "{all:?}"
     );
 }

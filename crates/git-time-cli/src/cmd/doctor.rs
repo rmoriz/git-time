@@ -42,6 +42,33 @@ pub fn run(directory: Option<std::path::PathBuf>, json_output: bool) -> Exit {
     }
 }
 
+/// The command that pins `fingerprint` for `id`, runnable as printed.
+///
+/// `restore` can only fetch a preset (the evidence does not carry a URL) and its
+/// positional is a commit, so the accept is the only argument it takes. Any
+/// other configured id is fetched by its own URL — with `--insecure-http` when
+/// the URL is plain HTTP — and an id the config has lost is configured first.
+fn remedy(repo: &Repo, id: &str, fingerprint: &str) -> String {
+    let url = repo
+        .config_non_empty(&format!("time.tsa.{id}.url"))
+        .ok()
+        .flatten();
+    match (git_time_core::presets::find(id).is_some(), url) {
+        // The positional of `restore` is a commit, so it must not be given.
+        (true, Some(_)) => format!("git time tsa restore --accept {id}={fingerprint}"),
+        (true, None) => format!("git time tsa preset add {id}"),
+        (false, Some(url)) => format!(
+            "git time anchor fetch {url} --id {id} --accept {id}={fingerprint}{}",
+            if url.starts_with("http://") {
+                " --insecure-http"
+            } else {
+                ""
+            }
+        ),
+        (false, None) => format!("git time tsa add <url> --id {id}"),
+    }
+}
+
 /// The report being assembled.
 struct Report {
     /// One line per fact, in the order doctor means them.
@@ -271,9 +298,18 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                         );
                         if roots > 0 {
                             if valid.is_empty() {
+                                // The fingerprint is the root a fetch is meant
+                                // to hand back (the newest one, as a listing
+                                // shows it), spelled out so the line can be
+                                // pasted. `restore`'s positional is a commit,
+                                // so the accept is the only argument.
+                                let newest = anchors::roots(&anchor.path)
+                                    .as_deref()
+                                    .and_then(|roots| crate::cmd::tsa::looming(roots, now))
+                                    .map(|root| root.fingerprint.clone());
                                 report.problem(format!(
-                                    "`anchor {id}` has no root valid now (accept a fresh one: \
-                                     git time tsa restore {id} --accept <id>=<fp>)"
+                                    "`anchor {id}` has no root valid now (accept a fresh one: {})",
+                                    remedy(repo, id, newest.as_deref().unwrap_or("<fp>"))
                                 ));
                             } else {
                                 // Only a root that is valid now can be the one
@@ -341,16 +377,9 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
         }
     }
     for (id, fingerprint) in unpinned {
-        // `restore` needs a `time.tsa.<id>` section to write into; an id the
-        // config has lost is configured by its preset instead.
-        let remedy = if ids.contains(&id) {
-            format!("git time tsa restore {id} --accept {id}={fingerprint}")
-        } else {
-            format!("git time tsa preset add {id}")
-        };
         report.problem(format!(
-            "HEAD names `anchor {id}` fingerprint {fingerprint}, which is not pinned \
-             ({remedy})"
+            "HEAD names `anchor {id}` fingerprint {fingerprint}, which is not pinned ({})",
+            remedy(repo, &id, &fingerprint)
         ));
     }
     // An anchor for an id without a url is invisible to the policy; say so.

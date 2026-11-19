@@ -281,7 +281,7 @@ fn print_openssl(
         }
         script.push_str(&render_pre(&pre_image));
         script.push_str(OPENSSL_COMMIT);
-        for (index, (id, der, ca_file)) in tokens.iter().enumerate() {
+        for (index, (id, der, anchor)) in tokens.iter().enumerate() {
             let configured = policy
                 .tsas
                 .iter()
@@ -296,8 +296,16 @@ fn print_openssl(
             quote_heredoc(&mut script, "token", &base64_lines(der));
             // The roots the token was judged against, and nothing else: the
             // bundle on this machine may have rotated since, and a path here
-            // says nothing about the bytes the token met.
-            quote_heredoc(&mut script, "anchor", &base64_lines(ca_file));
+            // says nothing about the bytes the token met. A named-but-absent
+            // answer embeds nothing and says which roots are missing, so the
+            // script can fail instead of reaching for a path.
+            let (embedded, absent) = match anchor {
+                AnchorPem::Embedded(pem) => (pem.as_slice(), String::new()),
+                AnchorPem::Unresolved => (&[][..], String::new()),
+                AnchorPem::NamedAbsent(fingerprints) => (&[][..], fingerprints.join(",")),
+            };
+            quote_heredoc(&mut script, "anchor", &base64_lines(embedded));
+            script.push_str(&format!("named_absent='{}'\n", quote(&absent)));
             // Whole seconds only, and only when the token names a genTime: the
             // chain has to be judged at the token's own time.
             match gen_time(der).map(|gen_time| gen_time.as_second()) {
@@ -318,9 +326,26 @@ fn print_openssl(
 struct Payload {
     imprint: git_time_core::imprint::Digest,
     pre_image: PreText,
-    /// Per token: the TSA id, the raw token DER and the `-CAfile` PEM the token
-    /// is judged against.
-    tokens: Vec<(String, Vec<u8>, Vec<u8>)>,
+    /// Per token: the TSA id, the raw token DER and how its anchor is answered.
+    tokens: Vec<(String, Vec<u8>, AnchorPem)>,
+}
+
+/// What could be embedded as a token's anchor.
+///
+/// Three answers, because "nothing embedded" is not one fact: a store that could
+/// not answer may fall back to a configured or conventional path, while a block
+/// that names roots and finds none of them pinned must not — the path may
+/// verify, yet not against the root the evidence names.
+enum AnchorPem {
+    /// The pinned roots the token named, valid at its genTime: the `-CAfile`
+    /// PEM, embedded so the script needs no bundle that may have rotated since.
+    Embedded(Vec<u8>),
+    /// The generation could not resolve an anchor (unpinned id, unreadable
+    /// genTime, no named root and none valid then): the script falls back.
+    Unresolved,
+    /// The block names roots, but none of them is pinned and valid at the
+    /// token's genTime. The fingerprints travel so the failure can name them.
+    NamedAbsent(Vec<String>),
 }
 
 /// How the pre-image is carried.
@@ -370,16 +395,23 @@ fn payload(repo: &git_time_core::repo::Repo, oid: &str, anchors: &AnchorStore) -
 /// the token's genTime, narrowed to the `named` fingerprints, plus every pinned
 /// intermediate.
 ///
-/// An unpinned id, a token whose genTime cannot be read or a store with no root
-/// valid then yields nothing: the script falls back to the paths it knows and
-/// says when neither exists. The token's own chain is not repeated here; it
-/// already travels inside the token.
-fn anchor_pem(anchors: &AnchorStore, id: &str, token: &[u8], named: &[String]) -> Vec<u8> {
+/// A token whose genTime cannot be read is [`AnchorPem::Unresolved`]: the
+/// script falls back to the paths it knows and says when neither exists. So is
+/// an unpinned id or a store with no root valid then **as long as the block
+/// names nothing** — with a named list and nothing embedded the answer is
+/// [`AnchorPem::NamedAbsent`] and the script must not fall back, or a bundle
+/// path could make the token pass against a root the evidence never named. The
+/// token's own chain is not repeated here; it already travels inside the token.
+fn anchor_pem(anchors: &AnchorStore, id: &str, token: &[u8], named: &[String]) -> AnchorPem {
     let Some(gen_time) = gen_time(token) else {
-        return Vec::new();
+        return AnchorPem::Unresolved;
     };
     let Some(anchor) = anchors.anchor(id) else {
-        return Vec::new();
+        return if named.is_empty() {
+            AnchorPem::Unresolved
+        } else {
+            AnchorPem::NamedAbsent(named.to_vec())
+        };
     };
     let mut pem = Vec::new();
     for root in anchor.roots_at(gen_time) {
@@ -392,12 +424,16 @@ fn anchor_pem(anchors: &AnchorStore, id: &str, token: &[u8], named: &[String]) -
         }
     }
     if pem.is_empty() {
-        return pem;
+        return if named.is_empty() {
+            AnchorPem::Unresolved
+        } else {
+            AnchorPem::NamedAbsent(named.to_vec())
+        };
     }
     for intermediate in &anchor.intermediates {
         pem.extend(pem_block(intermediate.as_bytes()));
     }
-    pem
+    AnchorPem::Embedded(pem)
 }
 
 /// The clear-text form of a pre-image, or its base64 form when it is not text.
@@ -577,11 +613,18 @@ if ! openssl base64 -d -in "$scratch/token.b64" -out "$scratch/token.der" 2> "$s
 else
     # The embedded roots are the ones this token was judged against; a bundle on
     # this machine may have rotated since. The paths are only the fallback for a
-    # token the generation could not resolve an anchor for.
+    # token the generation could not resolve an anchor for. A block that *names*
+    # roots and finds none of them pinned does not fall back: the path could
+    # verify against something the evidence never named.
     anchor=
+    named_gap=
     if openssl base64 -d -in "$scratch/anchor.b64" -out "$scratch/anchor.pem" 2> "$scratch/err" \
         && [ -s "$scratch/anchor.pem" ]; then
         anchor="$scratch/anchor.pem"
+    elif [ -n "$named_absent" ]; then
+        printf 'FAIL %s %s: the block names root(s) %s, none of which is pinned and valid at the token time\n' "$short" "$id" "$named_absent"
+        failed=$((failed+1))
+        named_gap=1
     else
         if [ -n "${XDG_CONFIG_HOME:-}" ]; then
             candidate="$XDG_CONFIG_HOME/git-time/anchors/$id.pem"
@@ -594,7 +637,9 @@ else
             anchor=$fallback
         fi
     fi
-    if [ -z "$anchor" ]; then
+    if [ -n "$named_gap" ]; then
+        : # the failure is already counted above
+    elif [ -z "$anchor" ]; then
         printf 'FAIL %s: no anchor available for %s (looked at %s and %s)\n' "$short" "$id" "$candidate" "$fallback"
         failed=$((failed+1))
     else

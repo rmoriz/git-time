@@ -25,6 +25,7 @@ use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 
 use clap::Subcommand;
+use der::Decode as _;
 use git_time_core::imprint::{Alg, Digest};
 use git_time_core::presets;
 use git_time_core::repo::Repo;
@@ -322,11 +323,12 @@ fn list(repo: &Repo, json: bool) -> Exit {
             );
         let anchored = pinned(&id, &anchor);
         let roots = anchors::roots(&anchor);
-        // The authority line speaks about its first root, as the text listing
-        // does: fingerprint and date describe the same certificate.
+        // The authority line speaks about the newest root still valid, the same
+        // choice `tsa preset list` makes: fingerprint and date describe the same
+        // certificate, and neither depends on where append order put it.
         let fingerprint = roots
-            .as_ref()
-            .and_then(|roots| roots.first())
+            .as_deref()
+            .and_then(|roots| looming(roots, now))
             .map(|root| root.fingerprint.clone());
         rows.push(Row {
             id,
@@ -344,9 +346,9 @@ fn list(repo: &Repo, json: bool) -> Exit {
         let rows: Vec<Value> = rows
             .iter()
             .map(|row| {
-                // The authority line speaks about its first root, as the text
-                // listing does; every root then gets a line of its own.
-                let first = row.roots.iter().flatten().next();
+                // The authority line speaks about the newest live root, as the
+                // text listing does; every root then gets a line of its own.
+                let first = row.roots.as_deref().and_then(|roots| looming(roots, now));
                 let roots: Vec<Value> = row
                     .roots
                     .iter()
@@ -380,7 +382,7 @@ fn list(repo: &Repo, json: bool) -> Exit {
         }
     } else {
         for row in &rows {
-            let first = row.roots.iter().flatten().next();
+            let first = row.roots.as_deref().and_then(|roots| looming(roots, now));
             let not_after = first.map_or("-", |root| root.not_after.as_str());
             println!(
                 "{} {} {} {} {} {} ({}){}",
@@ -920,13 +922,33 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
                     .find(|anchor| anchor.id == preset.name)
                     .map(|anchor| anchor.path)
                     .unwrap_or_else(|| anchors::dir().join(format!("{}.pem", preset.name)));
-                // The spelling the preset is written in: SHA-256 where it pins
-                // one, SHA-1 for a SHA-1 pin and for trust on first use.
-                let fingerprint = crate::cmd::anchor::first_certificate_at(&anchor)
-                    .map(|der| install::digest_for(preset.fingerprints.last().copied(), &der))
-                    .unwrap_or_default();
+                // The root the pin just wrote, with its own date: the newly
+                // pinned root leads the bundle, so it is the first root — and a
+                // leaf never stands in for it. The digest keeps the spelling the
+                // preset is written in, so it can be compared with the
+                // publication as it stands.
+                let label = crate::cmd::anchor::root_certificates(&anchor)
+                    .and_then(|roots| roots.into_iter().next())
+                    .map_or_else(
+                        || "-".to_owned(),
+                        |der| {
+                            let expiry = x509_cert::Certificate::from_der(&der)
+                                .ok()
+                                .map(|certificate| {
+                                    anchors::expiry_text(
+                                        &anchors::not_after(&certificate),
+                                        jiff::Timestamp::now(),
+                                    )
+                                })
+                                .unwrap_or_else(|| "-".to_owned());
+                            format!(
+                                "{} {expiry}",
+                                install::digest_for(preset.fingerprints.last().copied(), &der)
+                            )
+                        },
+                    );
                 println!(
-                    "enabled {} ({}) fingerprint {fingerprint}",
+                    "enabled {} ({}) fingerprint {label}",
                     preset.name, preset.url
                 );
                 if pinned.kept > 0 {

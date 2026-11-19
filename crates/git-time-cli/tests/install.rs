@@ -1163,10 +1163,34 @@ fn doctor_problems_no_root_valid_now() {
         stdout.contains("`anchor stub` has no root valid now"),
         "{stdout}"
     );
+    // The way out names the real id and a real fingerprint, with no positional:
+    // `restore`'s positional is a commit, so `<id>` there would be taken as one.
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("accept a fresh one: "))
+        .unwrap_or_else(|| panic!("the hint: {stdout}"));
+    let command = hint
+        .split_once("git time ")
+        .map(|(_, command)| command.trim_end_matches(')').trim())
+        .unwrap_or_else(|| panic!("the command: {hint}"));
+    assert!(!command.contains("<fp>"), "a real fingerprint: {hint}");
     assert!(
-        stdout.contains("accept a fresh one: git time tsa restore stub --accept <id>=<fp>)"),
-        "the way out is spelled out: {stdout}"
+        command.contains("--accept stub="),
+        "the real id and value: {hint}"
     );
+    // `stub` is not a preset, so the fetch goes by the configured URL; either
+    // way `restore`/`fetch` must not be handed a bare id as if it were a commit.
+    assert!(
+        command.starts_with("anchor fetch ") || command.contains("tsa restore --accept st"),
+        "{hint}"
+    );
+    assert!(!command.contains("restore stub"), "{hint}");
+
+    // And it runs: the same stale bundle is served, so the accept matches it.
+    let served = [("GIT_TIME_ANCHOR_FETCH_CMD", format!("cat {}", pstr(&stale)))];
+    let args: Vec<&str> = command.split_whitespace().collect();
+    let restored = repo.run_time_env(&args, &served);
+    assert!(restored.status.success(), "{}", text(&restored.stderr));
 
     // The counts are part of the JSON shape, expired included.
     let json = repo.run_time(&["doctor", "--json"]);
@@ -1254,19 +1278,37 @@ fn doctor_problems_a_head_anchoring_an_unpinned_root() {
 
     let doctor = repo.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    let stdout = text(&doctor.stdout);
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("which is not pinned ("))
+        .unwrap_or_else(|| panic!("the hint: {stdout}"));
+    // `stub` is not a preset, so the remedy fetches the configured URL; no
+    // positional is handed over.
     let expected = format!(
         "HEAD names `anchor stub` fingerprint {fingerprint}, which is not pinned \
-         (git time tsa restore stub --accept stub={fingerprint})"
+         (git time anchor fetch {} --id stub --accept stub={fingerprint} --insecure-http)",
+        repo.stub.as_ref().expect("a stub").url
     );
+    assert!(stdout.contains(&expected), "{stdout}");
     assert!(
-        text(&doctor.stdout).contains(&expected),
-        "{}",
-        text(&doctor.stdout)
+        !hint.contains("restore stub"),
+        "no commit positional: {hint}"
     );
+
+    // The command runs as printed: the root is fetched again and accepted.
+    let command = hint
+        .split_once("git time ")
+        .map(|(_, command)| command.trim_end_matches(')').trim())
+        .unwrap_or_else(|| panic!("the command: {hint}"));
+    let args: Vec<&str> = command.split_whitespace().collect();
+    let served = [("GIT_TIME_ANCHOR_FETCH_CMD", format!("cat {}", pstr(&moved)))];
+    let restored = repo.run_time_env(&args, &served);
+    assert!(restored.status.success(), "{}", text(&restored.stderr));
 }
 
-/// An id the config has lost has no `time.tsa.<id>` section for `restore` to
-/// write into, so the hint is the preset that configures it.
+/// An id the config has lost has no URL to fetch, so the hint is the `add` that
+/// configures one first.
 #[test]
 fn doctor_suggests_a_preset_for_an_unconfigured_anchored_id() {
     let repo = Repo::blank();
@@ -1277,9 +1319,11 @@ fn doctor_suggests_a_preset_for_an_unconfigured_anchored_id() {
 
     let doctor = repo.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    // `stub` is not a preset either, so the hint is the `add` that configures
+    // it; nothing can be fetched until a URL is written.
     let expected = format!(
         "HEAD names `anchor stub` fingerprint {fingerprint}, which is not pinned \
-         (git time tsa preset add stub)"
+         (git time tsa add <url> --id stub)"
     );
     assert!(
         text(&doctor.stdout).contains(&expected),

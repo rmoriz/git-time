@@ -1249,6 +1249,31 @@ fn json_carries_not_after() {
     assert_eq!(value[0]["roots"][0]["expired"], false, "{stdout}");
 }
 
+/// A section with only a `url` (what `tsa add` without `--anchor` leaves) still
+/// pins at the default path, so its bundle is in use and must be listed.
+#[test]
+fn anchor_list_shows_a_bundle_of_a_url_only_section() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    // `tsa add` without `--anchor` leaves the section url-only; the policy reads
+    // the default path, and the bundle fetched there is pinned and in use.
+    repo.add_tsa("stub", &repo.stub_url());
+    let fetched = repo.fetch_anchor("stub");
+    assert!(fetched.status.success(), "{}", text(&fetched.stderr));
+    let anchor = repo.anchors().join("stub.pem");
+    assert!(anchor.exists(), "the default path is pinned and in use");
+    let expected = fingerprint(&first_der(&text(&repo.authority.bytes())));
+
+    let listing = ok(&repo.run_time(&["anchor", "list"]));
+    assert!(listing.contains("stub"), "{listing}");
+    assert!(
+        listing.contains(&pstr(&anchor)),
+        "the path is listed: {listing}"
+    );
+    assert!(listing.contains(&expected), "the root is listed: {listing}");
+}
+
 /// Every root of a chained bundle gets a line, in file order; the authority
 /// line stays on the first certificate the lock names as the run's own root.
 #[test]
@@ -2616,11 +2641,136 @@ fn refetching_an_unchanged_leaf_first_bundle_is_not_a_rotation() {
     let again = repo.run_time_env(&args, &served);
     let stdout = ok(&again);
     assert!(stdout.contains("chain material updated"), "{stdout}");
+    // The merge reorders the file (roots before chain material), so the bytes
+    // are not asserted: what has to stay is the one root, exactly once.
+    let store = git_time_core::trust::AnchorStore::load(&[("stub".to_owned(), anchor)])
+        .expect("the bundle still loads");
+    let roots = &store.anchor("stub").expect("an anchor").roots;
+    assert_eq!(roots.len(), 1, "no second root appears");
     assert_eq!(
-        std::fs::read(&anchor).expect("the anchor"),
-        std::fs::read(&bundle).expect("the bundle"),
-        "the re-fetch writes the same bytes"
+        fingerprint_colon(roots[0].as_bytes()),
+        fingerprint_colon(&first_der(&text(&authority.bytes()))),
+        "the one root is the served one"
     );
+}
+
+/// A rotation served leaf-first: the old code judged the first certificate, saw
+/// a leaf that changed, and refused — or, when the leaf repeated, replaced the
+/// bundle and dropped the retired root. A root already pinned is accounted for
+/// wherever it sits, so the fetch appends and the retired root, its lock line
+/// and the block sealed under it all survive.
+#[test]
+fn a_leaf_first_rotation_keeps_the_retired_root_and_its_lock_line() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("stub", &repo.stub_url());
+    let leaf = |authority: &Authority| {
+        std::fs::read_to_string(authority.dir.path().join("leaf.pem")).expect("the leaf")
+    };
+    let root = |authority: &Authority| text(&authority.bytes());
+
+    // Generation 1 is a leaf-first bundle, the ordinary shape a TSA serves.
+    let gen1 = repo.authority.dir.path().join("gen1.pem");
+    std::fs::write(
+        &gen1,
+        format!("{}{}", leaf(&repo.authority), root(&repo.authority)),
+    )
+    .expect("the first generation");
+    let args = [
+        "anchor",
+        "fetch",
+        &repo.stub_url(),
+        "--id",
+        "stub",
+        "--insecure-http",
+    ];
+    let served1 = [("GIT_TIME_ANCHOR_FETCH_CMD", format!("cat {}", pstr(&gen1)))];
+    let first = repo.run_time_env(&args, &served1);
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    let anchor = repo.anchors().join("stub.pem");
+    let retired = fingerprint_colon(&first_der(&root(&repo.authority)));
+
+    // A real block under that root, and the reviewer's record of what is pinned.
+    let old = repo.commit("under the retired root");
+    let pin = repo.run_time(&["anchor", "pin"]);
+    assert!(pin.status.success(), "{}", text(&pin.stderr));
+    let lock_before = std::fs::read_to_string(repo.lock()).expect("the lock");
+    assert!(lock_before.contains(&retired.replace(':', "").to_ascii_lowercase()));
+
+    // Generation 2 rotates the leaf and the root, and still serves the retired
+    // root behind the leaf. The leaf sits first, so nothing about the pinned
+    // root can be seen in the first certificate.
+    let rotated = Authority::new();
+    let fresh = fingerprint_colon(&first_der(&root(&rotated)));
+    let gen2 = repo.authority.dir.path().join("gen2.pem");
+    std::fs::write(
+        &gen2,
+        format!(
+            "{}{}{}",
+            leaf(&rotated),
+            root(&repo.authority),
+            root(&rotated)
+        ),
+    )
+    .expect("the second generation");
+    let served2 = [("GIT_TIME_ANCHOR_FETCH_CMD", format!("cat {}", pstr(&gen2)))];
+
+    let appended = repo.run_time_env(&args, &served2);
+    let stdout = ok(&appended);
+    assert!(
+        stdout.contains("1 root(s) appended, 2 now pinned"),
+        "{stdout}"
+    );
+    let store = git_time_core::trust::AnchorStore::load(&[("stub".to_owned(), anchor.clone())])
+        .expect("both roots load");
+    let roots = &store.anchor("stub").expect("an anchor").roots;
+    assert_eq!(roots.len(), 2, "the retired root stays next to the new one");
+    assert_eq!(fingerprint_colon(roots[0].as_bytes()), fresh);
+    assert_eq!(fingerprint_colon(roots[1].as_bytes()), retired);
+
+    // The lock diff is one added line; the retired root's line is untouched.
+    let pin = repo.run_time(&["anchor", "pin"]);
+    assert!(pin.status.success(), "{}", text(&pin.stderr));
+    let lock_after = std::fs::read_to_string(repo.lock()).expect("the lock");
+    assert!(
+        lock_after.contains(&retired.replace(':', "").to_ascii_lowercase()),
+        "the retired root's line survives: {lock_after}"
+    );
+    assert!(
+        lock_after.contains(&fresh.replace(':', "").to_ascii_lowercase()),
+        "the new root's line is added: {lock_after}"
+    );
+
+    // The old block still verifies: its named root is still pinned.
+    let verified = repo.run_time(&["verify", &old]);
+    assert!(verified.status.success(), "{}", text(&verified.stderr));
+
+    // A generation that serves neither pinned root is still refused, and the
+    // accept is what decides: the root is named, then appended.
+    let third = Authority::new();
+    let gen3 = repo.authority.dir.path().join("gen3.pem");
+    std::fs::write(&gen3, format!("{}{}", leaf(&third), root(&third))).expect("the third");
+    let served3 = [("GIT_TIME_ANCHOR_FETCH_CMD", format!("cat {}", pstr(&gen3)))];
+    let refused = repo.run_time_env(&args, &served3);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    let newest = fingerprint_colon(&first_der(&root(&third)));
+    assert!(
+        text(&refused.stderr).contains(&newest),
+        "the root to accept: {}",
+        text(&refused.stderr)
+    );
+    let mut with_accept: Vec<&str> = args.to_vec();
+    with_accept.extend(["--accept", &newest]);
+    let accepted = repo.run_time_env(&with_accept, &served3);
+    let stdout = ok(&accepted);
+    assert!(
+        stdout.contains("1 root(s) appended, 3 now pinned"),
+        "{stdout}"
+    );
+    let store = git_time_core::trust::AnchorStore::load(&[("stub".to_owned(), anchor)])
+        .expect("all roots load");
+    assert_eq!(store.anchor("stub").expect("an anchor").roots.len(), 3);
 }
 
 #[test]

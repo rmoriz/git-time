@@ -311,6 +311,8 @@ pub(crate) async fn pin(
             crate::cmd::accept::Applied::Replaced {
                 matched: Some(expected),
                 fingerprint,
+                sha256: _,
+                expires,
             } => {
                 // A pinned root is only worth something when the match is
                 // visible: the reader has to be able to see that the fetch was
@@ -321,12 +323,14 @@ pub(crate) async fn pin(
                     "anchor {}: {} fingerprint {}",
                     authority.name,
                     path.display(),
-                    fingerprint
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
             }
             crate::cmd::accept::Applied::Replaced {
                 matched: None,
                 fingerprint,
+                sha256: _,
+                expires,
             } => {
                 // A root the block named, or one already pinned (a rotation a
                 // human accepted earlier): the bundle is the same root with new
@@ -336,11 +340,13 @@ pub(crate) async fn pin(
                     "anchor {}: {} fingerprint {}",
                     authority.name,
                     path.display(),
-                    fingerprint
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
             }
             crate::cmd::accept::Applied::Appended {
                 fingerprint,
+                sha256: _,
+                expires,
                 added,
                 roots,
             } => {
@@ -352,11 +358,13 @@ pub(crate) async fn pin(
                     "anchor {}: {} fingerprint {}",
                     authority.name,
                     path.display(),
-                    fingerprint
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
             }
             crate::cmd::accept::Applied::FirstPin {
                 fingerprint,
+                sha256: _,
+                expires,
                 accepted: false,
             } => {
                 // Trust on first use: the printed value is the only thing that
@@ -364,27 +372,30 @@ pub(crate) async fn pin(
                 // full.
                 println!(
                     "{}: no published root fingerprint (trust on first use); the fetched root is \
-                     {fingerprint} — compare it with the authority's own publication",
-                    authority.name
+                     {} — compare it with the authority's own publication",
+                    authority.name,
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
                 println!(
                     "anchor {}: {} fingerprint {}",
                     authority.name,
                     path.display(),
-                    fingerprint
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
             }
             crate::cmd::accept::Applied::FirstPin {
                 fingerprint,
+                sha256: _,
+                expires,
                 accepted: true,
             } => {
                 // The accept overrode a published value that did not match.
                 println!(
-                    "{}: the accepted root {fingerprint} was pinned, overriding the published \
-                     fingerprint",
-                    authority.name
+                    "{}: the accepted root {} was pinned, overriding the published fingerprint",
+                    authority.name,
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
-                // The fingerprint of the first certificate, the same value
+                // The fingerprint of the root the pin is about, the same value
                 // `anchor list` and the lock carry, not of the whole file: a
                 // bundle may append chain certificates and would otherwise get
                 // two hashes.
@@ -392,7 +403,7 @@ pub(crate) async fn pin(
                     "anchor {}: {} fingerprint {}",
                     authority.name,
                     path.display(),
-                    fingerprint
+                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
                 );
             }
             crate::cmd::accept::Applied::Mismatch { expected, found } => {

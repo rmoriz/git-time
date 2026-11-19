@@ -33,10 +33,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Subcommand;
-use der::Decode;
 use git_time_core::repo::Repo;
 use git_time_core::trust::AnchorStore;
-use x509_cert::Certificate;
 
 use crate::cmd::{Exit, anchors, open, tsa::validate_id};
 
@@ -105,6 +103,11 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
 /// rotation: it is refused with both values until `accept` names it, and is then
 /// appended next to the retired root instead of replacing it. Nothing is written
 /// on a refusal.
+///
+/// Both the comparison and the reported value are about roots: the bundle's
+/// first certificate may be a signing leaf, and the pinned bundle plus the served
+/// one are merged rather than overwritten, so a retired root survives a
+/// generation change and the evidence naming it stays readable.
 async fn fetch(
     repo: &Repo,
     url: &str,
@@ -154,27 +157,18 @@ async fn fetch(
         Err(error) => return Exit::seal(format!("git time anchor: cannot fetch {url}: {error}")),
     };
 
-    let Some(der) = first_certificate(&bytes) else {
-        // `apply` keeps the bad bytes when nothing was pinned, so doctor can
-        // name them as unusable instead of as never fetched.
-        return match super::accept::apply(
-            id,
-            &target,
-            &bytes,
-            published,
-            &[],
-            accept.as_deref(),
-            true,
-        ) {
-            super::accept::Applied::Unusable(reason) => Exit::seal(format!(
-                "git time anchor: the bundle from {url} is unusable: {reason}"
-            )),
-            _ => Exit::seal(format!("git time anchor: {url} carried no certificate")),
-        };
-    };
-    let shown = anchors::fingerprint(&der);
-
-    match super::accept::apply(id, &target, &bytes, published, &[], accept.as_deref(), true) {
+    // The fingerprint every line reports is a **root**: a leaf first in the
+    // bundle is not what the pin is checked against, so printing it would call a
+    // leaf "the fetched root".
+    let (sha256, expires) = match super::accept::apply(
+        id,
+        &target,
+        &bytes,
+        published,
+        &[],
+        accept.as_deref(),
+        true,
+    ) {
         super::accept::Applied::Unusable(reason) => {
             return Exit::seal(format!(
                 "git time anchor: the bundle from {url} is unusable: {reason}"
@@ -191,34 +185,59 @@ async fn fetch(
             );
             return Exit::seal(String::new());
         }
-        super::accept::Applied::Appended { added, roots, .. } => {
+        super::accept::Applied::Appended {
+            fingerprint: _,
+            sha256,
+            expires,
+            added,
+            roots,
+        } => {
             println!("anchor {id}: {added} root(s) appended, {roots} now pinned");
+            (sha256, expires)
         }
         super::accept::Applied::FirstPin {
             fingerprint,
+            sha256,
+            expires,
             accepted: false,
         } => {
             println!(
                 "anchor {id}: no pinned root to compare (trust on first use); the fetched root is \
-                 {fingerprint} — compare it with the authority's own publication"
+                 {} — compare it with the authority's own publication",
+                super::accept::root_label(&fingerprint, expires.as_deref())
             );
+            (sha256, expires)
         }
         super::accept::Applied::FirstPin {
             fingerprint,
+            sha256,
+            expires,
             accepted: true,
         } => {
             println!(
-                "anchor {id}: the accepted root {fingerprint} was pinned; nothing was there to \
-                 compare it with"
+                "anchor {id}: the accepted root {} was pinned; nothing was there to compare it \
+                 with",
+                super::accept::root_label(&fingerprint, expires.as_deref())
             );
+            (sha256, expires)
         }
-        super::accept::Applied::Replaced { .. } => {
+        super::accept::Applied::Replaced {
+            fingerprint: _,
+            sha256,
+            expires,
+            ..
+        } => {
             if pinned_before {
                 println!("anchor {id}: chain material updated");
             }
+            (sha256, expires)
         }
-    }
-    println!("anchor {id}: {} sha256 {shown}", target.display());
+    };
+    println!(
+        "anchor {id}: {} sha256 {}",
+        target.display(),
+        super::accept::root_label(&sha256, expires.as_deref())
+    );
     match anchors::section_exists(repo, id) {
         Ok(true) => {}
         Ok(false) => eprintln!(
@@ -263,19 +282,29 @@ fn list(repo: &Repo, json: bool) -> Exit {
         Ok(configured) => configured,
         Err(exit) => return exit,
     };
+    // A section may carry a URL without an `anchor` key; the policy then reads
+    // the default path, so the listing does too — otherwise a bundle that is
+    // pinned and in use would be invisible here.
+    let mut targets: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+    for id in anchors::tsa_ids(repo).unwrap_or_default() {
+        targets.insert(id.clone(), anchors::dir().join(format!("{id}.pem")));
+    }
+    for anchor in &configured {
+        targets.insert(anchor.id.clone(), anchor.path.clone());
+    }
     // One instant for the whole listing: every date is judged as of one moment.
     let now = jiff::Timestamp::now();
-    let rows: Vec<Row> = configured
+    let rows: Vec<Row> = targets
         .iter()
-        .map(|anchor| {
-            let roots = anchors::roots(&anchor.path);
+        .map(|(id, path)| {
+            let roots = anchors::roots(path);
             // Fingerprint and date come from the same certificate — the first
             // root — so a bundle that lists an intermediate first cannot show
             // the intermediate's fingerprint next to a root's date.
             let first = roots.as_ref().and_then(|roots| roots.first());
             Row {
-                id: anchor.id.clone(),
-                path: anchor.path.clone(),
+                id: id.clone(),
+                path: path.clone(),
                 fingerprint: first.map(|root| root.fingerprint.clone()),
                 not_after: first.map(|root| root.not_after.clone()),
                 roots,
@@ -504,17 +533,6 @@ pub(crate) fn root_certificates(path: &Path) -> Option<Vec<Vec<u8>>> {
             .map(|root| root.as_bytes().to_vec())
             .collect(),
     )
-}
-
-/// The DER of `path`'s first certificate, when it parses as one.
-///
-/// A listing takes its fingerprint from the first *root* instead; this is what
-/// `tsa select` digests after a pin, where the first block is what was written.
-pub(crate) fn first_certificate_at(path: &Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
-    let der = first_certificate(&bytes)?;
-    Certificate::from_der(&der).ok()?;
-    Some(der)
 }
 
 /// The DER of the first PEM certificate in `pem`.
