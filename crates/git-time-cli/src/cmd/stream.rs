@@ -7,11 +7,11 @@
 //! walk gave them, because a result that overtakes a slow neighbour waits in a
 //! buffer until the neighbour is out.
 //!
-//! Every worker holds its own [`Repo`](git_time_core::repo::Repo) handle: the
-//! handle carries a `Cell` of `update-ref` attempts, so it is not `Sync`, but a
-//! clone is cheap and read-only work never touches that counter. Writes that do
-//! happen — `sigcheck` hashes a checked commit back into the object database —
-//! are atomic in git and safe from several threads.
+//! One [`Repo`](git_time_core::repo::Repo) is shared by reference: it is `Sync`
+//! since the `update-ref` counter became atomic, and the work here only reads
+//! through it. The write that does happen — `sigcheck` hashes a checked commit
+//! back into the object database — is atomic in git and safe from several
+//! threads.
 //!
 //! A panic in the work does not hang the pool: it is caught and comes back as an
 //! error entry for that commit, the same shape a read failure has.
@@ -36,13 +36,19 @@ where
     F: Fn(&str) -> Result<T, String> + Sync,
     E: FnMut(usize, Result<T, String>),
 {
+    if oids.is_empty() {
+        return;
+    }
     let workers = std::thread::available_parallelism()
         .map_or(1, std::num::NonZeroUsize::get)
         .min(MAX_WORKERS)
         .min(oids.len())
         .max(1);
     let next = AtomicUsize::new(0);
-    let (sender, receiver) = mpsc::channel::<(usize, Result<T, String>)>();
+    // Bounded, so a worker whose result cannot be printed yet waits instead of
+    // piling results up: the buffer stays at the two queued results per worker
+    // plus the one each worker is holding.
+    let (sender, receiver) = mpsc::sync_channel::<(usize, Result<T, String>)>(workers * 2);
     let work = &work;
 
     std::thread::scope(|scope| {
@@ -56,19 +62,19 @@ where
                         break;
                     };
                     let outcome = panic::catch_unwind(AssertUnwindSafe(|| work(oid)))
-                        .unwrap_or_else(|payload| Err(panic_message(&payload)));
+                        .unwrap_or_else(|payload| Err(panic_message(payload.as_ref())));
                     if sender.send((index, outcome)).is_err() {
                         break;
                     }
                 }
             });
         }
-        // The scope keeps one sender alive itself, so the loop below only ends
-        // when every worker has dropped its clone.
+        // Required, not a tidy-up: the receiver loop ends when every sender is
+        // gone, and the scope keeps this one alive around the workers.
         drop(sender);
 
         // Results can arrive out of order; the buffer holds the ones whose turn
-        // has not come, which is a handful at most (one per worker).
+        // has not come, so it is small while a slow neighbour is out.
         let mut buffer: BTreeMap<usize, Result<T, String>> = BTreeMap::new();
         let mut next_emit = 0;
         for (index, outcome) in receiver {
@@ -82,12 +88,13 @@ where
 }
 
 /// The text of a caught panic payload.
-fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
-    payload
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
         .downcast_ref::<&str>()
         .map(|text| (*text).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "panicked without a message".to_owned())
+        .unwrap_or_else(|| "panicked without a message".to_owned());
+    format!("the judgment panicked: {message}")
 }
 
 #[cfg(test)]
@@ -135,7 +142,7 @@ mod tests {
             |_, outcome| {
                 emitted.fetch_add(1, Ordering::Relaxed);
                 if let Err(error) = outcome {
-                    assert_eq!(error, "boom");
+                    assert_eq!(error, "the judgment panicked: boom");
                 }
             },
         );

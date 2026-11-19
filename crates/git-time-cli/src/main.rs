@@ -11,7 +11,9 @@
 //! wires exactly the set the repository's gate calls for.
 //!
 //! Exit codes are one contract for every command: `0` success (a skip is a
-//! success), `1` evidence or seal failure, `2` usage or configuration. The hook
+//! success), `1` evidence or seal failure, `2` usage or configuration, and `141`
+//! where a stream is cut short — `log` and `verify` stream, and a pipe into
+//! `head` ends them through SIGPIPE. The hook
 //! exits `3` on failure only when `time.on-failure = fail`, because git ignores
 //! a post-commit exit status and only a wrapper reads it; its gate is the real
 //! stop and exits `1`.

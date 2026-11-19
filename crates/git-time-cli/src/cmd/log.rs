@@ -43,38 +43,33 @@ pub fn run(
         Err(exit) => return exit,
     };
 
+    let work = |oid: &str| {
+        commit(&repo, policy.anchors(), oid, &policy).map_err(|error| error.to_string())
+    };
     let mut failed = false;
     if json_output {
         // A JSON document is one value, so this path still collects; only the
         // judging is spread over the pool.
         let mut evidence = Vec::with_capacity(oids.len());
         let mut errors = Vec::new();
-        super::stream::ordered(
-            &oids,
-            |oid| commit(&repo, policy.anchors(), oid, &policy).map_err(|error| error.to_string()),
-            |index, outcome| match outcome {
-                Ok(found) => evidence.push(found),
-                Err(error) => {
-                    failed = true;
-                    errors.push((oids[index].clone(), error));
-                }
-            },
-        );
+        super::stream::ordered(&oids, work, |index, outcome| match outcome {
+            Ok(found) => evidence.push(found),
+            Err(error) => {
+                failed = true;
+                errors.push((oids[index].clone(), error));
+            }
+        });
         print_json(&evidence, &errors);
     } else {
         // Plain output streams: a line appears as soon as its commit is judged,
         // still in walk order.
-        super::stream::ordered(
-            &oids,
-            |oid| commit(&repo, policy.anchors(), oid, &policy).map_err(|error| error.to_string()),
-            |index, outcome| match outcome {
-                Ok(found) => print_line(&found),
-                Err(error) => {
-                    failed = true;
-                    eprintln!("{}: {error}", short(&oids[index]));
-                }
-            },
-        );
+        super::stream::ordered(&oids, work, |index, outcome| match outcome {
+            Ok(found) => print_line(&found),
+            Err(error) => {
+                failed = true;
+                eprintln!("{}: {error}", short(&oids[index]));
+            }
+        });
     }
 
     // Only a commit that could not be read fails the log; a verdict never does.

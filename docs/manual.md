@@ -88,7 +88,8 @@ verdicts. The verdict vocabulary is `sealed`, `under-quorum`, `none`, `unsealed`
 authority was configured when it was sealed, and it is reported with the two commands that set an
 authority up. `--json` prints one document, so it collects what the pool judges rather than
 streaming. Exits `0` only when every commit passes, `1` on any evidence or gate failure, `2` on
-usage or config.
+usage or config, and `141` when the reader of a streamed run stops early (`… | head`), because
+SIGPIPE keeps its default disposition rather than turning into a broken-pipe panic.
 
 #### `--openssl` audit script
 
@@ -133,8 +134,9 @@ is not reached. `--json` and `--openssl` exclude each other, as do `--range` and
 ### `git time log [--range RANGE] [--json] [<commit>…]`
 
 The same evidence as one line per commit: short oid, TSA ids, genTimes, verdict. Lines stream as
-the pool judges the commits, still in walk order. This is a record, not a judgement: it exits `0`
-whenever it could read everything, and `1` only for a commit it could not read. `--json` carries no
+the pool judges the commits, still in walk order. No closing empty line follows, since every record
+is a single line. This is a record, not a judgement: it exits `0` whenever it could read
+everything, `1` only for a commit it could not read, and `141` for an early reader. `--json` carries no
 `pass`, `gates` or `required`, and collects instead of streaming.
 
 ### `git time install [--no-tsa] [--accept <id>=<fingerprint>]`

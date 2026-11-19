@@ -283,7 +283,8 @@ order, so a long range shows progress instead of a blank screen.
 .PP
 .B log
 is a record, not a judgement: it exits 0 whenever it could read everything
-and 1 only for a commit it could not read.
+and 1 only for a commit it could not read, or 141 when the reader stopped the
+stream early.
 Use
 .B verify
 to gate CI.
@@ -933,6 +934,16 @@ Evidence or seal failure, and the verdict of a refusing gate.
 .TP
 .B 2
 Usage or configuration problem.
+.TP
+.B 141
+Only from a streamed run that stopped being read —
+.BR log ,
+.B verify
+— when the reader closes the pipe early, as
+.B head
+does.
+SIGPIPE keeps its default disposition, so the process ends quietly instead of
+reporting a broken pipe.
 .TP
 .B 3
 Only from

@@ -49,7 +49,9 @@ pub struct Repo {
 /// A clone is the same repository with its own attempt counter.
 ///
 /// `AtomicU32` is not `Clone`, and a shared counter would make two handles
-/// report each other's `update-ref` attempts.
+/// report each other's `update-ref` attempts. The count is carried over, so a
+/// clone starts at the tries of its original; that is a diagnostic, not state a
+/// later `cas_update` resumes from.
 impl Clone for Repo {
     fn clone(&self) -> Self {
         Self {
