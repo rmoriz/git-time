@@ -1848,8 +1848,8 @@ fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
     );
 }
 
-/// The three presets with a published root refuse a different one, leave no
-/// anchor behind, and name both values.
+/// A published root refuses a different one, leaves no anchor behind, and names
+/// both values.
 #[test]
 fn a_published_fingerprint_mismatch_is_refused() {
     let repo = Repo::new();
@@ -2229,6 +2229,56 @@ fn select_refuses_a_non_terminal_stdin_and_names_the_alternatives() {
     assert!(stderr.contains("tsa add"), "{stderr}");
     // Nothing was prompted, so nothing hangs a script.
     assert!(!text(&refused.stdout).contains(SELECT_PROMPT));
+}
+
+#[test]
+fn fetching_a_first_pin_prints_it_in_full() {
+    // A hand-added authority publishes nothing, so nothing can be compared
+    // against it: the printed root is the only artifact of the first pin.
+    let repo = Repo::with_pinned_stub();
+    let output = repo.fetch_anchor("acme");
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    let stdout = text(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let first = lines.first().expect("the report line");
+    assert!(first.contains("trust on first use"), "{stdout}");
+    // The root is printed in full, not truncated: twenty colon-separated bytes.
+    let label = first
+        .split("the fetched root is ")
+        .nth(1)
+        .expect("the printed root");
+    assert_eq!(
+        label.split(':').count(),
+        20,
+        "the whole fingerprint, not an ellipsis: {label}"
+    );
+    // And the anchor line names the file it was stored in and its SHA-256.
+    assert!(
+        lines[1].contains("/acme.pem") && lines[1].contains("sha256 "),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn select_checks_the_terminal_before_it_reads_the_config() {
+    // Both failures exit 2 with a message that does not say "not a terminal",
+    // so only the message separates them: an unreadable configuration must not
+    // win over the usage hint.
+    let repo = Repo::new();
+    repo.init();
+    use std::os::unix::fs::PermissionsExt as _;
+    let config = repo.path().join(".git/config");
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000))
+        .expect("make the config unreadable");
+
+    let refused = repo.run_time(&["tsa", "select"]);
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("not a terminal"), "{stderr}");
+    assert!(!stderr.contains("git config"), "{stderr}");
+
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644))
+        .expect("restore the config");
 }
 
 #[test]

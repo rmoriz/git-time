@@ -93,9 +93,10 @@ the run fails; an id whose bundle is gone but that is still configured is pinned
 Presets live in `git_time_core::presets`; `tsa select` and `tsa preset add` write keys from that
 one table. Only `anchor fetch`, `preset add`, `tsa restore` and a selection touch the network, and they all
 honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
-it is pinned; a mismatch is refused and leaves the previous anchor alone. The presets without one
-are trust on first use and print the fetched fingerprint, which is the only reviewable artifact of
-the first pin. Plain-`http` presets record `time.tsa.<id>.insecure-http`; all of them share one capped warning
+it is pinned; a mismatch is refused and leaves the previous anchor alone. A row without a published
+root, such as a hand-added authority, is trust on first use and prints the fetched fingerprint,
+which is the only reviewable artifact of the first pin. Plain-`http` presets record
+`time.tsa.<id>.insecure-http`; all of them share one capped warning
 line at seal time.
 
 ## Surviving a root rotation (shipped)

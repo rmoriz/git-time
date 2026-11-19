@@ -43,10 +43,9 @@ endpoint; the full URL of the cursor row is printed below the list, so no column
 
 ```console
  > [x]  1  freetsa            pin 2041-03-07 
-   [x]  2  digicert           pin expires 2026-12-02 http
-   [ ]  3  sectigo            pin 2027-05-18 
-   [ ]  4  certum             pin 2027-06-09 http
-   [ ]  5  izenpe             pin 2030-04-01 http
+   [x]  2  digicert           pin 2031-11-10 http
+   [ ]  3  sectigo            pin 2045-10-04 
+   [ ]  4  izenpe             pin 2045-09-23 http
   …
 url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
@@ -56,8 +55,9 @@ space toggle  a all  n none  j/k or arrows move  enter save  q abort
 
 `enter` saves and pins; `q`, `esc` or `ctrl-c` leave without writing. A change keeps the other
 configured authorities because they start ticked; `n` clears every tick, and saving that empty set is
-how preset sections are removed. `git time install` on a repository with no authority hands over to
-the same UI, so installing and choosing can be one step.
+how preset sections are removed. The `pin` dates are the roots' expiry; one inside the window reads
+`expires <date>`, a bundle all past reads `EXPIRED`. `git time install` on a repository with no
+authority hands over to the same UI, so installing and choosing can be one step.
 
 In a script, no prompt happens: `git time tsa preset add <id>` enables one preset and `git time
 tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without a terminal exits

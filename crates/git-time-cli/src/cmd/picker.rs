@@ -658,11 +658,13 @@ mod tests {
         let rendered = frame(&picked(), &presets::PRESETS, 24, 80);
         assert!(rendered.contains("pin "), "{rendered}");
         // No built-in row is TOFU now, so the table shows the published tier;
-        // the `tofu` tier is rendered from a constructed unpublished preset.
+        // the other two tiers come from constructed presets, so this does not
+        // depend on which anchors the machine running the suite happens to have.
         assert!(!rendered.contains("tofu"), "{rendered}");
-        assert!(rendered.contains("pin -"), "{rendered}");
-        let tofu = frame(&picked(), &[unpublished()], 24, 80);
-        assert!(tofu.contains("tofu"), "{tofu}");
+        let unpublished = frame(&picked(), &[unpublished()], 24, 80);
+        assert!(unpublished.contains("tofu"), "{unpublished}");
+        let missing = frame(&picked(), &[published_without_bundle()], 24, 80);
+        assert!(missing.contains("pin -"), "{missing}");
         assert!(rendered.contains(" http"), "{rendered}");
         assert!(rendered.contains("0 selected"), "{rendered}");
         assert!(rendered.contains("enter save"), "{rendered}");
@@ -889,6 +891,22 @@ mod tests {
             insecure_http: true,
             curated: false,
         }
+    }
+
+    /// A preset that publishes a root but has none pinned locally: the `pin -`
+    /// tier. Constructed for the same reason as [`unpublished`], so the
+    /// assertion does not depend on what is pinned on the machine.
+    fn published_without_bundle() -> presets::Preset {
+        presets::Preset {
+            fingerprints: &["AA:BB:CC"],
+            ..unpublished()
+        }
+    }
+
+    #[test]
+    fn unpublished_is_tofu() {
+        assert!(unpublished().fingerprints.is_empty());
+        assert_eq!(published_without_bundle().fingerprints, ["AA:BB:CC"]);
     }
 
     #[test]

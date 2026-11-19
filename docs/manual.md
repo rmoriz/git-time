@@ -195,10 +195,10 @@ pinned and the most available of the rest, and two rather than one so `required 
 fallback. `sectigo` is not recommended: its endpoint refuses the TLS handshake on some stacks.
 Everything else is opt-in.
 
-The table is ordered the `default` rows first. For a TOFU row no value can be checked, so
-`preset add` prints the fetched root fingerprint in full — that line is what makes the first pin
-reviewable, and `git time anchor pin` records it in `time.anchors-lock` afterwards so a later
-change is visible.
+The table is ordered the `default` rows first. Every built-in row publishes a root, so `preset add`
+can check it; where a hand-added authority has no publication, nothing can be checked and the fetch
+prints the root fingerprint in full — that line is what makes the first pin reviewable, and `git
+time anchor pin` records it in `time.anchors-lock` afterwards so a later change is visible.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|
@@ -265,10 +265,9 @@ The list is a cursor UI on the alternate screen. `a` really is all 21.
 
 ```
  > [x]  1  freetsa            pin 2041-03-07 
-   [x]  2  digicert           pin expires 2026-12-02 http
-   [ ]  3  sectigo            pin 2027-05-18 
-   [ ]  4  certum             pin 2027-06-09 http
-   [ ]  5  izenpe             pin 2030-04-01 http
+   [x]  2  digicert           pin 2031-11-10 http
+   [ ]  3  sectigo            pin 2045-10-04 
+   [ ]  4  izenpe             pin 2045-09-23 http
   …
 url: https://freetsa.org/tsr
 space toggle  a all  n none  j/k or arrows move  enter save  q abort
@@ -296,7 +295,10 @@ keeps the frame. A terminal that cannot be put into raw mode at all falls back t
 the early versions, saying so in one line.
 
 The `pin` column is the trust tier: the root is checked against the table when it is pinned and a
-mismatch is a refusal. `tofu` can only be reviewed by reading the fingerprint the command prints —
+mismatch is a refusal. The date is the newest live root's `notAfter`; a root inside the expiry
+window reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row
+is due a rotation before the answer refuses the fetch. `tofu` can only be reviewed by reading the
+fingerprint the command prints —
 `git time anchor pin` records the pinned bundle's fingerprint in `time.anchors-lock` so a later
 change is caught. `http` marks a plain-`http` endpoint; the endpoint of the cursor row is printed in
 full below the list.

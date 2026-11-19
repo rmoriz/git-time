@@ -135,6 +135,18 @@ impl AlgName {
 
 /// Run one `git time tsa` subcommand.
 pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
+    // A prompt nobody answers hangs a script, and that holds outside a
+    // repository too: say so before anything is opened or read.
+    if matches!(
+        command,
+        Command::Select {
+            interactive: false,
+            ..
+        }
+    ) && !std::io::stdin().is_terminal()
+    {
+        return needs_a_terminal();
+    }
     let repo = match open(directory) {
         Ok(repo) => repo,
         Err(exit) => return exit,
@@ -441,6 +453,23 @@ fn remove(repo: &Repo, id: &str) -> Exit {
     Exit::ok()
 }
 
+/// What the listing says about a preset whose date is `expiry`.
+///
+/// A published root with no local certificate says `-`; `not pinned` is the
+/// message for a preset that publishes no root either, so the missing date reads
+/// as the preset's shape and not as a broken pin. No built-in row is in that
+/// position any more, and a hand-added one is not in this table, so the branch
+/// keeps a unit test instead of a row.
+fn pin_state(preset: &presets::Preset, expiry: Option<String>) -> String {
+    expiry.unwrap_or_else(|| {
+        if preset.fingerprints.is_empty() {
+            "not pinned".to_owned()
+        } else {
+            "-".to_owned()
+        }
+    })
+}
+
 /// Print the built-in presets and whether their anchor is pinned here.
 ///
 /// The date comes from the local bundle where there is one, newest live root
@@ -460,14 +489,8 @@ fn preset_list(_repo: &Repo) -> Exit {
                 looming(&roots, now).map(|root| anchors::expiry_text(&root.not_after, now))
             }
             None => None,
-        }
-        .unwrap_or_else(|| {
-            if preset.fingerprints.is_empty() {
-                "not pinned".to_owned()
-            } else {
-                "-".to_owned()
-            }
-        });
+        };
+        let state = pin_state(preset, expiry);
         println!(
             "{} {} {} {} {} {} ({})",
             preset.name,
@@ -479,7 +502,7 @@ fn preset_list(_repo: &Repo) -> Exit {
             // trust on first use and say so here as well as at the pin. After a
             // rotation the newest value is the one shown, not the list.
             preset.fingerprints.last().copied().unwrap_or("tofu"),
-            expiry,
+            state,
             if pinned(preset.name, &anchor) {
                 "anchored"
             } else {
@@ -714,6 +737,14 @@ const SELECT_PROMPT: &str = "Authorities to enable (e.g. 1,3-4, all, none): ";
 /// How many answers are taken before the selector gives up.
 const SELECT_ATTEMPTS: usize = 3;
 
+/// The refusal for a `tsa select` nobody can answer.
+fn needs_a_terminal() -> Exit {
+    Exit::usage(
+        "git time tsa select: stdin is not a terminal; use `git time tsa preset add <id>`, \
+         `git time tsa add <url>`, or `--interactive` with a piped answer",
+    )
+}
+
 /// Run `git time tsa select`: show the table, take a selection, pin it.
 ///
 /// The selection decides what is enabled *and* what is not: a preset section
@@ -722,14 +753,11 @@ const SELECT_ATTEMPTS: usize = 3;
 ///
 /// It starts from what is configured, so an authority left out of the answer
 /// was unticked on purpose rather than forgotten by the start state.
-pub(crate) async fn select(repo: &Repo, interactive: bool, dry_run: bool) -> Exit {
-    // A prompt nobody answers hangs a script; say so before any work.
-    if !std::io::stdin().is_terminal() && !interactive {
-        return Exit::usage(
-            "git time tsa select: stdin is not a terminal; use `git time tsa preset add <id>`, \
-             `git time tsa add <url>`, or `--interactive` with a piped answer",
-        );
-    }
+///
+/// `interactive` is not read here: the non-terminal refusal lives in [`run`], so
+/// it fires before the repository is opened, and `install` only ever calls this
+/// where an answer is expected.
+pub(crate) async fn select(repo: &Repo, _interactive: bool, dry_run: bool) -> Exit {
     // The answer is the whole set: every preset section missing from it is
     // removed. An empty start would therefore drop every authority the user did
     // not mean to touch, and neither surface would show what is configured. The
@@ -1239,7 +1267,8 @@ fn local_set(repo: &Repo, key: &str, value: &str) -> Result<(), Exit> {
 
 #[cfg(test)]
 mod tests {
-    use super::{already_enabled, initial};
+    use super::{already_enabled, initial, pin_state};
+    use git_time_core::presets;
     use git_time_core::repo::Repo;
 
     /// Write `time.tsa.<id>.url` in the local config of `dir`.
@@ -1285,5 +1314,31 @@ mod tests {
         let selection = initial(&[0, 1]);
         assert_eq!(selection.chosen(), [0, 1]);
         assert!(selection.is_chosen(1));
+    }
+
+    /// A hand-added, unmeasured preset has nothing to date it with and says so;
+    /// a published one with no local certificate only says the date is missing,
+    /// and a measured one shows the measurement. No built-in row is in the
+    /// first position any more, which is why this is constructed.
+    #[test]
+    fn the_listing_says_why_a_date_is_missing() {
+        let mut preset = presets::Preset {
+            name: "unpublished",
+            url: "http://tsa.example/tsr",
+            anchor_url: "http://tsa.example/tsr",
+            chain: &[],
+            alg: "sha256",
+            policy: None,
+            fingerprints: &[],
+            insecure_http: true,
+            curated: false,
+        };
+        assert_eq!(pin_state(&preset, None), "not pinned");
+
+        preset.fingerprints = &["AA:BB"];
+        assert_eq!(pin_state(&preset, None), "-");
+
+        let expiry = Some("expires 2026-12-02".to_owned());
+        assert_eq!(pin_state(&preset, expiry), "expires 2026-12-02");
     }
 }
