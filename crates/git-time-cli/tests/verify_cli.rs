@@ -1519,6 +1519,38 @@ fn a_tampered_pre_image_fails_the_openssl_script() {
     assert!(all.iter().any(|line| line == "FAILED"), "{all:?}");
 }
 
+/// A gate is decided when the script is generated: it is named, counted, and
+/// still fails the run — while the tokens are verified all the same.
+#[test]
+fn a_gate_in_the_openssl_script_is_named_and_counted() {
+    if !script_tools() {
+        eprintln!("skipping: openssl missing");
+        return;
+    }
+    let repo = Repo::new();
+    let oid = repo.head();
+    let output = verify(&repo, &oid, &["--openssl", "--require-signed"]);
+    let script = text(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the generator only prints: {script}"
+    );
+    assert!(
+        script.contains(&format!("NOTE {} require-signed", &oid[..7])),
+        "{script}"
+    );
+
+    let run = run_script(&repo, &script);
+    let all = lines(&run);
+    assert_eq!(run.status.code(), Some(1), "{all:?}");
+    assert!(all.iter().any(|line| line == "FAILED"), "{all:?}");
+    assert!(
+        all.iter().any(|line| line.starts_with("PASS ")),
+        "the token is verified even under a gate: {all:?}"
+    );
+}
+
 /// A message line that spells the heredoc delimiter must not end the payload
 /// early: the delimiter is numbered until it cannot occur.
 #[test]
