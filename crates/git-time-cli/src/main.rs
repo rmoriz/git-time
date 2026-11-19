@@ -148,6 +148,9 @@ enum Command {
         /// Write no authority config; keep whatever is configured.
         #[arg(long)]
         no_tsa: bool,
+        /// Accept the root of a rotation, as `<id>=<fingerprint>`.
+        #[arg(long, value_name = "ID=FINGERPRINT")]
+        accept: Vec<String>,
     },
     /// Unwire the hooks again and restore the ones that were displaced.
     Uninstall {
@@ -230,7 +233,7 @@ async fn dispatch(cli: Cli) -> Exit {
             json,
             commits,
         } => cmd::log::run(directory, range, commits, json),
-        Command::Install { no_tsa } => cmd::install::run(directory, no_tsa).await,
+        Command::Install { no_tsa, accept } => cmd::install::run(directory, no_tsa, &accept).await,
         Command::Uninstall { force } => cmd::uninstall::run(directory, force),
         Command::Doctor { json } => cmd::doctor::run(directory, json),
         Command::Tsa { command } => cmd::tsa::run(directory, command).await,

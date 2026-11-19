@@ -20,7 +20,7 @@
 //! sections removed. It needs a terminal unless `--interactive` says an answer
 //! is being piped; a script otherwise uses `preset add` or `add`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
 use std::path::PathBuf;
 
@@ -90,6 +90,9 @@ pub enum Command {
         /// A git rev-range. Defaults to every commit reachable from HEAD.
         #[arg(long, value_name = "RANGE")]
         range: Option<String>,
+        /// Accept a root the block does not name, as `<id>=<fingerprint>`.
+        #[arg(long, value_name = "ID=FINGERPRINT")]
+        accept: Vec<String>,
         /// Commits to read on top of any range.
         commits: Vec<String>,
     },
@@ -162,7 +165,11 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
             interactive,
             dry_run,
         } => select(&repo, interactive, dry_run).await,
-        Command::Restore { range, commits } => restore(&repo, range.as_deref(), &commits).await,
+        Command::Restore {
+            range,
+            accept,
+            commits,
+        } => restore(&repo, range.as_deref(), &accept, &commits).await,
     }
 }
 
@@ -398,7 +405,7 @@ async fn preset_add(repo: &Repo, name: &str) -> Exit {
             presets::names().collect::<Vec<_>>().join(", ")
         ));
     };
-    match pin_preset(repo, preset).await {
+    match pin_preset(repo, preset, &BTreeMap::new(), &BTreeMap::new()).await {
         Ok(()) => Exit::ok(),
         // The lines already said what failed; a refused root and a missing
         // bundle both mean the pin did not do its job, which is the whole
@@ -412,8 +419,13 @@ async fn preset_add(repo: &Repo, name: &str) -> Exit {
 /// `Ok` means the anchor is pinned. The error is the reason it is not, for a
 /// caller — `tsa restore` — that carries on with the next id instead of
 /// stopping at the first authority the network or a fingerprint refuses.
-async fn pin_preset(repo: &Repo, preset: &'static presets::Preset) -> Result<(), String> {
-    let pinned = install::pin(repo, preset)
+async fn pin_preset(
+    repo: &Repo,
+    preset: &'static presets::Preset,
+    accept: &BTreeMap<String, String>,
+    named: &BTreeMap<String, Vec<String>>,
+) -> Result<(), String> {
+    let pinned = install::pin(repo, preset, accept, named)
         .await
         .map_err(|exit| exit.message())?;
     println!("tsa {}: {} configured", preset.name, preset.url);
@@ -451,54 +463,109 @@ async fn pin_preset(repo: &Repo, preset: &'static presets::Preset) -> Result<(),
 /// until they are backfilled. The ids are read straight from the blocks, which
 /// is the one place that survives the config being gone; a preset carries a
 /// published root, so the fetch is checked rather than trusted on first use.
+///
+/// A block also names the roots its tokens were verified with. A fetched root
+/// that is one of them needs no asking; a root the blocks do not name is a
+/// rotation and is appended only when `--accept <id>=<fingerprint>` names it.
+/// Both values are printed either way, next to the signature state of each commit
+/// that named the id, so a reader sees which blocks were unverified when they
+/// chose.
+///
 /// An id that is not a preset cannot be fetched without its URL and is named
 /// with the command that would configure it.
-async fn restore(repo: &Repo, range: Option<&str>, commits: &[String]) -> Exit {
+async fn restore(repo: &Repo, range: Option<&str>, accept: &[String], commits: &[String]) -> Exit {
     let oids = match super::targets(repo, "tsa restore", range, commits) {
         Ok(oids) => oids,
         Err(exit) => return exit,
     };
     let configured = anchors::configured(repo).unwrap_or_default();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    let mut todo: Vec<&'static presets::Preset> = Vec::new();
-    let mut unknown: BTreeSet<String> = BTreeSet::new();
-    let mut skips = 0_usize;
+
+    // Per id the roots the blocks name for it, and per commit its signature
+    // state. Reading the evidence is what runs `sigcheck`, so the state is not
+    // a second pass.
+    let mut named: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut signed: Vec<(String, &'static str)> = Vec::new();
     for oid in &oids {
         let ids = match git_time_core::verify::named_tsas(repo, oid) {
             Ok(ids) => ids,
             Err(error) => return Exit::seal(format!("git time tsa restore: {oid}: {error}")),
         };
+        if ids.is_empty() {
+            continue;
+        }
+        let evidence = match git_time_core::verify::commit(
+            repo,
+            &AnchorStore::default(),
+            oid,
+            &git_time_core::policy::Policy::default(),
+        ) {
+            Ok(evidence) => evidence,
+            Err(error) => return Exit::seal(format!("git time tsa restore: {oid}: {error}")),
+        };
         for id in ids {
-            if !seen.insert(id.clone()) {
-                continue;
-            }
-            // Already pinned and loadable: nothing to do, and no fetch.
-            let pinned_here = configured
-                .iter()
-                .find(|anchor| anchor.id == id)
-                .is_some_and(|anchor| anchor.path.exists() && pinned(&id, &anchor.path));
-            if pinned_here {
-                skips += 1;
-            } else if let Some(preset) = presets::find(&id) {
-                todo.push(preset);
-            } else {
-                unknown.insert(id);
+            let wanted = named.entry(id.clone()).or_default();
+            for record in evidence.per_tsa.iter().filter(|record| record.id == id) {
+                for root in &record.anchors {
+                    if !wanted.contains(root) {
+                        wanted.push(root.clone());
+                    }
+                }
             }
         }
+        signed.push((oid.clone(), evidence.signature.as_str()));
     }
 
-    if seen.is_empty() {
+    if named.is_empty() {
         println!("tsa: the evidence names no authority");
         return Exit::ok();
     }
+
+    // Nothing is fetched for an authority whose pinned bundle already holds a
+    // root the blocks name (or when they name none at all): that evidence
+    // verifies as it is.
+    let mut todo: Vec<&'static presets::Preset> = Vec::new();
+    let mut unknown: BTreeSet<String> = BTreeSet::new();
+    let mut skips = 0_usize;
+    for id in named.keys() {
+        let path = configured
+            .iter()
+            .find(|anchor| anchor.id == *id)
+            .map_or_else(
+                || anchors::dir().join(format!("{id}.pem")),
+                |anchor| anchor.path.clone(),
+            );
+        let wanted = named.get(id).map(Vec::as_slice).unwrap_or_default();
+        if covers(id, &path, wanted) {
+            skips += 1;
+        } else if let Some(preset) = presets::find(id) {
+            todo.push(preset);
+        } else {
+            unknown.insert(id.clone());
+        }
+    }
+
+    // The ids in play are everything the history names, so a bare accept that
+    // meets two of them is refused with both named.
+    let in_play: Vec<&str> = named.keys().map(String::as_str).collect();
+    let accept = match crate::cmd::accept::one_or_id(accept, &in_play) {
+        Ok(accept) => accept,
+        Err(error) => return Exit::usage(format!("git time tsa restore: {error}")),
+    };
+
     if skips > 0 {
         println!("tsa: {skips} authority(ies) already pinned");
+    }
+    // The state sits next to each commit before the fetch: it is what a reader
+    // weighs when they are asked to accept a root. A bad signature does not
+    // block the pin — an unsigned clone is exactly the case restore is for.
+    for (oid, signature) in &signed {
+        println!("tsa: {} signature {signature}", super::short(oid));
     }
 
     let mut restored = 0_usize;
     let mut refused: Vec<(&str, String)> = Vec::new();
     for preset in &todo {
-        match pin_preset(repo, preset).await {
+        match pin_preset(repo, preset, &accept, &named).await {
             Ok(()) => restored += 1,
             Err(reason) => refused.push((preset.name, reason)),
         }
@@ -714,7 +781,7 @@ async fn apply(repo: &Repo, chosen: &[usize], dry_run: bool) -> Exit {
             );
             continue;
         }
-        match install::pin(repo, preset).await {
+        match install::pin(repo, preset, &BTreeMap::new(), &BTreeMap::new()).await {
             Ok(pinned) => {
                 if pinned.fingerprint_mismatch || pinned.missing_anchor.is_some() {
                     failed = true;
@@ -792,6 +859,33 @@ fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
 /// Whether `id`'s anchor at `path` loads.
 pub(crate) fn pinned(id: &str, path: &std::path::Path) -> bool {
     AnchorStore::load(&[(id.to_owned(), path.to_path_buf())]).is_ok()
+}
+
+/// Whether the bundle at `path` already holds a root the blocks name.
+///
+/// No named root at all leaves nothing to compare: a bundle that loads is
+/// enough, which is the case of a block from before roots were recorded. Both
+/// sides are compared in the length of the named value, so a SHA-1 and a SHA-256
+/// spelling of the same root both count.
+fn covers(id: &str, path: &std::path::Path, wanted: &[String]) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let mut store = AnchorStore::default();
+    if store.insert(id, path).is_err() {
+        return false;
+    }
+    let Some(anchor) = store.anchor(id) else {
+        return false;
+    };
+    if wanted.is_empty() {
+        return true;
+    }
+    anchor.roots.iter().any(|root| {
+        wanted
+            .iter()
+            .any(|value| crate::cmd::accept::matches(value, root.as_bytes()))
+    })
 }
 
 /// Refuse a URL that is not `https`, unless plain `http` is accepted explicitly.

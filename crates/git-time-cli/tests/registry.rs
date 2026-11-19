@@ -473,6 +473,26 @@ impl Repo {
     /// The hook is skipped with `drop`, so the message reaches the object as
     /// it was written: `restore` reads the ids the way a clone would.
     fn commit_naming(&self, ids: &[&str]) {
+        self.commit_naming_roots(&ids.iter().map(|id| (*id, "")).collect::<Vec<_>>());
+    }
+
+    /// A block that also names the root each id was sealed under, as a seal
+    /// writes it. An empty fingerprint leaves the id without an `Anchor` line.
+    fn commit_naming_roots(&self, entries: &[(&str, &str)]) {
+        let mut anchors: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut ids: Vec<&str> = Vec::new();
+        for (id, fingerprint) in entries {
+            if !fingerprint.is_empty() {
+                anchors
+                    .entry((*id).to_owned())
+                    .or_default()
+                    .push((*fingerprint).to_owned());
+            }
+            if !ids.contains(id) {
+                ids.push(id);
+            }
+        }
         let skip = self.run_time(&["drop"]);
         assert!(skip.status.success(), "{}", text(&skip.stderr));
         // A real block, so the id is read exactly as it is from a sealed commit
@@ -483,7 +503,7 @@ impl Repo {
                 bytes: vec![0; 32],
             },
             object: None,
-            anchors: std::collections::BTreeMap::new(),
+            anchors,
             tokens: ids
                 .iter()
                 .map(|id| git_time_core::store::TokenRecord {
@@ -904,6 +924,131 @@ fn a_garbage_fetch_leaves_the_existing_anchor_untouched() {
     );
 }
 
+/// A root that is not the pinned one is a rotation, and a fetch alone keeps
+/// refusing it: the fetched value has to be accepted by fingerprint, then it is
+/// appended next to the retired root instead of overwriting it.
+#[test]
+fn fetch_refuses_a_changed_root_and_appends_it_on_accept() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("stub", &repo.stub_url());
+    assert!(
+        repo.fetch_anchor("stub").status.success(),
+        "the first root is pinned"
+    );
+    let anchor = repo.anchors().join("stub.pem");
+    let pinned = std::fs::read(&anchor).expect("the pinned anchor");
+    let pinned_der = first_der(&text(&pinned));
+    let expected = git_time_core::trust::fingerprint(&pinned_der);
+
+    // A second authority answers at the same URL: a new root.
+    let rotated = Authority::new();
+    let fetched = rotated.bytes();
+    let found = git_time_core::trust::fingerprint(&first_der(&text(&fetched)));
+    let served = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&rotated.ca)),
+    )];
+
+    let refused = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "stub",
+            "--insecure-http",
+        ],
+        &served,
+    );
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains(&expected), "the pinned value: {stderr}");
+    assert!(stderr.contains(&found), "the fetched value: {stderr}");
+    assert_eq!(
+        std::fs::read(&anchor).expect("the anchor"),
+        pinned,
+        "the refusal changes nothing"
+    );
+
+    let accepted = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "stub",
+            "--insecure-http",
+            "--accept",
+            &found,
+        ],
+        &served,
+    );
+    let stdout = ok(&accepted);
+    assert!(
+        stdout.contains("1 root(s) appended, 2 now pinned"),
+        "{stdout}"
+    );
+    let store = git_time_core::trust::AnchorStore::load(&[("stub".to_owned(), anchor.clone())])
+        .expect("both roots load");
+    assert_eq!(
+        store.anchor("stub").expect("an anchor").roots.len(),
+        2,
+        "the retired root stays next to the new one"
+    );
+}
+
+/// An accept that names another value is not a confirmation: nothing is written.
+#[test]
+fn accept_with_a_wrong_fingerprint_changes_nothing() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("stub", &repo.stub_url());
+    assert!(repo.fetch_anchor("stub").status.success());
+    let anchor = repo.anchors().join("stub.pem");
+    let pinned = std::fs::read(&anchor).expect("the pinned anchor");
+
+    let rotated = Authority::new();
+    let served = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&rotated.ca)),
+    )];
+    // A well-formed SHA-1 of some other bytes, so only the value is wrong.
+    let wrong = git_time_core::trust::sha1_fingerprint(b"another root");
+
+    let accepted = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "stub",
+            "--insecure-http",
+            "--accept",
+            &wrong,
+        ],
+        &served,
+    );
+    assert_eq!(
+        accepted.status.code(),
+        Some(1),
+        "{}",
+        text(&accepted.stderr)
+    );
+    assert!(
+        text(&accepted.stderr).contains("does not match"),
+        "{}",
+        text(&accepted.stderr)
+    );
+    assert_eq!(
+        std::fs::read(&anchor).expect("the anchor"),
+        pinned,
+        "the bundle is byte for byte what it was"
+    );
+}
+
 #[test]
 fn fetch_writes_the_configured_anchor_path_and_creates_its_directory() {
     let mut repo = Repo::new();
@@ -1277,6 +1422,28 @@ fn a_published_fingerprint_mismatch_is_refused() {
         // The entry is still configured, so doctor can name the gap.
         assert!(repo.config(&format!("time.tsa.{id}.url")).is_some(), "{id}");
     }
+}
+
+/// A preset that publishes more than one root names every one of them in a
+/// refusal: a reader has to see the whole legitimate set, not just the newest.
+#[test]
+fn a_multi_value_preset_lists_every_published_root_on_a_mismatch() {
+    let repo = Repo::new();
+    repo.init();
+    let preset = git_time_core::presets::find("freetsa").expect("the fixture preset");
+    assert!(preset.fingerprints.len() >= 2, "{:?}", preset.fingerprints);
+
+    let added = repo.run_time_env(&["tsa", "preset", "add", "freetsa"], &repo.fetch_ca());
+    assert_eq!(added.status.code(), Some(1), "{}", text(&added.stderr));
+    let stderr = text(&added.stderr);
+    assert!(
+        stderr.contains(&preset.fingerprints.join(" or ")),
+        "both published values, joined: {stderr}"
+    );
+    assert!(
+        !repo.anchors().join("freetsa.pem").exists(),
+        "nothing is pinned"
+    );
 }
 
 #[test]
@@ -1779,8 +1946,87 @@ fn restore_of_history_without_evidence_says_so() {
     );
 }
 
-/// A fetch that brings no bundle leaves the pinned anchor alone and does not
-/// count as a restore: "pinned" has to mean the anchor this run asked for.
+/// A block names the root it was sealed under. A root the block names is pinned
+/// without asking; a root it does not name needs the fingerprint to be accepted
+/// and is appended to what is pinned, with the signature state of the block in
+/// view.
+#[test]
+fn restore_appends_a_named_root_after_accept() {
+    let repo = Repo::new();
+    repo.init();
+    let retired = Authority::new();
+    let named = Authority::new();
+    let served = Authority::new();
+    let anchor = repo.anchors().join("freetsa.pem");
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::write(&anchor, retired.bytes()).expect("pin the retired root");
+
+    // The block names a root that is not the pinned one, so restore has to look.
+    let named_fp = fingerprint_colon(&first_der(&text(&named.bytes())));
+    repo.commit_naming_roots(&[("freetsa", &named_fp)]);
+    let found_fp = fingerprint_colon(&first_der(&text(&served.bytes())));
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&served.ca)),
+    )];
+
+    let refused = repo.run_time_env(&["tsa", "restore"], &fetch);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(
+        stderr.contains(&named_fp),
+        "the root the block names: {stderr}"
+    );
+    assert!(stderr.contains(&found_fp), "the root served: {stderr}");
+    let stdout = text(&refused.stdout);
+    assert!(
+        stdout.contains("signature unsigned"),
+        "the signature state sits next to the commit: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(&anchor).expect("the anchor"),
+        retired.bytes(),
+        "the refusal changes nothing"
+    );
+
+    let accepted = repo.run_time_env(
+        &["tsa", "restore", "--accept", &format!("freetsa={found_fp}")],
+        &fetch,
+    );
+    let stdout = ok(&accepted);
+    assert!(stdout.contains("1 root(s) appended"), "{stdout}");
+    let store = git_time_core::trust::AnchorStore::load(&[("freetsa".to_owned(), anchor.clone())])
+        .expect("both roots load");
+    assert_eq!(
+        store.anchor("freetsa").expect("an anchor").roots.len(),
+        2,
+        "the accepted root is appended, the retired one stays"
+    );
+}
+
+/// A fetched root that is the one the block names needs no accept: the evidence
+/// itself is the confirmation.
+#[test]
+fn restore_pins_a_named_root_without_an_accept() {
+    let repo = Repo::new();
+    repo.init();
+    let named = Authority::new();
+    let named_fp = fingerprint_colon(&first_der(&text(&named.bytes())));
+    repo.commit_naming_roots(&[("freetsa", &named_fp)]);
+
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&named.ca)),
+    )];
+    let restored = repo.run_time_env(&["tsa", "restore"], &fetch);
+    assert!(restored.status.success(), "{}", text(&restored.stderr));
+    assert!(text(&restored.stdout).contains("tsa: 1 pinned"));
+    assert_eq!(
+        std::fs::read(repo.anchors().join("freetsa.pem")).expect("the anchor"),
+        named.bytes()
+    );
+}
+
 #[test]
 fn restore_of_an_unusable_fetch_keeps_the_old_anchor_and_fails() {
     let mut repo = Repo::new();

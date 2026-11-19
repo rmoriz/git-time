@@ -1325,6 +1325,36 @@ fn install_with_an_authority_configured_does_not_ask() {
     assert!(!listing.contains("time.tsa.freetsa.url"), "{listing}");
 }
 
+/// A bare `--accept` names no id, so it can only be resolved when one authority
+/// is involved. With two, the ids in play are named and nothing is pinned.
+#[test]
+fn a_bare_accept_on_a_two_authority_install_is_refused() {
+    let repo = Repo::blank();
+    for key in ["url", "anchor", "timeout"] {
+        repo.unset(&format!("time.tsa.stub.{key}"));
+    }
+    for (id, url) in [
+        ("freetsa", "https://freetsa.org/tsr"),
+        ("digicert", "http://timestamp.digicert.com"),
+    ] {
+        repo.config(&format!("time.tsa.{id}.url"), url);
+        repo.config(
+            &format!("time.tsa.{id}.anchor"),
+            &pstr(&repo.anchors().join(format!("{id}.pem"))),
+        );
+    }
+
+    let install = repo.run_time(&["install", "--accept", "00:11:22:33:44"]);
+    assert_eq!(install.status.code(), Some(2), "{}", text(&install.stderr));
+    let stderr = text(&install.stderr);
+    assert!(stderr.contains("freetsa"), "{stderr}");
+    assert!(stderr.contains("digicert"), "{stderr}");
+    assert!(
+        !repo.anchors().join("freetsa.pem").exists(),
+        "nothing is pinned on the usage error"
+    );
+}
+
 #[test]
 fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     let repo = Repo::new();

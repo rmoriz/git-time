@@ -1,5 +1,6 @@
 //! The commands and the small pieces they share.
 
+pub mod accept;
 pub mod anchor;
 pub mod anchors;
 pub mod doctor;

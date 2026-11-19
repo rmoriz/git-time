@@ -28,7 +28,6 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Subcommand;
 use der::Decode;
 use git_time_core::repo::Repo;
-use git_time_core::trust::AnchorStore;
 use x509_cert::Certificate;
 
 use crate::cmd::{Exit, anchors, open, tsa::validate_id};
@@ -46,6 +45,9 @@ pub enum Command {
         /// Accept a plain `http://` URL.
         #[arg(long)]
         insecure_http: bool,
+        /// Append a root that is not the pinned one, by its fingerprint.
+        #[arg(long, value_name = "FINGERPRINT")]
+        accept: Option<String>,
     },
     /// List the configured anchors with their fingerprint and expiry.
     List {
@@ -75,7 +77,8 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
             url,
             id,
             insecure_http,
-        } => fetch(&repo, &url, &id, insecure_http).await,
+            accept,
+        } => fetch(&repo, &url, &id, insecure_http, accept.as_deref()).await,
         Command::List { json } => list(&repo, json),
         Command::Pin { check: against } => {
             if against {
@@ -88,13 +91,37 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
 }
 
 /// Fetch `url` into `id`'s bundle, parsing before writing.
-async fn fetch(repo: &Repo, url: &str, id: &str, insecure_http: bool) -> Exit {
+///
+/// A root the preset publishes or one already pinned is taken without asking,
+/// and only the chain material around it is updated. A root that is neither is a
+/// rotation: it is refused with both values until `accept` names it, and is then
+/// appended next to the retired root instead of replacing it. Nothing is written
+/// on a refusal.
+async fn fetch(
+    repo: &Repo,
+    url: &str,
+    id: &str,
+    insecure_http: bool,
+    accept: Option<&str>,
+) -> Exit {
     if let Err(exit) = validate_id("anchor", id) {
         return exit;
     }
     if let Err(exit) = crate::cmd::tsa::validate_url("anchor", url, insecure_http) {
         return exit;
     }
+    // The fetch is for one id, so a bare fingerprint is the intended spelling; an
+    // id that names another authority is a typo worth refusing.
+    let accept = match accept.map(super::accept::parse).transpose() {
+        Ok(Some((named, fingerprint))) if named.is_empty() || named == id => Some(fingerprint),
+        Ok(Some((named, _))) => {
+            return Exit::usage(format!(
+                "git time anchor: `--accept` names `{named}`, but the fetch is for `{id}`"
+            ));
+        }
+        Ok(None) => None,
+        Err(error) => return Exit::usage(format!("git time anchor: {error}")),
+    };
     let target = match anchors::target(repo, id) {
         Ok(target) => target,
         Err(exit) => return exit,
@@ -107,44 +134,71 @@ async fn fetch(repo: &Repo, url: &str, id: &str, insecure_http: bool) -> Exit {
             parent.display()
         ));
     }
+    let pinned_before = target.exists();
 
     // A preset's issuers belong to its bundle: without them a reply that stops
     // below the root (`cartaodecidadao`) could never be chained.
-    let chain: &[&str] = git_time_core::presets::find(id)
-        .map(|preset| preset.chain)
-        .unwrap_or_default();
+    let preset = git_time_core::presets::find(id);
+    let chain: &[&str] = preset.map(|preset| preset.chain).unwrap_or_default();
+    let published: &[&'static str] = preset.map(|preset| preset.fingerprints).unwrap_or_default();
     let bytes = match anchors::fetch_chain(url, chain).await {
         Ok(bytes) => bytes,
         Err(error) => return Exit::seal(format!("git time anchor: cannot fetch {url}: {error}")),
     };
 
-    // Parse from a staging file first: an existing anchor is only replaced
-    // once every block of the new bundle parsed.
-    let staging = staging_path(&target);
-    if let Err(error) = std::fs::write(&staging, &bytes) {
-        return Exit::config(format!("cannot write {}: {error}", staging.display()));
-    }
-    let parsed = AnchorStore::load(&[(id.to_owned(), staging.clone())]);
-    let fingerprint = match &parsed {
-        Ok(_) => match first_certificate(&bytes) {
-            Some(der) => anchors::fingerprint(&der),
-            None => {
-                let _ = std::fs::remove_file(&staging);
-                return Exit::seal(format!("git time anchor: {url} carried no certificate"));
-            }
-        },
-        Err(error) => {
-            keep_unparsed(&staging, &target);
+    let Some(der) = first_certificate(&bytes) else {
+        // `apply` keeps the bad bytes when nothing was pinned, so doctor can
+        // name them as unusable instead of as never fetched.
+        return match super::accept::apply(
+            id,
+            &target,
+            &bytes,
+            published,
+            &[],
+            accept.as_deref(),
+            true,
+        ) {
+            super::accept::Applied::Unusable(reason) => Exit::seal(format!(
+                "git time anchor: the bundle from {url} is unusable: {reason}"
+            )),
+            _ => Exit::seal(format!("git time anchor: {url} carried no certificate")),
+        };
+    };
+    let shown = anchors::fingerprint(&der);
+
+    match super::accept::apply(id, &target, &bytes, published, &[], accept.as_deref(), true) {
+        super::accept::Applied::Unusable(reason) => {
             return Exit::seal(format!(
-                "git time anchor: the bundle from {url} is unusable: {error}"
+                "git time anchor: the bundle from {url} is unusable: {reason}"
             ));
         }
-    };
-    if let Err(error) = std::fs::rename(&staging, &target) {
-        let _ = std::fs::remove_file(&staging);
-        return Exit::config(format!("cannot write {}: {error}", target.display()));
+        super::accept::Applied::Mismatch { expected, found } => {
+            eprintln!(
+                "git time anchor: the root fetched for `{id}` from {url} does not match: \
+                 expected {expected}, got {found}; the bundle was not pinned and the existing \
+                 anchor is untouched"
+            );
+            eprintln!(
+                "git time anchor: pass `--accept {found}` to append it next to the pinned root"
+            );
+            return Exit::seal(String::new());
+        }
+        super::accept::Applied::Appended { added, roots, .. } => {
+            println!("anchor {id}: {added} root(s) appended, {roots} now pinned");
+        }
+        super::accept::Applied::FirstPin { fingerprint } => {
+            println!(
+                "anchor {id}: no pinned root to compare (trust on first use); the fetched root is \
+                 {fingerprint} — compare it with the authority's own publication"
+            );
+        }
+        super::accept::Applied::Replaced { .. } => {
+            if pinned_before {
+                println!("anchor {id}: chain material updated");
+            }
+        }
     }
-    println!("anchor {id}: {} sha256 {fingerprint}", target.display());
+    println!("anchor {id}: {} sha256 {shown}", target.display());
     match anchors::section_exists(repo, id) {
         Ok(true) => {}
         Ok(false) => eprintln!(
@@ -158,12 +212,12 @@ async fn fetch(repo: &Repo, url: &str, id: &str, insecure_http: bool) -> Exit {
 }
 
 /// The sibling path a fetch is staged at before it replaces the target.
-fn staging_path(target: &Path) -> PathBuf {
+pub(crate) fn staging_path(target: &Path) -> PathBuf {
     target.with_extension("pem.new")
 }
 
 /// Keep an unparseable bundle only when nothing was pinned before.
-fn keep_unparsed(staging: &Path, target: &Path) {
+pub(crate) fn keep_unparsed(staging: &Path, target: &Path) {
     if target.exists() {
         let _ = std::fs::remove_file(staging);
     } else {
