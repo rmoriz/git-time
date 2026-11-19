@@ -258,7 +258,7 @@ fn no_anchor_is_untrusted() {
 }
 
 #[test]
-fn different_root_is_untrusted() {
+fn a_root_minted_after_the_gen_time_is_no_candidate() {
     let dir = scratch();
     let path = throwaway_root(dir.path());
     let anchors = AnchorStore::load(&[(ID.to_owned(), path)]).expect("throwaway root loads");
@@ -679,7 +679,8 @@ fn a_named_root_that_matches_still_verifies() {
         &std::fs::read_to_string(&ca_pem).expect("read CA"),
     )
     .expect("CA is PEM");
-    let named = vec![git_time_core::trust::fingerprint(der.as_bytes())];
+    // The line is written upper case, but a hand-edited block may not be.
+    let named = vec![git_time_core::trust::fingerprint(der.as_bytes()).to_lowercase()];
     let anchors = AnchorStore::load(&[(ID.to_owned(), ca_pem)]).expect("throwaway CA loads");
     let record = TokenRecord {
         id: ID.to_owned(),
@@ -689,6 +690,33 @@ fn a_named_root_that_matches_still_verifies() {
         token,
     };
     assert!(verify::token(&record, &imprint(), wide_range(), &anchors, &named).is_valid());
+}
+
+/// The candidates are tried in order: a first root that is in the window but
+/// chains nothing must not stop the second one from being tried.
+#[test]
+fn a_later_candidate_root_still_verifies() {
+    let dir = scratch();
+    // Minted first, so its window covers the token's genTime.
+    let unrelated = throwaway_root(dir.path());
+    let (token, ca_pem) =
+        throwaway_tsa_token_signed_with(dir.path(), "critical,timeStamping", "sha256");
+    let mut anchors =
+        AnchorStore::load(&[(ID.to_owned(), unrelated)]).expect("the unrelated root loads");
+    anchors.append(ID, &ca_pem).expect("the token's CA appends");
+    assert_eq!(anchors.anchor(ID).expect("the id is pinned").roots.len(), 2);
+    let record = TokenRecord {
+        id: ID.to_owned(),
+        alg: Alg::Sha256,
+        policy: None,
+        nonce: NONCE.to_vec(),
+        token,
+    };
+
+    assert!(
+        verify::token(&record, &imprint(), wide_range(), &anchors, &[]).is_valid(),
+        "the second candidate chains the token"
+    );
 }
 
 /// Mint a throwaway TSA (self-signed P-256 CA plus a P-256 leaf whose extended
@@ -926,6 +954,7 @@ fn throwaway_tsa_token_under(
         )
     });
     let gen_time_start = find(&tst, &[0x18, 0x0f]) + 2;
+    assert_eq!(stamp.len(), 15, "a stamp is YYYYMMDDhhmmssZ");
     tst[gen_time_start..gen_time_start + stamp.len()].copy_from_slice(stamp.as_bytes());
     let tst_path = dir.join("tst-info.der");
     std::fs::write(&tst_path, &tst).expect("write TSTInfo");

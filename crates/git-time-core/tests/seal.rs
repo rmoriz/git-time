@@ -31,6 +31,7 @@ use git_time_core::repo::{Head, Repo, RepoError};
 use git_time_core::seal::{SealError, SealOutcome, SkipReason, seal};
 use git_time_core::store::{self, TrailerBlock};
 use git_time_core::trust::AnchorStore;
+use git_time_core::verify::{self, Verdict};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1107,6 +1108,114 @@ async fn an_amended_sealed_commit_is_resealed_without_duplicating_the_block() {
     assert_eq!(
         block.imprint.bytes,
         digest(Alg::Sha256, &after.pre_image(store::PREFIX).bytes)
+    );
+}
+
+// --- verification of a sealed block -------------------------------------
+
+/// Rewrite `oid` with `change` applied to its decoded block and return the new
+/// object id.
+///
+/// The pre-image is left byte for byte as it was, so the imprint still matches
+/// and only the changed field is under test.
+fn rewrite_block(repo: &Repo, oid: &str, change: impl Fn(&mut TrailerBlock)) -> String {
+    let (object, _) = read(repo, oid);
+    let pre = object.pre_image(store::PREFIX);
+    let trailer = pre.trailer.expect("the object carries a block");
+    let mut block = store::decode(&trailer)
+        .expect("the block decodes")
+        .expect("the block is there");
+    change(&mut block);
+    let trailer = store::encode(&block, usize::MAX).expect("the block re-encodes");
+
+    let mut stripped = CommitObject::parse(&pre.bytes).expect("the pre-image parses");
+    let mut message = std::mem::take(&mut stripped.message);
+    message.push(b'\n');
+    message.extend_from_slice(&trailer);
+    message.push(b'\n');
+    let bytes = CommitObject {
+        headers: stripped.headers,
+        message,
+    }
+    .compose();
+    assert_eq!(
+        CommitObject::parse(&bytes)
+            .expect("the rewrite parses")
+            .pre_image(store::PREFIX)
+            .bytes,
+        pre.bytes,
+        "the rewrite leaves the pre-image alone"
+    );
+    repo.write_commit(&bytes).expect("writes the rewrite")
+}
+
+/// A block naming a root nobody pinned is untrusted, and says which root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_block_naming_an_unpinned_root_is_untrusted_with_the_fingerprint() {
+    let (_dir, repo, oid) = repo_with_commit();
+    let authority = Arc::new(Authority::new());
+    let stub = Stub::spawn(Mode::Grant, Some(Arc::clone(&authority))).await;
+    configure_tsa(&repo, "one", &stub, &authority.bundle());
+    let policy = policy(&repo);
+    let outcome = run(&repo, &policy, &oid).await.expect("seals");
+    let SealOutcome::Sealed { oid: sealed, .. } = outcome else {
+        panic!("expected a seal, got {outcome:?}");
+    };
+
+    let bogus = "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:\
+                 00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
+        .to_owned();
+    let rewritten = rewrite_block(&repo, &sealed, |block| {
+        block.anchors.insert("one".to_owned(), vec![bogus.clone()]);
+    });
+
+    let evidence = verify::commit(&repo, policy.anchors(), &rewritten, &policy).expect("verifies");
+    assert_eq!(evidence.verdict, Verdict::Untrusted);
+    assert_eq!(evidence.per_tsa[0].verdict, "anchor-not-pinned");
+    assert_eq!(
+        evidence.per_tsa[0].detail.as_deref(),
+        Some(
+            format!(
+                "the block names anchor {bogus}, which is not pinned; \
+                 `git time tsa restore` fetches it"
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(evidence.per_tsa[0].anchors, vec![bogus]);
+}
+
+/// A token older than every pinned root is a trust refusal, not a bad token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_older_than_every_pinned_root_is_untrusted() {
+    let (_dir, repo, oid) = repo_with_commit();
+    let authority = Arc::new(Authority::new());
+    let stub = Stub::spawn(Mode::Grant, Some(Arc::clone(&authority))).await;
+    configure_tsa(&repo, "one", &stub, &authority.bundle());
+    let policy = policy(&repo);
+    let outcome = run(&repo, &policy, &oid).await.expect("seals");
+    let SealOutcome::Sealed { oid: sealed, .. } = outcome else {
+        panic!("expected a seal, got {outcome:?}");
+    };
+
+    // A root minted after the token's genTime: validity starts at a whole
+    // second, so wait for the next one before minting it.
+    let now = jiff::Timestamp::now();
+    std::thread::sleep(Duration::from_nanos(
+        u64::try_from(1_000_000_000 - now.subsec_nanosecond()).expect("a fraction of a second"),
+    ));
+    let later = Authority::new();
+    // The sealed block names no anchor, so nothing narrows the set: every
+    // pinned root is outside the token's window.
+    let anchors =
+        AnchorStore::load(&[("one".to_owned(), later.bundle())]).expect("the later CA loads");
+
+    let evidence = verify::commit(&repo, &anchors, &sealed, &policy).expect("verifies");
+    assert_eq!(evidence.verdict, Verdict::Untrusted);
+    assert_eq!(evidence.per_tsa[0].verdict, "no-root-at-gen-time");
+    assert_eq!(
+        evidence.per_tsa[0].detail.as_deref(),
+        Some("no pinned root for `one` is valid at the token's genTime")
     );
 }
 
