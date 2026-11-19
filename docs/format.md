@@ -72,7 +72,7 @@ object-value  = 40hexdig / 64hexdig
 alg           = "sha256" / "sha512"
 hexdig        = 2HEXDIG                     ; one byte; 32 of them for sha256, 64 for sha512
 
-anchor-value  = "id=" label "; " "sha256=" fingerprint 1*( "," fingerprint )
+anchor-value  = "id=" label "; " "sha256=" fingerprint *( "," fingerprint )
 fingerprint   = hexdig 31( ":" hexdig )     ; 32 octets, colon separated
 
 token-value  = "ver=1; " "id=" label "; " "alg=" alg "; "
@@ -138,11 +138,14 @@ fingerprint is 32 colon-separated hex octets in uppercase, the spelling §8 and
 
 - `id` MUST also occur in a `Token` or a `Fail` line of the same block. An
   `Anchor` naming neither belongs to no authority.
+- A producer writes a line only for an id that answered with a token; an id that
+  only has a `Fail` line contributes none.
 - A repeated `id` is a duplicate, not a continuation: one line carries every
   fingerprint of one authority. A fingerprint repeated inside the line collapses
   to its first occurrence.
-- The list names the pinned roots valid at the `genTime` of that id's tokens, so
-  it says what has to be pinned rather than what happens to be pinned here.
+- The list names the pinned roots valid at the `genTime` of that id's token —
+  the roots it was verified with, unioned over its tokens — so it says what has
+  to be pinned rather than what happens to be pinned here.
 
 The line is a filter on the pinned roots, never a trust decision (§8): the
 fingerprints only narrow the candidates and each still has to be pinned. It
@@ -266,7 +269,10 @@ In order, because each step's bytes are covered by a later one:
    authority without an anchor is not asked and gets `no-anchor-pinned`.
 4. Verify each answer against the imprint, its nonce and the pinned anchors
    (§8), then build the block from the tokens that verified and a `Fail` line
-   for each that did not.
+   for each that did not. For every id with a verified token, write one `Anchor`
+   line, before the first `Token`, naming the pinned roots valid at that token's
+   `genTime` — the roots it was verified with. An id with only a `Fail` line gets
+   none.
 5. Render, drop tokens over budget (§5), append the block to the message.
 6. Sign the object **after** the block is in place, so the signature covers it.
 7. Write the object, `fsck` it, and move the ref with a compare-and-swap
@@ -301,8 +307,8 @@ A verifier MUST, in this order, and fail closed on any step:
      none is `ess-missing`. Every present one is evaluated on its own: its first
      identifier, `certs[0]`, is hashed over the signer's whole DER and MUST
      match, or the token is `ess-mismatch` — also when both attributes are
-     present and disagree. An identifier after `certs[0]` only limits the path
-     and is not required to be the signer. Two instances of one attribute, more
+     present and disagree. An identifier after `certs[0]` is not checked; only
+     the first entry is judged. Two instances of one attribute, more
      than one value in one attribute, an empty `certs` or an unsupported hash
      algorithm is `ess-malformed`. The attribute is the only signed link to the
      certificate, because the `sid` is not covered by the signature; it is
@@ -313,9 +319,12 @@ A verifier MUST, in this order, and fail closed on any step:
      signer's subject alternative names. Anything else is `tsa-name`;
    - the candidates are the roots pinned under `id` whose `notBefore <= genTime
      <= notAfter`, intersected with the fingerprints the block names for `id`.
-     No candidate at all is `no-root-at-gen-time`; named fingerprints of which
-     none is pinned is `anchor-not-pinned`. A named line is a filter, not a
-     wider search: without one every pinned root in its window is a candidate;
+     No anchor pinned under `id` at all is `untrusted`; a pinned anchor with no
+     root inside the window is `no-root-at-gen-time`; a named line none of whose
+     fingerprints is among the candidates is `anchor-not-pinned`, even when a
+     named root exists but lies outside the window. A named line is a filter,
+     not a wider search: without one every pinned root in its window is a
+     candidate;
    - the CMS signature MUST verify under the signer's key;
    - the signer's certificate MUST chain to one of the candidates, with
      every certificate valid at the token's `genTime` (a certificate may omit

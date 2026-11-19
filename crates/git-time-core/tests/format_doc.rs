@@ -178,8 +178,10 @@ fn section(heading: &str) -> &'static str {
 fn the_anchor_line_is_documented_before_the_tokens() {
     let grammar = section("## 2. Grammar");
     assert!(
-        grammar.contains(r#"anchor-value  = "id=" label "; " "sha256=" fingerprint"#),
-        "§2 does not give the anchor value its shape"
+        grammar.contains(
+            r#"anchor-value  = "id=" label "; " "sha256=" fingerprint *( "," fingerprint )"#
+        ),
+        "§2 does not give the anchor value its shape, one fingerprint allowed"
     );
     assert!(
         grammar.contains(r#"fingerprint   = hexdig 31( ":" hexdig )"#),
@@ -189,6 +191,23 @@ fn the_anchor_line_is_documented_before_the_tokens() {
         grammar.contains(r#"name         = "Imprint" / "Object" / "Anchor" / "Token""#),
         "§2 does not put Anchor among the field names"
     );
+
+    // The appendix's own line is a single fingerprint, so the production above
+    // has to allow the zero-repetition form it uses.
+    let block = appendix();
+    let mut anchors = block
+        .lines()
+        .filter_map(|line| line.strip_prefix("X-RFC3161-Anchor: "));
+    let line = anchors.next().expect("an anchor line in the appendix");
+    assert!(anchors.next().is_none(), "more than one anchor line");
+    let (_, list) = line.split_once("; sha256=").expect("the sha256 field");
+    assert!(
+        !list.contains(','),
+        "the appendix names one fingerprint, so one must be legal"
+    );
+    let octets = list.split(':').collect::<Vec<_>>();
+    assert_eq!(octets.len(), 32, "a fingerprint is 32 octets");
+    assert!(octets.iter().all(|octet| octet.len() == 2));
 
     let order = section("## 3. Fields")
         .lines()

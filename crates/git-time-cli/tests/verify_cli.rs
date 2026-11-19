@@ -476,13 +476,17 @@ impl Repo {
         self.dir.path()
     }
 
+    /// Start a stub for the current authority without writing any config, so an
+    /// anchor path `tsa add` chose survives.
+    fn spawn(&mut self) {
+        self.stub = Some(Stub::spawn(Arc::clone(&self.authority)));
+    }
+
     /// Point the configured TSA at a live stub and pin its throwaway CA.
     fn serve(&mut self) {
-        let stub = Stub::spawn(Arc::clone(&self.authority));
-        git(
-            self.path(),
-            &["config", "time.tsa.stub.url", stub.url.as_str()],
-        );
+        self.spawn();
+        let url = self.stub.as_ref().expect("a serving stub").url.clone();
+        git(self.path(), &["config", "time.tsa.stub.url", &url]);
         git(
             self.path(),
             &[
@@ -491,7 +495,6 @@ impl Repo {
                 &pstr(&self.authority.bundle()),
             ],
         );
-        self.stub = Some(stub);
     }
 
     /// Point a second authority at the same stub, so a commit carries two
@@ -681,9 +684,9 @@ fn verify_without_anchors(repo: &Repo, rev: &str, extra: &[&str]) -> Output {
     output
 }
 
-/// The fingerprint HEAD's block names for its TSA, from the block itself.
-fn named_root(repo: &Repo) -> String {
-    let object = repo.object("HEAD");
+/// The fingerprint `rev`'s block names for its TSA, from the block itself.
+fn named_root_of(repo: &Repo, rev: &str) -> String {
+    let object = repo.object(rev);
     let line = object
         .lines()
         .find(|line| line.starts_with("X-RFC3161-Anchor: "))
@@ -692,6 +695,35 @@ fn named_root(repo: &Repo) -> String {
         .split_once("; sha256=")
         .expect("the anchor line carries a fingerprint");
     fingerprint.to_owned()
+}
+
+/// The decoded evidence block of `rev`.
+fn block(repo: &Repo, rev: &str) -> git_time_core::store::TrailerBlock {
+    let object = repo.object(rev);
+    let trailer = &object[Repo::trailer_seam(&object)..];
+    git_time_core::store::decode(trailer.as_bytes())
+        .expect("the block decodes")
+        .expect("the commit carries a block")
+}
+
+/// Run `anchor fetch` of the stub against `command`'s answer, with `accept`
+/// passed through.
+fn fetch(repo: &Repo, url: &str, command: &str, accept: &[&str]) -> Output {
+    let mut args = vec!["anchor", "fetch", url, "--id", "stub", "--insecure-http"];
+    for value in accept {
+        args.push("--accept");
+        args.push(value);
+    }
+    run_time_env(
+        repo.path(),
+        &args,
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", command)],
+    )
+}
+
+/// The fingerprint HEAD's block names for its TSA, from the block itself.
+fn named_root(repo: &Repo) -> String {
+    named_root_of(repo, "HEAD")
 }
 
 /// A fingerprint nobody pinned.
@@ -1137,6 +1169,139 @@ fn a_token_older_than_every_pinned_root_names_the_fetch_hint() {
         all.iter().any(|line| line.trim()
             == "run `git time anchor fetch` and accept the root that is valid now"),
         "the hint line is there: {all:?}"
+    );
+}
+
+/// A whole rotation on one repository: the fetch alone is refused and writes
+/// nothing, the accepted root is appended next to the retired one, the old
+/// commit keeps verifying and the new block names the new root. The lock diff is
+/// the review artifact: one added line, the retired root's line still there.
+#[test]
+fn history_survives_a_rotation_end_to_end() {
+    let mut repo = Repo::upright();
+    repo.init();
+    repo.spawn();
+    let mut url = repo.stub.as_ref().expect("a stub").url.clone();
+    let store = TempDir::new().expect("anchor store");
+    let stored = store.path().join("anchors/stub.pem");
+
+    // The bundle lives at an explicit path, the way a machine that pinned it
+    // once does — the seal, the fetch and the lock all resolve the same file.
+    // The keys are the ones `tsa add` writes; `init` already made the section.
+    std::fs::create_dir_all(stored.parent().expect("a parent")).expect("anchor dir");
+    git(repo.path(), &["config", "time.tsa.stub.url", &url]);
+    git(
+        repo.path(),
+        &["config", "time.tsa.stub.anchor", &pstr(&stored)],
+    );
+    git(repo.path(), &["config", "time.tsa.stub.insecure-http", "true"]);
+
+    // Root A is the first pin, taken on trust on first use.
+    let serve_a = format!("cat {}", pstr(&repo.authority.bundle()));
+    let first = fetch(&repo, &url, &serve_a, &[]);
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    let a_pinned = std::fs::read(&stored).expect("the pinned root");
+    let a = certificate_fingerprint(&repo.authority.bundle());
+
+    let old = repo.commit("under root a");
+    assert_eq!(named_root_of(&repo, &old), a, "the old block names A");
+
+    // The reviewer records what was pinned.
+    let pin = run_time(repo.path(), &["anchor", "pin"]);
+    assert!(pin.status.success(), "{}", text(&pin.stderr));
+    let lock_before =
+        std::fs::read_to_string(repo.path().join("time.anchors-lock")).expect("the lock");
+    let a_lock = a.replace(':', "").to_ascii_lowercase();
+    assert_eq!(lock_before, format!("stub {a_lock}\n"));
+
+    // The authority rotates: a fresh root B answers and signs from now on.
+    let rotated = Arc::new(Authority::new());
+    repo.authority = Arc::clone(&rotated);
+    repo.spawn();
+    url = repo.stub.as_ref().expect("a stub").url.clone();
+    git(repo.path(), &["config", "time.tsa.stub.url", &url]);
+    let serve_b = format!("cat {}", pstr(&rotated.bundle()));
+    let b = certificate_fingerprint(&rotated.bundle());
+
+    // Fail-closed: the fetch alone is not a trust decision.
+    let refused = fetch(&repo, &url, &serve_b, &[]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("does not match"), "{stderr}");
+    assert!(stderr.contains(&a), "the pinned value: {stderr}");
+    assert!(stderr.contains(&b), "the fetched value: {stderr}");
+    assert!(
+        stderr.contains(&format!("--accept {b}")),
+        "the fix is named: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(&stored).expect("the store"),
+        a_pinned,
+        "a refusal writes nothing"
+    );
+
+    // A human compares B with the authority's own publication and says yes.
+    let accept = format!("stub={b}");
+    let accepted = fetch(&repo, &url, &serve_b, &[accept.as_str()]);
+    assert!(accepted.status.success(), "{}", text(&accepted.stderr));
+    assert!(
+        text(&accepted.stdout).contains("1 root(s) appended, 2 now pinned"),
+        "{}",
+        text(&accepted.stdout)
+    );
+    let both = git_time_core::trust::AnchorStore::load(&[("stub".to_owned(), stored.clone())])
+        .expect("both roots load")
+        .anchor("stub")
+        .map(|anchor| anchor.roots.len());
+    assert_eq!(both, Some(2), "the retired root stays next to the new one");
+
+    // The old commit is untouched by the rotation and still verifies.
+    let surviving = verify(&repo, &old, &[]);
+    assert_eq!(surviving.status.code(), Some(0), "{:?}", lines(&surviving));
+    assert!(first_line(&surviving).contains("PASS"));
+
+    // The lock diff is one added line; the retired root's line survives.
+    let pin = run_time(repo.path(), &["anchor", "pin"]);
+    assert!(pin.status.success(), "{}", text(&pin.stderr));
+    let lock_after =
+        std::fs::read_to_string(repo.path().join("time.anchors-lock")).expect("the lock");
+    let before: Vec<&str> = lock_before.lines().collect();
+    let after: Vec<&str> = lock_after.lines().collect();
+    assert_eq!(after.len(), before.len() + 1, "{lock_after}");
+    let b_lock = b.replace(':', "").to_ascii_lowercase();
+    let added_line = after
+        .iter()
+        .find(|line| !before.contains(line))
+        .expect("the new root's line is the only addition");
+    assert_eq!(*added_line, format!("stub {b_lock}"), "{lock_after}");
+    assert!(
+        after.contains(&before[0]),
+        "the old line survives: {lock_after}"
+    );
+
+    // A new commit is stamped by B, and its block says so.
+    let new = repo.commit("under root b");
+    assert_eq!(block(&repo, &old).anchors["stub"], vec![a]);
+    let new_block = block(&repo, &new);
+    let named = &new_block.anchors["stub"];
+    assert!(named.contains(&b), "the new block names B: {named:?}");
+    assert_eq!(new_block.tokens.len(), 1, "the token was kept");
+
+    let fresh = verify(&repo, &new, &[]);
+    assert_eq!(fresh.status.code(), Some(0), "{:?}", lines(&fresh));
+
+    // A clone without the roots refuses the block, and names the root it needs.
+    repo.drop_anchor();
+    let without = verify(&repo, &new, &[]);
+    let all = lines(&without);
+    assert_eq!(without.status.code(), Some(1), "{all:?}");
+    assert!(
+        all.iter().any(|line| line.contains("anchor-not-pinned")),
+        "{all:?}"
+    );
+    assert!(
+        all.iter().any(|line| line.contains(&b)),
+        "the root is named: {all:?}"
     );
 }
 
