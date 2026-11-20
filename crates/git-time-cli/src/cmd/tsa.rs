@@ -1626,9 +1626,29 @@ mod tests {
         }
     }
 
-    /// A repository in a fresh temp dir. The caller runs these tests with the
-    /// global and system configs nulled, so only the local config is in play.
+    /// Keep the developer's global and system config out of these tests.
+    ///
+    /// [`repository`] runs `git init` and [`super::rows`] reads the merged
+    /// config, so a real `time.tsa.*` in the ambient global file would become an
+    /// extra row and turn the assertions red. Set once per test binary; edition
+    /// 2024 makes `set_var` unsafe because another test may be reading the
+    /// environment, and a test that spawns `git` could meet the write.
+    fn insulate() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            // SAFETY: assigned at most once per process and to values nothing
+            // has cached here; the window is the first `repository` call.
+            unsafe {
+                std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+                std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+            }
+        });
+    }
+
+    /// A repository in a fresh temp dir, with the ambient git configuration
+    /// nulled first so only the local config is in play.
     fn repository() -> (tempfile::TempDir, Repo) {
+        insulate();
         let dir = tempfile::TempDir::new().expect("temp dir");
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
