@@ -6,9 +6,6 @@
 //! rather than trusted, and a stale or malformed entry only means "ask again":
 //! the request costs less than showing a date that a rotation has outlived.
 
-// The picker that drains this arrives in a later change.
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
@@ -270,6 +267,10 @@ impl Prober {
     }
 
     /// The rows still queued or in flight.
+    //
+    // The picker repaints on delivered answers and never waits on the queue, so
+    // only tests read this; anything that has to wait for a whole run needs it.
+    #[allow(dead_code)]
     #[must_use]
     pub fn pending(&self) -> usize {
         let queue = lock(&self.shared);
@@ -277,6 +278,11 @@ impl Prober {
     }
 
     /// How many rows answered [`Served::Failed`] or [`Served::Unpublished`].
+    //
+    // The picker counts cells instead, so only this module's tests read it; the
+    // tally has to survive a cell being overwritten by a later answer, which is
+    // why the count lives here rather than being derived from a `Probes`.
+    #[allow(dead_code)]
     #[must_use]
     pub fn failed(&self) -> usize {
         self.shared.failed.load(Ordering::Relaxed)

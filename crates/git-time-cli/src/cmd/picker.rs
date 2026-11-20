@@ -676,12 +676,29 @@ fn stty(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// Whether `cached` still names a root `preset` publishes.
+///
+/// A cache entry is a bare lowercase digest while a preset publishes uppercase
+/// colon-separated octets, so case and colons are stripped first: they are
+/// spelling, not substance. A table that rotated inside the [`probe::TTL`] would
+/// otherwise show a date for a root the row no longer claims — and an unpinned
+/// row has no `!` to say so.
+fn still_published(preset: &Preset, cached: &probe::Cached) -> bool {
+    let bare = |value: &str| value.replace(':', "").to_ascii_lowercase();
+    let served = bare(&cached.fingerprint);
+    preset
+        .fingerprints
+        .iter()
+        .any(|fingerprint| bare(fingerprint) == served)
+}
+
 /// The opening snapshot and the indices a worker still has to fetch.
 ///
 /// A fresh cache entry shows at once and is not queued; everything else waits
 /// for its first answer. A preset that publishes no root is never probed: with
 /// nothing to match a reply can only be `Unpublished`, and the row's own `tofu`
-/// wording says more.
+/// wording says more. A cached root the preset no longer publishes is treated
+/// as a miss, so the row is asked again instead of showing a rotated date.
 #[must_use]
 pub fn seed(presets: &[Preset], now: jiff::Timestamp) -> (Probes, Vec<usize>) {
     let mut probes = Probes::pending(presets.len());
@@ -689,7 +706,9 @@ pub fn seed(presets: &[Preset], now: jiff::Timestamp) -> (Probes, Vec<usize>) {
     for (index, preset) in presets.iter().enumerate() {
         if preset.fingerprints.is_empty() {
             probes.set(index, Cell::Idle);
-        } else if let Some(cached) = probe::cached(preset.name, now) {
+        } else if let Some(cached) =
+            probe::cached(preset.name, now).filter(|cached| still_published(preset, cached))
+        {
             probes.set(index, Cell::Known(cached));
         } else {
             missing.push(index);
@@ -735,6 +754,10 @@ fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
 /// `presets` is the table the prober was started on, so its indices are the
 /// queue's. An idle row publishes nothing, so it is skipped rather than being
 /// turned into a question mark it cannot answer.
+///
+/// Drain order is not round order: this does not supersede an answer already in
+/// flight, so a slow earlier reply can land after the fresh one and stick. A
+/// refresh makes the newest answer likely, not certain.
 fn refresh(presets: &[Preset], probes: &mut Probes, prober: &probe::Prober) {
     let mut idle = Vec::new();
     for (index, preset) in presets.iter().enumerate() {
@@ -1735,18 +1758,48 @@ mod tests {
         lock
     }
 
+    /// A value the named preset publishes, as a cache entry would hold it: the
+    /// bare lowercase form of the first published fingerprint.
+    fn published(preset: &str) -> String {
+        presets::find(preset)
+            .expect("the preset")
+            .fingerprints
+            .first()
+            .expect("a published root")
+            .replace(':', "")
+            .to_ascii_lowercase()
+    }
+
     #[test]
     fn a_fresh_cache_entry_seeds_a_known_cell_and_is_not_queued() {
         let _cache = empty_cache();
         let _ = super::probe::store(
             "certum",
-            &cached_of("2035-02-09", "aa"),
+            &cached_of("2035-02-09", published("certum")),
             jiff::Timestamp::now(),
         );
         let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
         assert!(matches!(probes.cell(index_of("certum")), Cell::Known(_)));
         assert!(!missing.contains(&index_of("certum")));
         assert!(missing.contains(&index_of("aped")));
+    }
+
+    #[test]
+    fn a_cached_root_the_preset_no_longer_publishes_is_asked_again() {
+        let _cache = empty_cache();
+        let certum = index_of("certum");
+        // Nothing certum publishes: the table rotated inside the TTL.
+        let _ = super::probe::store(
+            "certum",
+            &cached_of("2035-02-09", "bb".repeat(32)),
+            jiff::Timestamp::now(),
+        );
+        let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        assert!(matches!(probes.cell(certum), Cell::Pending));
+        assert!(
+            missing.contains(&certum),
+            "the stale entry is fetched again"
+        );
     }
 
     #[test]
@@ -1782,7 +1835,7 @@ mod tests {
         let _cache = empty_cache();
         let _ = super::probe::store(
             "certum",
-            &cached_of("2035-02-09", "aa"),
+            &cached_of("2035-02-09", published("certum")),
             jiff::Timestamp::now(),
         );
         let (_, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
@@ -1798,11 +1851,20 @@ mod tests {
     fn a_drained_answer_repaints_and_the_last_answer_wins() {
         let _cache = empty_cache();
         let index = index_of("freetsa");
-        // The handover `run` performs. The cache is empty, so nothing is skipped
-        // and every row answers with prose except FreeTSA's, whose reply flips
-        // from the fixture to prose before the refresh: the second drain has to
-        // overwrite the `Known` the first left for that same index.
-        let (_, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        let cached_row = index_of("certum");
+        // Against the brief: one row carries a cache entry, so the table `seed`
+        // hands over is the one under test — a seeded `Known` has to survive the
+        // drain and only the answers' own indices may change.
+        let _ = super::probe::store(
+            "certum",
+            &cached_of("2035-02-09", published("certum")),
+            jiff::Timestamp::now(),
+        );
+        // The handover `run` performs. Every other row answers prose except
+        // FreeTSA's, whose reply flips from the fixture to prose before the
+        // refresh: the second drain has to overwrite the `Known` the first left
+        // for that same index.
+        let (mut probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
         let skip = super::skip_of(&missing, presets::PRESETS.len());
         let freetsa = presets::PRESETS[index].url;
         let known = Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1817,13 +1879,27 @@ mod tests {
             })
         };
         let prober = super::probe::Prober::start(&presets::PRESETS, fetch, &skip);
-        let mut probes = Probes::pending(presets::PRESETS.len());
+        let before = probes.clone();
         wait(&prober);
         assert!(
             super::absorb(&prober, &mut probes),
             "the answer changed the frame"
         );
         assert!(matches!(probes.cell(index), Cell::Known(_)));
+        // The seeded cell kept its date, and no other row moved.
+        assert!(
+            matches!(probes.cell(cached_row), Cell::Known(found) if found.not_after == "2035-02-09"),
+            "{:?}",
+            probes.cell(cached_row)
+        );
+        // Every row the worker left alone is exactly as the seed left it.
+        for untouched in &skip {
+            assert_eq!(
+                probes.cell(*untouched),
+                before.cell(*untouched),
+                "row {untouched}"
+            );
+        }
 
         known.store(false, std::sync::atomic::Ordering::Relaxed);
         prober.refresh(&skip);
@@ -1833,6 +1909,10 @@ mod tests {
             "the newer answer repaints"
         );
         assert!(matches!(probes.cell(index), Cell::Failed));
+        assert!(
+            matches!(probes.cell(cached_row), Cell::Known(_)),
+            "still seeded"
+        );
         assert!(!super::absorb(&prober, &mut probes), "nothing left to show");
     }
 
@@ -1842,7 +1922,7 @@ mod tests {
         let certum = index_of("certum");
         let _ = super::probe::store(
             "certum",
-            &cached_of("2035-02-09", "aa"),
+            &cached_of("2035-02-09", published("certum")),
             jiff::Timestamp::now(),
         );
         // A gate parks the workers, so no answer can replace the cells the
