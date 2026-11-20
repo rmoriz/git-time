@@ -52,7 +52,8 @@ pub fn dir() -> PathBuf {
 ///
 /// The entry is one line of three tab-separated fields: the day, the second it
 /// was fetched, and the fingerprint. Anything else — a missing file, a short or
-/// long line, a non-numeric second — is stale rather than an error.
+/// long line, a non-numeric second, a day that is not a day, a fingerprint that
+/// is not 64 lowercase hex — is stale rather than an error.
 #[must_use]
 pub fn cached(id: &str, now: jiff::Timestamp) -> Option<Cached> {
     let text = fs::read_to_string(dir().join(id)).ok()?;
@@ -60,7 +61,14 @@ pub fn cached(id: &str, now: jiff::Timestamp) -> Option<Cached> {
     let not_after = fields.next()?;
     let at = fields.next()?.parse::<i64>().ok()?;
     let fingerprint = fields.next()?;
-    if fields.next().is_some() || now.as_second().saturating_sub(at) > TTL {
+    if fields.next().is_some()
+        || now.as_second().saturating_sub(at) > TTL
+        || not_after.parse::<jiff::civil::Date>().is_err()
+        || fingerprint.len() != 64
+        || !fingerprint
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return None;
     }
     Some(Cached {
@@ -481,6 +489,42 @@ pub(crate) mod tests {
         assert_eq!(home, base);
         assert_eq!(super::dir(), home.join("git-time/probe"));
         assert_eq!(crate::cmd::anchors::dir(), home.join("git-time/anchors"));
+    }
+
+    /// Write one raw entry line, which `store` cannot do once a field is shaped
+    /// wrong.
+    fn write_entry(id: &str, line: &str) {
+        std::fs::create_dir_all(super::dir()).expect("probe dir");
+        std::fs::write(super::dir().join(id), line).expect("entry");
+    }
+
+    #[test]
+    fn only_a_day_and_a_bare_sha256_parse() {
+        let _guard = xdg_lock();
+        let now = jiff::Timestamp::from_second(1_800_000_000).expect("instant");
+        let good = "cc".repeat(32);
+        let cases = [
+            ("2041-03-07", good.clone(), true),
+            (
+                "2041-03-07",
+                format!("CC:{}", good[2..].to_uppercase()),
+                false,
+            ),
+            ("2041-03-07", good[..40].to_owned(), false),
+            ("2041-03-07", good[..63].to_owned(), false),
+            ("2041-03-07", format!("{good}0"), false),
+            ("2041-03-07", "zz".repeat(32), false),
+            ("07.03.2041", good, false),
+        ];
+        for (index, (day, fingerprint, accepted)) in cases.iter().enumerate() {
+            let id = format!("shape-{index}");
+            write_entry(&id, &format!("{day}\t1800000000\t{fingerprint}"));
+            assert_eq!(
+                super::cached(&id, now).is_some(),
+                *accepted,
+                "{day} {fingerprint}"
+            );
+        }
     }
 
     fn served() -> Cached {

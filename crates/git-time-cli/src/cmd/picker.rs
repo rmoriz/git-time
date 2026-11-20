@@ -684,11 +684,12 @@ fn stty(args: &[&str]) -> Option<String> {
 
 /// Whether `cached` still names a root `preset` publishes.
 ///
-/// The comparison is by digest width: the cache always holds the SHA-256 that
-/// [`anchors::fingerprint`] wrote, while most presets publish only a SHA-1, and
-/// a 64-character digest can never equal a 40-character one. The cached value is
-/// normalized first (colons stripped, lowercased) because a hand-edited or older
-/// entry need not be in the bare lowercase form the cache itself writes.
+/// The comparison is by digest width: the cache only holds the 64-character
+/// lowercase SHA-256 that [`anchors::fingerprint`] wrote, while most presets
+/// publish only a SHA-1, and a 64-character digest can never equal a
+/// 40-character one. The cached value needs no normalization — [`probe::cached`]
+/// rejects any other spelling — but the published values still do, since the
+/// table spells them uppercase and colon-separated.
 ///
 /// A preset that publishes nothing at the cached width cannot be checked at all,
 /// so the entry is accepted and the week-long [`probe::TTL`] is what bounds an
@@ -696,18 +697,17 @@ fn stty(args: &[&str]) -> Option<String> {
 /// else: a rotation inside the TTL would otherwise show a date for a root the
 /// row no longer claims, and an unpinned row has no `!` to say so.
 fn still_published(preset: &Preset, cached: &probe::Cached) -> bool {
-    let bare = |value: &str| value.replace(':', "").to_ascii_lowercase();
-    let served = bare(&cached.fingerprint);
-    let at_width: Vec<String> = preset
+    let served = cached.fingerprint.as_str();
+    let mut at_width = preset
         .fingerprints
         .iter()
-        .map(|fingerprint| bare(fingerprint))
+        .map(|fingerprint| fingerprint.replace(':', "").to_ascii_lowercase())
         .filter(|fingerprint| fingerprint.len() == served.len())
-        .collect();
-    if at_width.is_empty() {
+        .peekable();
+    if at_width.peek().is_none() {
         return true;
     }
-    at_width.contains(&served)
+    at_width.any(|fingerprint| fingerprint == served)
 }
 
 /// The opening snapshot and the indices a worker still has to fetch.
@@ -1833,6 +1833,24 @@ mod tests {
         assert!(matches!(probes.cell(freetsa), Cell::Known(_)));
         assert!(!missing.contains(&freetsa));
         assert!(missing.contains(&index_of("aped")));
+    }
+
+    #[test]
+    fn a_malformed_entry_is_a_miss_not_a_date() {
+        let _cache = empty_cache();
+        std::fs::create_dir_all(super::probe::dir()).expect("probe dir");
+        std::fs::write(
+            super::probe::dir().join("certum"),
+            format!(
+                "2041-03-07\t{}\tCC:{}\n",
+                jiff::Timestamp::now().as_second(),
+                "cc".repeat(32)
+            ),
+        )
+        .expect("entry");
+        let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        assert!(missing.contains(&index_of("certum")));
+        assert!(matches!(probes.cell(index_of("certum")), Cell::Pending));
     }
 
     /// A SHA-1-only preset can never validate the SHA-256 the cache holds, so
