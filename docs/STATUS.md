@@ -4,7 +4,9 @@ Design: `docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md`
 Plan: `docs/superpowers/plans/2026-11-18-git-time-rfc3161.md`
 Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-18-git-time-rfc3161/progress.md`
 
-## Release notes (unreleased, since v0.1.0)
+## Release notes (v0.1.0)
+
+A later release adds its own heading above this one.
 
 - `tsa select` and `tsa preset list` show the expiry a published authority is actually serving
   when no root is pinned here, so a rotation is visible before it is accepted. The answer is cached
