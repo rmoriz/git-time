@@ -1832,6 +1832,44 @@ fn preset_list_reads_the_date_from_a_pinned_bundle() {
     assert!(sectigo.contains("(anchored)"), "{listing}");
 }
 
+/// The rotation `!` reaches the printed line: the pinned bundle holds a root
+/// nothing publishes, the probe answers the published one. The flag is the join
+/// between `anchors::roots`, the cell and `pin_state`, so this is the wiring the
+/// unit test cannot see. A control run without the bundle has nothing to compare
+/// and no `!`.
+#[test]
+fn preset_list_marks_a_pinned_row_whose_served_root_the_bundle_lacks() {
+    let repo = Repo::new();
+    repo.init();
+    let env = vec![(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat '{}'", pstr(&freetsa_root())),
+    )];
+    let freetsa = |listing: &str| -> String {
+        listing
+            .lines()
+            .find(|line| line.starts_with("freetsa "))
+            .unwrap_or_else(|| panic!("the freetsa line: {listing}"))
+            .to_owned()
+    };
+
+    // Control: no bundle, so the served date stands in and nothing is compared.
+    let control = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    let line = freetsa(&control);
+    assert!(line.contains("fetch 2041-03-07"), "{line}");
+    assert!(!line.contains('!'), "{line}");
+
+    // The bundle is the one throwaway root, which the stub never answers: the
+    // date stays the pin's, and the foreign answer is marked.
+    let stale = stale_ca(repo.path());
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::copy(&stale, repo.anchors().join("freetsa.pem")).expect("pin the stale CA");
+    let listing = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    let line = freetsa(&listing);
+    assert!(line.contains("2020-02-01 expired !"), "{line}");
+    assert!(line.contains("(anchored)"), "{line}");
+}
+
 /// A bundle is append-ordered, not date-ordered: a retired root left in front
 /// must not hide the live one's later date behind it.
 #[test]

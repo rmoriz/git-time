@@ -545,7 +545,10 @@ A plain run only ever reads, so it never prints
 .B …
 come from
 .BR \-\-refresh ,
-the latter only when an answer arrives too late to be read.
+the latter only when an answer arrives too late to be read, and both only
+among the rows with no local pin.
+A pinned row keeps its pin date throughout and never trades it for the served
+one; an answer naming a foreign root marks it as above.
 No current row is in the
 .B tofu
 position.
@@ -568,8 +571,9 @@ Ask every authority that publishes a root and wait for the queue to drain
 before printing.
 Nothing is dropped first, so a refresh that fails leaves the previous date in
 place until it ages out.
-A row that cannot answer prints
-.BR ? .
+A row with no local pin that cannot answer prints
+.BR ? ;
+a pinned row keeps its pin date.
 .PP
 .B git time tsa preset add \fIname\fR [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ]
 .PP
