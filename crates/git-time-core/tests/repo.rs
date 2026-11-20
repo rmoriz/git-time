@@ -100,6 +100,49 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
+// --- config --------------------------------------------------------------
+
+#[test]
+fn config_entries_lists_every_match_in_config_order() {
+    let (dir, repo) = repo();
+    git(dir.path(), &["config", "time.required", "2"]);
+    git(
+        dir.path(),
+        &["config", "time.tsa.one.url", "https://one.example/tsr"],
+    );
+    git(
+        dir.path(),
+        &["config", "time.tsa.one.anchor", "a path with spaces.pem"],
+    );
+    // A repeated key: git keeps every value, the last one wins for `--get`.
+    git(dir.path(), &["config", "--add", "time.required", "3"]);
+
+    let entries = repo
+        .config_entries("^time\\.")
+        .expect("reads the matching keys");
+    assert_eq!(
+        entries,
+        vec![
+            ("time.required".to_owned(), "2".to_owned()),
+            ("time.required".to_owned(), "3".to_owned()),
+            (
+                "time.tsa.one.url".to_owned(),
+                "https://one.example/tsr".to_owned()
+            ),
+            (
+                "time.tsa.one.anchor".to_owned(),
+                "a path with spaces.pem".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(
+        repo.config("time.required"),
+        Ok(Some("3".to_owned())),
+        "the last value is what `--get` answers"
+    );
+    assert_eq!(repo.config_entries("^time\\.nope"), Ok(Vec::new()));
+}
+
 // --- head ----------------------------------------------------------------
 
 #[test]
@@ -159,7 +202,7 @@ fn read_commit_of_a_missing_object_is_a_git_error() {
     };
     assert_eq!(
         command,
-        "cat-file -t 0123456789012345678901234567890123456789"
+        "cat-file commit 0123456789012345678901234567890123456789"
     );
     assert!(!stderr.is_empty(), "git's own words are kept");
 }

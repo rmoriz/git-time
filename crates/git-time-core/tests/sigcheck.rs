@@ -12,6 +12,7 @@ use git_time_core::object::CommitObject;
 use git_time_core::repo::Repo;
 use git_time_core::sigcheck::{
     Format, SigHeader, SignError, SignatureState, VerifyOutcome, format, inspect, sign, verify,
+    verify_stored,
 };
 
 use std::io::Write as _;
@@ -1102,6 +1103,46 @@ fn verify_rejects_a_tampered_object() {
     commit.message = b"tampered".to_vec();
 
     assert_eq!(verify(&commit, &repo), VerifyOutcome::Bad);
+}
+
+#[test]
+fn verify_stored_checks_the_stored_object_without_writing() {
+    let Some(pgp) = pgp() else {
+        eprintln!("skip: gpg unavailable");
+        return;
+    };
+    let (_dir, repo) = repo();
+    let commit = object(MESSAGE);
+    let armor = sign(
+        &commit,
+        &SignatureState::SignedOpenPgp {
+            issuer: Some(pgp.fingerprint.clone()),
+            header: SigHeader::Gpgsig,
+        },
+        &repo,
+    )
+    .expect("signs");
+    let signed = signed(&commit, SigHeader::Gpgsig, &armor);
+    let oid = git_stdin(
+        repo.path(),
+        &["hash-object", "-w", "-t", "commit", "--stdin"],
+        &signed.compose(),
+    );
+    let oid = String::from_utf8(oid)
+        .expect("an object id is ASCII")
+        .trim_end()
+        .to_owned();
+
+    assert_eq!(
+        verify_stored(&signed, &oid, &repo),
+        VerifyOutcome::Good,
+        "the same verdict as `verify`, on the object as stored"
+    );
+    assert_eq!(
+        verify_stored(&object(MESSAGE), &oid, &repo),
+        VerifyOutcome::Unsigned,
+        "an unsigned object needs no process at all"
+    );
 }
 
 #[test]

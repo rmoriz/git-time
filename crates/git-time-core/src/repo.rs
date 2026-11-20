@@ -13,11 +13,13 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use crate::object::CommitObject;
 use crate::repo::RepoError::{Git, Io, NoHead, NotACommit, NotARepo, Rejected};
+use crate::verify::commit::DROPPED_FILE as DROP_RECORD;
 
 /// The reflog message every ref move of a seal is recorded under.
 const REFLOG_MESSAGE: &str = "rfc3161 seal";
@@ -44,6 +46,12 @@ pub struct Repo {
     /// judge commits from several threads, and a diagnostic counter is the only
     /// thing one of them could write.
     update_ref_attempts: AtomicU32,
+    /// The path of the drop record, resolved by git once; see
+    /// [`Repo::drop_record`].
+    ///
+    /// A read-only run asks for the same path once per unsealed commit, and a
+    /// `rev-parse` process each time is pure overhead.
+    drop_record: OnceLock<Option<PathBuf>>,
 }
 
 /// A clone is the same repository with its own attempt counter.
@@ -58,6 +66,7 @@ impl Clone for Repo {
             path: self.path.clone(),
             retry_delay: self.retry_delay,
             update_ref_attempts: AtomicU32::new(self.update_ref_attempts.load(Ordering::Relaxed)),
+            drop_record: self.drop_record.clone(),
         }
     }
 }
@@ -164,6 +173,7 @@ impl Repo {
             path: path.to_path_buf(),
             retry_delay: CAS_BACKOFF,
             update_ref_attempts: AtomicU32::new(0),
+            drop_record: OnceLock::new(),
         })
     }
 
@@ -214,6 +224,58 @@ impl Repo {
         Ok(self.config(key)?.filter(|value| !value.is_empty()))
     }
 
+    /// Every config entry whose key matches the regex `pattern`, in config
+    /// order as `(key, value)` pairs.
+    ///
+    /// One process answers a whole family of keys, which matters for a command
+    /// that reads, say, ten `time.*` settings: ten `git config --get` spawns
+    /// cost more than everything else such a command does. As with `--get`,
+    /// the *last* value wins, so a caller takes the last pair for a key.
+    ///
+    /// A pattern that matches nothing is an empty list, not an error.
+    pub fn config_entries(&self, pattern: &str) -> Result<Vec<(String, String)>, RepoError> {
+        let args = ["config", "--get-regexp", pattern];
+        let run = self.run(&args, None)?;
+        match run.code {
+            Some(0) => Ok(String::from_utf8_lossy(&run.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let (key, value) = line.split_once(' ')?;
+                    Some((key.to_owned(), value.trim_end_matches('\r').to_owned()))
+                })
+                .collect()),
+            // `git config --get-regexp` exits 1 when nothing matches.
+            Some(1) => Ok(Vec::new()),
+            _ => Err(failure(&args, run.stderr)),
+        }
+    }
+
+    /// The file inside the git directory that the drop command records commits
+    /// in, resolved once per handle.
+    ///
+    /// git answers the path itself (`rev-parse --git-path`), so a linked
+    /// worktree gets its own file. `None` when git cannot name it; the caller
+    /// then treats the commit as not dropped.
+    #[must_use]
+    pub fn drop_record(&self) -> Option<&Path> {
+        self.drop_record
+            .get_or_init(|| {
+                let run = self
+                    .run(&["rev-parse", "--git-path", DROP_RECORD], None)
+                    .ok()?;
+                if !run.succeeded() {
+                    return None;
+                }
+                let path = PathBuf::from(trim(&run.stdout));
+                Some(if path.is_absolute() {
+                    path
+                } else {
+                    self.path.join(path)
+                })
+            })
+            .as_deref()
+    }
+
     /// Where HEAD points, as a branch name or a detached commit id.
     ///
     /// A repository without a commit yet has no answer: the branch HEAD is on
@@ -246,36 +308,35 @@ impl Repo {
     /// The raw bytes are what a signature and an imprint are taken over, so they
     /// are handed on untouched next to the parsed form.
     ///
-    /// The type is asked for first: only an object git positively reports as
-    /// something other than a commit becomes [`RepoError::NotACommit`]. A
-    /// missing object, a corrupt one or a repository git cannot read keeps its
-    /// own error instead of being flattened into "not a commit".
+    /// The type is asked for only when the read fails: only an object git
+    /// positively reports as something other than a commit becomes
+    /// [`RepoError::NotACommit`]. A missing object, a corrupt one or a
+    /// repository git cannot read keeps its own error instead of being
+    /// flattened into "not a commit".
     pub fn read_commit(&self, oid: &str) -> Result<(CommitObject, Vec<u8>), RepoError> {
-        self.require_commit(oid)?;
         let args = ["cat-file", "commit", oid];
         let run = self.run(&args, None)?;
         if !run.succeeded() {
+            // `cat-file commit` says "bad file" for a tree, a blob and a missing
+            // object alike; only the type names which it is.
+            if self.object_type_is_commit(oid) == Some(false) {
+                return Err(NotACommit(oid.to_owned()));
+            }
             return Err(failure(&args, run.stderr));
         }
         let parsed = CommitObject::parse(&run.stdout)?;
         Ok((parsed, run.stdout))
     }
 
-    /// Refuse `oid` unless the object database positively says it is a commit.
+    /// Whether the object database reports `oid` as a commit.
     ///
-    /// git answers the type or exits non-zero; the exit is kept as an error, so
-    /// a broken repository is not mistaken for a non-commit.
-    fn require_commit(&self, oid: &str) -> Result<(), RepoError> {
+    /// `None` when the type cannot be read at all, which is not the same answer
+    /// as "not a commit": a missing object or a broken repository keeps its own
+    /// error rather than being called a non-commit.
+    fn object_type_is_commit(&self, oid: &str) -> Option<bool> {
         let args = ["cat-file", "-t", oid];
-        let run = self.run(&args, None)?;
-        if !run.succeeded() {
-            return Err(failure(&args, run.stderr));
-        }
-        if trim(&run.stdout) == "commit" {
-            Ok(())
-        } else {
-            Err(NotACommit(oid.to_owned()))
-        }
+        let run = self.run(&args, None).ok()?;
+        run.succeeded().then(|| trim(&run.stdout) == "commit")
     }
 
     /// Write `bytes` as a commit object and return its id.

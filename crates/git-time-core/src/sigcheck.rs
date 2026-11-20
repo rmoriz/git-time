@@ -247,7 +247,8 @@ pub fn sign(
 ///
 /// The object is written into the repository with `git hash-object -w` first,
 /// because verify-commit only sees objects, not bytes. An unsigned object is
-/// reported without writing anything.
+/// reported without writing anything. For an object that is already stored,
+/// use [`verify_stored`] to skip the write.
 #[must_use]
 pub fn verify(commit: &CommitObject, repo: &Repo) -> VerifyOutcome {
     if matches!(inspect(commit), SignatureState::Unsigned) {
@@ -262,7 +263,26 @@ pub fn verify(commit: &CommitObject, repo: &Repo) -> VerifyOutcome {
         Ok(run) => return VerifyOutcome::Error(run.stderr),
         Err(error) => return VerifyOutcome::Error(error.to_string()),
     };
-    match run_git(repo.path(), &["verify-commit", &oid], None) {
+    check(&oid, repo)
+}
+
+/// Check the signature on `commit`, which is already stored under `oid`.
+///
+/// The same verdict as [`verify`] without the `hash-object` process: a run that
+/// has just read the object out of the database already has a copy in it. The
+/// bytes checked are the stored ones, which is the object a reader cares about
+/// anyway. An unsigned object costs no process at all.
+#[must_use]
+pub fn verify_stored(commit: &CommitObject, oid: &str, repo: &Repo) -> VerifyOutcome {
+    if matches!(inspect(commit), SignatureState::Unsigned) {
+        return VerifyOutcome::Unsigned;
+    }
+    check(oid, repo)
+}
+
+/// Ask `git verify-commit` about the stored object `oid`.
+fn check(oid: &str, repo: &Repo) -> VerifyOutcome {
+    match run_git(repo.path(), &["verify-commit", oid], None) {
         Ok(run) if run.succeeded() => VerifyOutcome::Good,
         // Exit 1 is gpg's or ssh-keygen's signature verdict — unless the signer
         // never ran or could not be set up, which git also reports as exit 1.

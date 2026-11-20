@@ -56,7 +56,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::imprint::{Alg, Digest};
-use crate::repo::{Repo, RepoError, run_git};
+use crate::repo::{Repo, RepoError};
 use crate::trust::AnchorStore;
 use crate::tsa::{HttpBackend, StampRequest, TsaBackend};
 
@@ -232,23 +232,28 @@ impl Policy {
     pub fn load(repo: &Repo) -> Result<Self, ConfigError> {
         let mut policy = Self::default();
 
-        if let Some(value) = repo.config_non_empty("time.required")? {
-            policy.required = parse(&value, "time.required", "a whole number")?;
+        // One process for every key this load reads. Ten `--get` spawns cost
+        // more than the rest of a short command does, and a config read is not
+        // something a run can amortise later.
+        let entries = repo.config_entries("^time\\.")?;
+
+        if let Some(value) = last(&entries, "time.required") {
+            policy.required = parse(value, "time.required", "a whole number")?;
         }
-        if let Some(value) = repo.config_non_empty("time.deadline")? {
-            policy.deadline = parse_duration(&value, "time.deadline")?;
+        if let Some(value) = last(&entries, "time.deadline") {
+            policy.deadline = parse_duration(value, "time.deadline")?;
         }
-        if let Some(value) = repo.config_non_empty("time.on-failure")? {
+        if let Some(value) = last(&entries, "time.on-failure") {
             policy.on_failure = parse_enum(
-                &value,
+                value,
                 "time.on-failure",
                 "`warn` or `fail`",
                 &[("warn", OnFailure::Warn), ("fail", OnFailure::Fail)],
             )?;
         }
-        if let Some(value) = repo.config_non_empty("time.gate")? {
+        if let Some(value) = last(&entries, "time.gate") {
             policy.gate = parse_enum(
-                &value,
+                value,
                 "time.gate",
                 "`post-commit` or `pre-commit`",
                 &[
@@ -257,9 +262,9 @@ impl Policy {
                 ],
             )?;
         }
-        if let Some(value) = repo.config_non_empty("time.store")? {
+        if let Some(value) = last(&entries, "time.store") {
             policy.store = parse_enum(
-                &value,
+                value,
                 "time.store",
                 "`trailer`, `note` or `both`",
                 &[
@@ -269,9 +274,9 @@ impl Policy {
                 ],
             )?;
         }
-        if let Some(value) = repo.config_non_empty("time.seal-during-rebase")? {
+        if let Some(value) = last(&entries, "time.seal-during-rebase") {
             policy.seal_during_rebase = parse_enum(
-                &value,
+                value,
                 "time.seal-during-rebase",
                 "`all`, `tip` or `off`",
                 &[
@@ -281,17 +286,17 @@ impl Policy {
                 ],
             )?;
         }
-        if let Some(value) = repo.config_non_empty("time.record-failures")? {
-            policy.record_failures = parse_bool(&value, "time.record-failures")?;
+        if let Some(value) = last(&entries, "time.record-failures") {
+            policy.record_failures = parse_bool(value, "time.record-failures")?;
         }
-        if let Some(value) = repo.config_non_empty("time.enabled")? {
-            policy.enabled = parse_bool(&value, "time.enabled")?;
+        if let Some(value) = last(&entries, "time.enabled") {
+            policy.enabled = parse_bool(value, "time.enabled")?;
         }
-        if let Some(value) = repo.config_non_empty("time.max-trailer-bytes")? {
-            policy.max_trailer_bytes = parse(&value, "time.max-trailer-bytes", "a whole number")?;
+        if let Some(value) = last(&entries, "time.max-trailer-bytes") {
+            policy.max_trailer_bytes = parse(value, "time.max-trailer-bytes", "a whole number")?;
         }
 
-        policy.tsas = read_tsas(repo)?;
+        policy.tsas = read_tsas(&entries)?;
         // Every authority that travels in the clear, for the one warning below.
         let mut insecure: Vec<&TsaConfig> = Vec::new();
         for tsa in &policy.tsas {
@@ -379,37 +384,31 @@ struct TsaFields {
     timeout: Option<String>,
 }
 
-/// Read every `time.tsa.<id>.<field>` key, in id order.
-fn read_tsas(repo: &Repo) -> Result<Vec<TsaConfig>, ConfigError> {
-    let args = ["config", "--get-regexp", "^time\\.tsa\\."];
-    let run = run_git(repo.path(), &args, None)?;
-    let listing = match run.code {
-        // No `time.tsa.*` key at all.
-        Some(1) => String::new(),
-        Some(0) => String::from_utf8_lossy(&run.stdout).into_owned(),
-        _ => {
-            return Err(ConfigError::Repo(RepoError::Git {
-                command: args.join(" "),
-                stderr: run.stderr,
-            }));
-        }
-    };
+/// The last value configured for `key`, with an empty value counting as unset.
+///
+/// git resolves a repeated key to its last value, and treats `key =` as the
+/// same as no value for settings that name something — the rule
+/// [`Repo::config_non_empty`] applies one key at a time.
+fn last<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    entries
+        .iter()
+        .rev()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
+        .filter(|value| !value.is_empty())
+}
 
+/// Read every `time.tsa.<id>.<field>` key, in id order.
+fn read_tsas(entries: &[(String, String)]) -> Result<Vec<TsaConfig>, ConfigError> {
     let mut sections: Vec<(String, TsaFields)> = Vec::new();
-    for line in listing.lines() {
-        let Some(key) = line.split(' ').next() else {
-            continue;
-        };
+    for (key, value) in entries {
         let Some(rest) = key.strip_prefix(TSA_PREFIX) else {
             continue;
         };
         let Some((id, field)) = rest.rsplit_once('.') else {
             continue;
         };
-        let value = line
-            .split_once(' ')
-            .map(|(_, value)| value.trim().to_owned())
-            .unwrap_or_default();
+        let value = value.trim().to_owned();
 
         let index = match sections.iter().position(|(seen, _)| seen == id) {
             Some(index) => index,

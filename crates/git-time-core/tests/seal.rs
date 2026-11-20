@@ -1451,6 +1451,79 @@ fn policy_rejects_an_unknown_enum_value_per_key() {
 }
 
 #[test]
+fn policy_reads_repeated_keys_last_wins_and_empty_as_unset() {
+    insulate();
+    let dir = TempDir::new().expect("temp dir");
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    let repo = Repo::open(dir.path()).expect("opens the repository");
+    let anchor = dir.path().join("anchor.pem");
+    std::fs::write(&anchor, FREETSA_ROOT).expect("write anchor");
+    git(
+        dir.path(),
+        &["config", "time.tsa.freetsa.url", "http://127.0.0.1:1/tsr"],
+    );
+    git(
+        dir.path(),
+        &[
+            "config",
+            "time.tsa.freetsa.anchor",
+            &anchor.to_string_lossy(),
+        ],
+    );
+    // git resolves a repeated key to its last value, and `key =` is no value at
+    // all — the rules `--get` applies one key at a time.
+    git(dir.path(), &["config", "time.required", "2"]);
+    git(dir.path(), &["config", "--add", "time.required", "3"]);
+    git(dir.path(), &["config", "time.store", "both"]);
+    git(dir.path(), &["config", "time.store", ""]);
+
+    let policy = Policy::load(&repo).expect("policy loads");
+    assert_eq!(policy.required, 3, "the last value wins");
+    assert_eq!(
+        policy.store,
+        Store::Trailer,
+        "an empty value falls back to the default"
+    );
+    assert_eq!(policy.tsas.len(), 1);
+}
+
+#[test]
+fn policy_keeps_the_authorities_in_config_order() {
+    insulate();
+    let dir = TempDir::new().expect("temp dir");
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    let repo = Repo::open(dir.path()).expect("opens the repository");
+    let anchor = dir.path().join("anchor.pem");
+    std::fs::write(&anchor, FREETSA_ROOT).expect("write anchor");
+    for id in ["second", "first"] {
+        git(
+            dir.path(),
+            &[
+                "config",
+                &format!("time.tsa.{id}.url"),
+                "http://127.0.0.1:1/tsr",
+            ],
+        );
+        git(
+            dir.path(),
+            &[
+                "config",
+                &format!("time.tsa.{id}.anchor"),
+                &anchor.to_string_lossy(),
+            ],
+        );
+    }
+
+    let ids: Vec<String> = Policy::load(&repo)
+        .expect("policy loads")
+        .tsas
+        .into_iter()
+        .map(|tsa| tsa.id)
+        .collect();
+    assert_eq!(ids, vec!["second".to_owned(), "first".to_owned()]);
+}
+
+#[test]
 fn policy_rejects_a_tsa_without_url_or_anchor() {
     insulate();
     let dir = TempDir::new().expect("temp dir");

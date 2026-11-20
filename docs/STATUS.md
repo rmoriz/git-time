@@ -8,6 +8,11 @@ Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-
 
 A later release adds its own heading above this one.
 
+- `log`, `verify` and every other command read the policy with one `git config` call instead of
+  eleven, judge a commit with one `cat-file` instead of two, and check a signature on the object
+  git already stores instead of hashing it back in. `git time log | head` on a 149-commit
+  repository went from 0.18 s to 0.07 s.
+
 - `tsa select` and `tsa preset list` show the expiry a published authority is actually serving
   when no root is pinned here, so a rotation is visible before it is accepted. The answer is cached
   for seven days under `$XDG_CONFIG_HOME/git-time/probe/`, and `--refresh` (or `r`) is the one path

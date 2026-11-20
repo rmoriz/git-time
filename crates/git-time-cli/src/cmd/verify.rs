@@ -9,10 +9,8 @@
 //! reason to look twice. `--json` prints the same findings as one document
 //! instead, with the roots each block names.
 //!
-//! Read-only apart from the signature check: `sigcheck::verify` writes the
-//! checked commit back into the object database with `hash-object -w`, so a
-//! loose object may appear for a signed commit. No ref, index or worktree is
-//! touched and no TSA is called.
+//! Read-only: the signature is checked on the object as git already stores it,
+//! and no ref, index, worktree or TSA is touched.
 //!
 //! `--require-sealed` and `--require-signed` are **gates, not verdicts**: the
 //! verdict stays what the evidence is (`unsealed`, `sealed`, …) and a gate only

@@ -20,9 +20,9 @@
 //!    failure: it says backdating or clock skew, not a broken token.
 //!
 //! Verification is read-only in the sense that matters — no ref, index or
-//! worktree is touched and no network call is made — but `sigcheck::verify`
-//! writes the object it checks into the object database, because
-//! `git verify-commit` works on objects, not bytes.
+//! worktree is touched and no network call is made — and the signature is
+//! checked on the object as the database already stores it, so a judging run
+//! writes nothing either.
 //!
 //! A commit dropped on purpose is [`Verdict::Unsealed`] with
 //! [`CommitEvidence::dropped`] set: the marker is read from the git directory
@@ -35,7 +35,6 @@
 //! config key; [`Policy::require_signed`] is filled from that flag.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use jiff::Timestamp;
 
@@ -245,7 +244,7 @@ pub fn commit(
     let pre = object.pre_image(store::PREFIX);
     let mut warnings = Vec::new();
 
-    let signature = match sigcheck::verify(&object, repo) {
+    let signature = match sigcheck::verify_stored(&object, oid, repo) {
         VerifyOutcome::Good => SignatureStatus::Good,
         VerifyOutcome::Bad => {
             warnings.push("the commit signature does not hold".to_owned());
@@ -523,25 +522,13 @@ fn note_block(repo: &Repo, oid: &str) -> Note {
 
 /// Whether `oid` is recorded in the drop file inside the git directory.
 ///
-/// The git directory is asked for by git itself (`rev-parse --git-path`), so a
-/// linked worktree reads its own drop file. A file that cannot be read answers
-/// "not dropped": that only costs the `(dropped)` detail.
+/// The git directory is asked for by git itself, once per handle (see
+/// [`Repo::drop_record`]), so a linked worktree reads its own drop file. A file
+/// that cannot be read answers "not dropped": that only costs the `(dropped)`
+/// detail.
 fn is_dropped(repo: &Repo, oid: &str) -> bool {
-    let Ok(run) = run_git(
-        repo.path(),
-        &["rev-parse", "--git-path", DROPPED_FILE],
-        None,
-    ) else {
+    let Some(path) = repo.drop_record() else {
         return false;
-    };
-    if !run.succeeded() {
-        return false;
-    }
-    let path = PathBuf::from(String::from_utf8_lossy(&run.stdout).trim());
-    let path = if path.is_absolute() {
-        path
-    } else {
-        repo.path().join(path)
     };
     std::fs::read_to_string(path).is_ok_and(|text| text.lines().any(|line| line.trim() == oid))
 }
