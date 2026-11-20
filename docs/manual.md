@@ -208,12 +208,15 @@ not an error).
 `preset list` prints one row per preset: name, endpoint, algorithm, scope, the pinned fingerprint,
 the newest root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
 last 90 days and `expired` past it; where no certificate is pinned here the column shows a cached
-probe answer in the picker's words (`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`, `?`) or
-`-` for a row the cache cannot answer. A plain run reads the cache only and opens no socket; the
-week-long cache is shared with `tsa select`, and `--refresh` drops the entries, asks every authority
-and waits for the answers before printing. Either way the cache is the only write — a probe pins
-nothing. `tofu` and `not pinned` are the two tiers a hand-added, unpublished authority would need; no
-built-in row is in that position any more, so the table shows neither.
+probe answer in the picker's words (`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-`
+for a row the cache cannot answer. A plain run only ever reads, so it never prints `?`: that marker
+and `…` come from `--refresh`, the latter only when an answer arrives too late to be read. It opens
+no socket either — it paints the rows that answered from the cache, while a row that failed or
+served no published root has nothing stored and is asked again. The week-long cache is shared with
+`tsa select`, and `--refresh` drops the entries, asks every authority that publishes a root and waits
+for the answers before printing. Either way the cache is the only write — a probe pins nothing.
+`tofu` and `not pinned` are the two tiers a hand-added, unpublished authority would need; no built-in
+row is in that position any more, so the table shows neither.
 
 The `default` scope marks the curated pair — `freetsa` and `digicert`, both pinned against a
 measured root. It is what the selector recommends, not a preselection; `install` writes it only
@@ -329,14 +332,16 @@ The `pin` column is the trust tier: the root is checked against the table when i
 mismatch is a refusal. The date is the newest root's `notAfter`; a root in its last 90 days
 reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row is due
 a rotation before the answer refuses the fetch. `pin -` is a published root that is not pinned on
-this machine yet, and `enter` pins it. The `tofu` tier takes no built-in row any more: a row that
-publishes nothing can only be reviewed by
+this machine yet, and `enter` pins it; the probe below replaces the wording with `…` and then the
+served date on a live terminal, so `pin -` is what the line prompt keeps.
+The `tofu` tier takes no built-in row any more: a row that publishes nothing can only be reviewed by
 reading the fingerprint the command prints, and `git time anchor pin` records the pinned bundle's
 fingerprint in `time.anchors-lock` so a later change is caught. `http` marks a plain-`http`
 endpoint; the endpoint of the cursor row is printed in full below the list.
 
 Every authority that publishes a root is also probed in the background, four at a time, and the
-column fills itself in. Where nothing is pinned here the answer stands in for a pin: `fetch <date>`
+column fills itself in; a row that publishes nothing is never probed, because no reply could match
+it, and keeps its `tofu`. Where nothing is pinned here the answer stands in for a pin: `fetch <date>`
 is the newest root the authority served, `fetch expires <date>` inside its last 90 days and
 `fetch EXPIRED` past it. `fetch` is a word of its own, so a served date is never read as a pin. A
 probe pins nothing and writes no anchor — the only thing it leaves behind is the cache entry — and
@@ -348,9 +353,9 @@ against; a served root the bundle does not hold then appends `!` instead — tha
 rotated, and the answer is a review, not a replacement.
 
 An answer is kept for seven days in `$XDG_CONFIG_HOME/git-time/probe/<id>` (or `~/.config/…`), so a
-second run paints from the cache and opens no socket, and a date can be up to a week old; `r` drops
-the entries and asks again. `pin -` survives only where nothing has been asked — the line prompt —
-because a live terminal fills the cell in. `git time tsa preset list` reads the same cache — a plain
+second run paints the rows that answered from the cache and opens no socket for them; a row that
+failed or served no published root has nothing stored and is asked again. A date can be up to a week
+old; `r` drops the entries and asks again. `git time tsa preset list` reads the same cache — a plain
 run still fetches nothing — and its `--refresh` is the one option that drops the entries and asks
 instead.
 

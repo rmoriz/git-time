@@ -535,12 +535,21 @@ and shows a cached probe answer instead, in the words
 uses and judged when it is printed, or
 .B \-
 for a row the cache cannot answer.
+A plain run only ever reads, so it never prints
+.BR ? ;
+\fB?\fR and
+.B …
+come from
+.BR \-\-refresh ,
+the latter only when an answer arrives too late to be read.
 No current row is in the
 .B tofu
 position.
 .PP
-A plain run reads the probe cache only and opens no socket; the cache is shared
-with
+A plain run reads the probe cache only and opens no socket for the rows that
+answered; a row that failed or served no published root has nothing stored and
+is asked again.
+The cache is shared with
 .BR "tsa select" .
 Either way the cache is the only write: a probe pins nothing and writes no
 anchor.
@@ -549,6 +558,8 @@ Exits 0.
 .B \-\-refresh
 Drop the cached answers, ask every authority that publishes a root, and wait
 for the queue to drain before printing.
+A row that cannot answer prints
+.BR ? .
 .PP
 .B git time tsa preset add \fIname\fR [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ]
 .PP
@@ -615,11 +626,16 @@ and a published root not pinned on this machine reads
 .BR "pin \-" ;
 .B enter
 pins it. A root that disagrees with the table is a mismatch and a refusal.
+A live terminal replaces that wording with
+.B …
+and then the served date, so
 .B pin \-
-survives on the line prompt, which asks nothing.
+is what the line prompt keeps.
 .PP
 Every authority that publishes a root is also probed in the background, four at
-a time, and the column fills itself in.
+a time, and the column fills itself in; a row that publishes nothing is never
+probed, because no reply could match it, and keeps
+.BR tofu .
 Where nothing is pinned here the answer stands in for a pin: the newest root
 the authority served, being
 .BR "fetch \fIdate\fR" ,
@@ -646,8 +662,10 @@ An answer is kept for seven days at
 .B $XDG_CONFIG_HOME/git\-time/probe/<id>
 (or
 .BR ~/.config/git\-time/probe/<id> ),
-so a second run paints from the cache and opens no socket and a date can be up
-to a week old.
+so a second run paints the rows that answered from the cache and opens no
+socket for them; a row that failed or served no published root has nothing
+stored and is asked again.
+A date can be up to a week old.
 .B r
 drops the entries and asks again.
 .B tsa preset list
