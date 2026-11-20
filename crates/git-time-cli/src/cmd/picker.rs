@@ -508,7 +508,8 @@ fn row(
 /// A pin always wins over the probe, because the local bundle is what a seal is
 /// checked against. What the probe found is then a second fact: a served root
 /// the bundle does not hold appends ` !`, the rotation signal, instead of
-/// replacing the pinned date. A failed or unpublished probe marks nothing.
+/// replacing the pinned date. A failed or unpublished probe marks nothing of its
+/// own, but a marker the last cached answer recorded stands while it fails.
 ///
 /// Only a row with no root in the bundle shows the cell: `fetch [expires ]
 /// <date>`, `fetch EXPIRED`, `?` for a failed or unpublished probe, and `…`

@@ -537,7 +537,6 @@ fn rotated(
 }
 
 /// Print the built-in presets and whether their anchor is pinned here.
-/// Print the built-in presets and whether their anchor is pinned here.
 ///
 /// The date comes from the local bundle where there is one, newest live root
 /// first: for a preset that publishes no fingerprint that bundle is the only
