@@ -6,6 +6,8 @@ inside the commit object itself. Type nothing extra: install once, then keep com
 The promise is one line long — **type nothing extra**. No wrapper, no daemon, no extra command
 before or after a commit, and no prompt on the normal path.
 
+![git-time in a terminal: selecting authorities, installing the hooks, committing, verifying](docs/git-time.gif)
+
 ## Quick start
 
 ```console
@@ -255,6 +257,7 @@ X-RFC3161-Token: ver=1; id=freetsa; …
 - [Man page](docs/git-time.1) — the commands on one page, in roff.
 - [Design](docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md) — the contract and the
   measured probes behind it.
+- [Demo cast](docs/git-time.asciinema) — the asciinema recording behind the README GIF.
 - [Implementation status](docs/STATUS.md) — what ships, what deviates from the design, and why.
 
 ## License
