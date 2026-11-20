@@ -622,6 +622,12 @@ where a scope is shown.
 An unticked one loses its section too, though the bundle it names stays on
 disk; an unknown section with no url cannot be enabled and is left alone.
 Saving with nothing selected is therefore the removal path.
+A section that names only a url is still a row, but it cannot seal until it
+also names an
+.B anchor
+because the policy refuses a section without one;
+.B "git time tsa add"
+writes both keys.
 .PP
 The rows of the authorities already configured start ticked, so entering the
 selector to change one keeps the others; an unconfigured row starts clear.

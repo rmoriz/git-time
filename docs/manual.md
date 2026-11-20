@@ -305,7 +305,9 @@ sections that were not chosen. Every configured authority that carries a url is 
 built-ins followed by a configured id no built-in covers, which is listed after them and says
 `custom` where a scope is shown — so an unticked one loses its section too, though the bundle it
 names stays on disk; an unknown section with no url cannot be enabled and is left untouched.
-Saving with nothing selected is therefore the removal path.
+Saving with nothing selected is therefore the removal path. A section that names only a url is still
+a row, but it cannot seal until it names an `anchor` as well, because the policy refuses a section
+without one; `git time tsa add` writes both keys.
 
 The rows of the authorities already configured start ticked, so a change keeps the others that the
 user did not mean to touch; an unconfigured row starts clear. A custom row is kept, not pinned
