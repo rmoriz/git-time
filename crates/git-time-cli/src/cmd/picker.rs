@@ -15,7 +15,8 @@
 //! Probing happens in the driver's idle time. The opening snapshot comes from
 //! the cache, the first frame is painted from it, and answers are drained
 //! between key reads; a slow or dead authority costs a repaint and never the
-//! screen. `r` forgets the cache and asks again.
+//! screen. `r` asks every authority again, keeping the previous dates until a
+//! fresh answer replaces them.
 //!
 //! Terminal control is `stty` and nothing else: no new runtime dependency.
 //! `-g` captures the current settings, `raw -echo min 0 time 1` makes reads
@@ -333,15 +334,20 @@ impl Probes {
 /// Where the terminal is too narrow for the whole row, the trust cell is what is
 /// cut, so the served date never hides the transport.
 ///
-/// At most `rows - 1` lines, at most `cols - 1` columns, lines separated by
-/// `\r\n` and the last one not terminated. All three leave the bottom row and
-/// the last column free: a line that fills the last column wraps, a trailing
-/// newline advances a line, and either scrolls a screen that is already full.
-/// The list is a window that keeps the cursor visible and marks a cut edge with
-/// `…`; the footer (URL, help, count, prompt, the probe tally, error) is always
-/// there. Below the room the footer needs, it degrades: first the cut marks go,
-/// then the help, then the count — the URL, the prompt, the tally and the error
-/// stay, and so does the cursor row.
+/// At most `rows - 1` lines from seven rows up, at most `cols - 1` columns,
+/// lines separated by `\r\n` and the last one not terminated. All three leave
+/// the bottom row and the last column free: a line that fills the last column
+/// wraps, a trailing newline advances a line, and either scrolls a screen that
+/// is already full. The list is a window that keeps the cursor visible and marks
+/// a cut edge with `…`; the footer (URL, help, count, prompt, the probe tally,
+/// error) is always there. Below the room the footer needs, it degrades: first
+/// the cut marks go, then the help, then the count — the URL, the prompt, the
+/// tally and the error stay, and so does the cursor row.
+///
+/// The frame needs seven rows to stay inside the terminal: four footer lines,
+/// one for the screen edge and one cursor row leave one spare for a cut mark.
+/// Under seven the footer wins and the frame may reach past the bottom; the
+/// cursor row is still in it.
 #[must_use]
 pub fn frame(
     selection: &Selection,
@@ -768,7 +774,15 @@ fn take(probes: &mut Probes, results: Vec<(usize, probe::Served)>) -> bool {
     true
 }
 
-/// Drop the cached answers, mark every probed row waiting and ask again.
+/// Requeue the probed rows and mark them waiting.
+///
+/// Nothing is dropped up front: the requeue forces the fetch, so the old entry
+/// only matters when the answer is not [`probe::Served::Known`]. A failed or
+/// unpublished reply therefore leaves the previous entry in place, still stamped
+/// with its old fetch time, and the TTL ages it out on its own — a refresh run
+/// into a network blip does not cost the dates the next run would show. The cell
+/// still goes [`Cell::Pending`] so the frame shows the work; after a failure it
+/// stays `?` for this run.
 ///
 /// `presets` is the table the prober was started on, so its indices are the
 /// queue's. An idle row publishes nothing, so it is skipped rather than being
@@ -783,7 +797,6 @@ fn refresh(presets: &[Preset], probes: &mut Probes, prober: &probe::Prober) {
         if preset.fingerprints.is_empty() {
             idle.push(index);
         } else {
-            let _ = probe::forget(preset.name);
             probes.set(index, Cell::Pending);
         }
     }
@@ -2010,9 +2023,11 @@ mod tests {
         probes.set(certum, Cell::Known(cached("2035-02-09")));
         super::refresh(&presets::PRESETS, &mut probes, &prober);
         assert!(matches!(probes.cell(certum), Cell::Pending), "asked again");
+        // Nothing is dropped up front: until a `Known` answer overwrites it, the
+        // old entry survives a refresh whose replies fail.
         assert!(
-            super::probe::cached("certum", jiff::Timestamp::now()).is_none(),
-            "the cached answer is dropped"
+            super::probe::cached("certum", jiff::Timestamp::now()).is_some(),
+            "the cached answer survives the requeue"
         );
 
         // A preset that publishes no root would only ever answer `Unpublished`,

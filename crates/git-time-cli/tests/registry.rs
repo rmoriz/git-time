@@ -1921,6 +1921,34 @@ fn preset_list_reads_the_probe_cache_and_only_refreshes_on_demand() {
         freetsa(&again).iter().any(|field| field == "2041-03-07"),
         "{again}"
     );
+
+    // (c) A refresh whose fetch fails keeps the date the last successful one
+    // cached: nothing is dropped up front, so a transient blip does not cost a
+    // later run the answer. The row itself is `?` for this run — the refresh did
+    // fail — but the entry is still there.
+    let failing = vec![(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        "echo x >> '${calls_file}'; exit 1".replace("${calls_file}", &pstr(&calls_file)),
+    )];
+    let broken = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &failing));
+    assert!(
+        entry.exists(),
+        "the failed refresh left the entry: {broken}"
+    );
+    assert!(
+        freetsa(&broken).iter().any(|field| field == "?"),
+        "the failed refresh says so: {broken}"
+    );
+    // The next plain run reads the surviving entry, not `-`.
+    let survivor = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
+    assert!(
+        freetsa(&survivor).iter().any(|field| field == "2041-03-07"),
+        "the cached date survives: {survivor}"
+    );
+    assert!(
+        !freetsa(&survivor).iter().any(|field| field == "-"),
+        "{survivor}"
+    );
 }
 
 #[test]
@@ -2524,18 +2552,35 @@ fn select_probes_the_open_rows_and_answers_from_the_cache_offline() {
     assert!(!cache.contains("BEGIN CERTIFICATE"), "{cache}");
     assert_eq!(cache.lines().count(), 1, "one line: {cache}");
 
-    // The stub now fails, so nothing can be re-probed; the date already cached
-    // is still what the row shows.
+    // The stub now fails. Pressing `r` requeues every row while nothing can
+    // answer: the rows go `?` for that run, but no entry is dropped first, so the
+    // date already cached survives and the next open shows it instead of `-`.
     let Some(broken) = repo.run_time_pty(
+        &["tsa", "select"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", "exit 1".to_owned())],
+        "r q\n",
+    ) else {
+        eprintln!("no script(1) here: the offline refresh was not exercised");
+        return;
+    };
+    assert!(broken.status.success(), "{}", text(&broken.stderr));
+    let survived = std::fs::read_to_string(&entry).expect("the cache survived the refresh");
+    assert!(survived.contains("2041-03-07"), "{survived}");
+    // A further open, still offline, seeds the row from that entry.
+    let Some(reopened) = repo.run_time_pty(
         &["tsa", "select"],
         &[("GIT_TIME_ANCHOR_FETCH_CMD", "exit 1".to_owned())],
         "q\n",
     ) else {
-        eprintln!("no script(1) here: the offline run was not exercised");
+        eprintln!("no script(1) here: the offline reopen was not exercised");
         return;
     };
-    let stdout = text(&broken.stdout);
-    assert!(broken.status.success(), "{stdout}{}", text(&broken.stderr));
+    let stdout = text(&reopened.stdout);
+    assert!(
+        reopened.status.success(),
+        "{stdout}{}",
+        text(&reopened.stderr)
+    );
     assert!(stdout.contains("fetch 2041-03-07"), "{stdout}");
 }
 

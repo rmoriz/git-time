@@ -209,13 +209,15 @@ not an error).
 the newest root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
 last 90 days and `expired` past it; where no certificate is pinned here the column shows a cached
 probe answer in the picker's words (`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-`
-for a row the cache cannot answer. A plain run only ever reads, so it never prints `?`: that marker
-and `…` come from `--refresh`, the latter only when an answer arrives too late to be read. It opens
-no socket at all — the rows that answered are painted from the cache, and a row that failed or served
-no published root has nothing stored, so it keeps `-` here; the next `--refresh` asks it again. The
-week-long cache is shared with `tsa select`, and `--refresh` drops the entries, asks every authority
-that publishes a root and waits for the answers before printing. Either way the cache is the only
-write — a probe pins nothing.
+for a row the cache cannot answer. A pinned row whose authority serves a root the local bundle does
+not hold appends ` !` to the date: that authority has rotated, and the answer is a review. A plain run
+only ever reads, so it never prints `?`: that marker and `…` come from `--refresh`, the latter only
+when an answer arrives too late to be read. It opens no socket at all — the rows that answered are
+painted from the cache, and a row that failed or served no published root and has no entry keeps `-`
+here; the next `--refresh` asks it again. The week-long cache is shared with `tsa select`, and
+`--refresh` asks every authority that publishes a root and waits for the answers before printing. A
+refresh drops nothing first, so one that fails leaves the previous date in place until its seven days
+run out. Either way the cache is the only write — a probe pins nothing.
 `tofu` and `not pinned` are the two tiers a hand-added, unpublished authority would need; no built-in
 row is in that position any more, so the table shows neither.
 
@@ -355,10 +357,10 @@ rotated, and the answer is a review, not a replacement.
 
 An answer is kept for seven days in `$XDG_CONFIG_HOME/git-time/probe/<id>` (or `~/.config/…`), so a
 second run paints the rows that answered from the cache and opens no socket for them; a row that
-failed or served no published root has nothing stored and is asked again. A date can be up to a week
-old; `r` drops the entries and asks again. `git time tsa preset list` reads the same cache — a plain
-run still fetches nothing — and its `--refresh` is the one option that drops the entries and asks
-instead.
+failed or served no published root and has no entry is asked again. A date can be up to a week old;
+`r` asks again without dropping anything first, so a failed refresh keeps the previous answer until
+it ages out. `git time tsa preset list` reads the same cache — a plain run still fetches nothing —
+and its `--refresh` is the one option that asks instead.
 
 A probe is a display aid, never evidence: a date is worth exactly what the publication behind it is,
 and a `!` is worth a look at that publication.

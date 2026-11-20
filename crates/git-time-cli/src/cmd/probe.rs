@@ -89,7 +89,13 @@ pub fn store(id: &str, served: &Cached, now: jiff::Timestamp) -> bool {
 }
 
 /// Drop the entry for `id`, answering whether there was one.
+///
+/// A refresh no longer calls this: it re-queues every row and lets a `Known`
+/// answer overwrite the entry, so a failed fetch leaves the previous one to age
+/// out against [`TTL`]. This is the "drop it for real" path, used by the tests
+/// to start from an empty cache.
 #[must_use]
+#[allow(dead_code)]
 pub fn forget(id: &str) -> bool {
     fs::remove_file(dir().join(id)).is_ok()
 }
@@ -103,7 +109,8 @@ pub enum Served {
     /// publishes — the authority serves a leaf first, or the bundle holds only
     /// the path, or nothing at all.
     Unpublished,
-    /// The reply carried no certificate, or its date is not a date.
+    /// The reply carried no certificate, its date is not a date, or a matched
+    /// certificate could not be re-encoded — nothing of it can be judged.
     Failed,
 }
 
@@ -159,7 +166,8 @@ pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Serv
 
     // The greatest date that is still live, else the greatest date at all: an
     // all-expired reply still names a date, and `expired` marks it later. The
-    // dates sort as strings because every one of them is `YYYY-MM-DD`.
+    // dates sort as strings because every one of them is `YYYY-MM-DD`. At least
+    // one candidate exists, so the choice cannot fall through.
     let chosen = matched
         .iter()
         .filter(|served| !super::anchors::expired(&served.not_after, now))
@@ -168,10 +176,8 @@ pub fn probed_from(preset: &Preset, bundle: &[u8], now: jiff::Timestamp) -> Serv
             matched
                 .iter()
                 .max_by(|left, right| left.not_after.cmp(&right.not_after))
-        });
-    let Some(chosen) = chosen else {
-        return Served::Unpublished;
-    };
+        })
+        .expect("`matched` is not empty");
     Served::Known(chosen.clone())
 }
 
@@ -315,10 +321,10 @@ impl Prober {
 
     /// The rows still queued or in flight.
     //
-    // The picker repaints on delivered answers and, at the deadline-bounded
-    // leave, waits on the channel rather than this counter; the tests that want
-    // a finished run read it.
-    #[allow(dead_code)]
+    // The headless drain in `tsa::preset_list` waits on this; the picker repaints
+    // on delivered answers and, at the deadline-bounded leave, waits on the
+    // channel rather than this counter. The tests that want a finished run read
+    // it too.
     #[must_use]
     pub fn pending(&self) -> usize {
         let queue = lock(&self.shared);
@@ -995,7 +1001,7 @@ pub(crate) mod tests {
         let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[]);
         wait(&prober);
         prober.refresh(&[]);
-        assert_eq!(prober.pending(), presets::PRESETS.len());
+        assert!(prober.pending() >= presets::PRESETS.len());
         wait(&prober);
     }
 

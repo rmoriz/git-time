@@ -85,8 +85,10 @@ answer "which of these is about to expire".
   `fetch <date>`, `fetch expires <date>` within 90 days, `fetch EXPIRED` past,
   `…` while queued or in flight, `?` when the probe failed. `TRUST_WIDTH` grows
   to 24 to fit `fetch expires <date>`.
-- **`r` refreshes**: invalidate every entry, requeue every row, repaint. The
-  help line gains it.
+- **`r` refreshes**: requeue every row, repaint. The help line gains it. No
+  entry is dropped first: the requeue forces the fetch, and a reply that is not
+  `Known` leaves the previous entry to age out against the TTL, so a refresh
+  during a network blip does not wipe the dates the next run shows.
 - **`tsa preset list`** reads the cache and never fetches, gaining `--refresh`
   that runs the same probe and prints the same column.
 - **The last frame before the user leaves is not special**: no fetch is repeated
@@ -106,7 +108,7 @@ answer "which of these is about to expire".
 | picker opens with no cache | first frame draws before any fetch is awaited |
 | entry fresh | that id is not fetched |
 | entry 8 days old | that id is refetched |
-| `r` | every id is refetched, old entries replaced |
+| `r` | every id is refetched, a `Known` answer replaces the old entry |
 | stub serves a published root | `fetch <date>` |
 | stub serves a foreign root | `?` and `served root not published` |
 | stub fails | `?`, the picker still saves |
