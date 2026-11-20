@@ -211,10 +211,11 @@ last 90 days and `expired` past it; where no certificate is pinned here the colu
 probe answer in the picker's words (`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-`
 for a row the cache cannot answer. A plain run only ever reads, so it never prints `?`: that marker
 and `…` come from `--refresh`, the latter only when an answer arrives too late to be read. It opens
-no socket either — it paints the rows that answered from the cache, while a row that failed or
-served no published root has nothing stored and is asked again. The week-long cache is shared with
-`tsa select`, and `--refresh` drops the entries, asks every authority that publishes a root and waits
-for the answers before printing. Either way the cache is the only write — a probe pins nothing.
+no socket at all — the rows that answered are painted from the cache, and a row that failed or served
+no published root has nothing stored, so it keeps `-` here; the next `--refresh` asks it again. The
+week-long cache is shared with `tsa select`, and `--refresh` drops the entries, asks every authority
+that publishes a root and waits for the answers before printing. Either way the cache is the only
+write — a probe pins nothing.
 `tofu` and `not pinned` are the two tiers a hand-added, unpublished authority would need; no built-in
 row is in that position any more, so the table shows neither.
 

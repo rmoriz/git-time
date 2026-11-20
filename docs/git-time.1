@@ -546,9 +546,13 @@ No current row is in the
 .B tofu
 position.
 .PP
-A plain run reads the probe cache only and opens no socket for the rows that
-answered; a row that failed or served no published root has nothing stored and
-is asked again.
+A plain run opens no socket at all: it paints the rows that answered from the
+cache and nothing is queued.
+A row that failed or served no published root has nothing stored, so it keeps
+.B \-
+here; the next
+.B \-\-refresh
+asks it again.
 The cache is shared with
 .BR "tsa select" .
 Either way the cache is the only write: a probe pins nothing and writes no
