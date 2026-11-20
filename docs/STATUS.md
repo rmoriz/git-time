@@ -4,6 +4,19 @@ Design: `docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md`
 Plan: `docs/superpowers/plans/2026-11-18-git-time-rfc3161.md`
 Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-18-git-time-rfc3161/progress.md`
 
+## Release notes (unreleased, since v0.1.0)
+
+- `tsa select` and `tsa preset list` show the expiry a published authority is actually serving
+  when no root is pinned here, so a rotation is visible before it is accepted. The answer is cached
+  for seven days under `$XDG_CONFIG_HOME/git-time/probe/`, and `--refresh` (or `r`) is the one path
+  that asks. A plain run stays offline.
+- A served root the local bundle does not hold appends ` !` — on `pin <date>` as well as beside
+  `?`. The marker is read from the cached answer, so a failed refresh keeps it instead of blinking
+  it off.
+- The cache only accepts the one entry shape a probe writes; a hand-edited or truncated line is a
+  miss and is refetched rather than shown as a date.
+- Listing a served date is judged against one instant per run, so a row cannot straddle an expiry.
+
 ## What works today
 
 `git commit` seals itself with RFC 3161 tokens from one or more authorities, verified locally
