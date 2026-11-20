@@ -2327,6 +2327,83 @@ fn select_none_removes_every_configured_row() {
     assert!(stdout.contains("disabled acme"), "{stdout}");
 }
 
+/// A section that exists only in the global config is still a ticked row,
+/// because the rows come from the merged config; `--local --remove-section` has
+/// nothing to delete for it. Unticking it must not abort the answer: the rest of
+/// the chosen set is still disabled and pinned, and the global section stays
+/// where a `--local` write cannot reach it. `--dry-run` promises the same.
+#[test]
+fn select_untickes_a_global_only_row_without_aborting() {
+    let repo = Repo::new();
+    repo.init();
+    let pinned = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive"],
+        &repo.fetch_known_root(),
+        "1\n",
+    );
+    assert_eq!(pinned.status.code(), Some(0), "{}", text(&pinned.stderr));
+    repo.add_tsa("acme", "http://tsa.example/tsr");
+
+    // The wider scope: a section that `--local` alone would refuse to remove.
+    let global = repo.path().join("global.gitconfig");
+    git(
+        repo.path(),
+        &[
+            "config",
+            "--file",
+            &pstr(&global),
+            "time.tsa.zz-global.url",
+            "https://tsa.example/tsr",
+        ],
+    );
+    let env = [("GIT_CONFIG_GLOBAL", pstr(&global))];
+
+    // The dry run prints the same lines the real run then keeps to.
+    let dry = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive", "--dry-run"],
+        &env,
+        "1\n",
+    );
+    assert_eq!(dry.status.code(), Some(0), "{}", text(&dry.stderr));
+    let promised = text(&dry.stdout);
+    assert!(promised.contains("would disable zz-global"), "{promised}");
+    assert!(promised.contains("would disable acme"), "{promised}");
+    assert_eq!(
+        repo.config("time.tsa.acme.url").as_deref(),
+        Some("http://tsa.example/tsr")
+    );
+
+    let mut answer = repo.fetch_known_root();
+    answer.extend(env.iter().map(|(key, value)| (*key, value.clone())));
+    let kept = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &answer, "1\n");
+    assert_eq!(kept.status.code(), Some(0), "{}", text(&kept.stderr));
+    let stdout = text(&kept.stdout);
+    assert!(stdout.contains("disabled zz-global"), "{stdout}");
+    assert!(stdout.contains("disabled acme"), "{stdout}");
+    assert!(stdout.contains("enabled freetsa "), "{stdout}");
+    assert!(
+        repo.config("time.tsa.freetsa.anchor").is_some(),
+        "freetsa is still pinned"
+    );
+    assert_eq!(repo.config("time.tsa.acme.url"), None);
+    assert_eq!(
+        repo.config("time.tsa.zz-global.url"),
+        None,
+        "not a local key"
+    );
+    let still_global = git(
+        repo.path(),
+        &[
+            "config",
+            "--file",
+            &pstr(&global),
+            "--get",
+            "time.tsa.zz-global.url",
+        ],
+    );
+    assert_eq!(text(&still_global).trim(), "https://tsa.example/tsr");
+}
+
 /// A typed buffer is the same selector over the same parser: exactly the named
 /// rows are enabled once it is entered.
 #[test]

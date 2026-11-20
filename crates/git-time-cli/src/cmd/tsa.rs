@@ -1371,8 +1371,14 @@ async fn apply(
 }
 
 /// Delete one authority's whole section, saying so.
+///
+/// [`rows`] reads the merged config, so an ambient `time.tsa.<id>` in a wider
+/// scope is a ticked row with nothing to remove locally. Unticking it must not
+/// abort the rest of the answer: the section simply stays where it lives, which
+/// is the honest outcome, because `--local` cannot reach it anyway. Only a
+/// missing *local* section is forgiven; every other failure still stops.
 fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
-    git_stdout(
+    match git_stdout(
         repo,
         &[
             "config",
@@ -1380,7 +1386,14 @@ fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
             "--remove-section",
             &format!("time.tsa.{id}"),
         ],
-    )?;
+    ) {
+        Ok(_) => {}
+        Err(exit) if exit.message().contains("no such section") => {
+            println!("disabled {id} (left in the wider scope)");
+            return Ok(());
+        }
+        Err(exit) => return Err(exit),
+    }
     println!("disabled {id}");
     Ok(())
 }
