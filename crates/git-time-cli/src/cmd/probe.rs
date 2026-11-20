@@ -501,6 +501,7 @@ pub(crate) mod tests {
     #[test]
     fn only_a_day_and_a_bare_sha256_parse() {
         let _guard = xdg_lock();
+        xdg();
         let now = jiff::Timestamp::from_second(1_800_000_000).expect("instant");
         let good = "cc".repeat(32);
         let cases = [

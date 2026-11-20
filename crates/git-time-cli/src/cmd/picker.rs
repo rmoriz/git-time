@@ -547,13 +547,13 @@ fn trust(
                 None => "EXPIRED".to_owned(),
             }
         };
-        let served = match cell {
+        let cached = match cell {
             Cell::Known(cached) => Some(cached),
             // A failed refresh, or a row still waiting, has no root of its own;
             // the marker comes from the last cached answer so it cannot blink.
             _ => probe::cached(preset.name, now),
         };
-        if let Some(cached) = served
+        if let Some(cached) = cached
             && !roots
                 .iter()
                 .any(|root| root.fingerprint == cached.fingerprint)
@@ -952,19 +952,23 @@ mod tests {
         super::anchors::fingerprint(&BASE64.decode(body).expect("base64"))
     }
 
-    /// Pin the FreeTSA fixture here, probe freetsa with `cell` and return its
-    /// row with the temp home, so `XDG_CONFIG_HOME` does not outlive the
-    /// directory it names. The caller holds the lock across the frame.
-    fn pinned_and_probed(cell: Cell) -> (String, tempfile::TempDir) {
+    /// Hold a temp home with the FreeTSA fixture pinned, so `XDG_CONFIG_HOME`
+    /// does not outlive the directory it names. The caller holds the lock
+    /// across the frame and keeps the directory alive.
+    fn pinned_home() -> tempfile::TempDir {
         let xdg = tempfile::TempDir::new().expect("xdg dir");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let anchors = xdg.path().join("git-time/anchors");
         std::fs::create_dir_all(&anchors).expect("anchors dir");
         std::fs::write(anchors.join("freetsa.pem"), FREETSA_ROOT).expect("pin a root");
-        let index = presets::PRESETS
-            .iter()
-            .position(|preset| preset.name == "freetsa")
-            .expect("the freetsa row");
+        xdg
+    }
+
+    /// Pin the FreeTSA fixture here, probe freetsa with `cell` and return its
+    /// row with the temp home.
+    fn pinned_and_probed(cell: Cell) -> (String, tempfile::TempDir) {
+        let xdg = pinned_home();
+        let index = index_of("freetsa");
         (rendered(&probes_with(&[(index, cell)]), index), xdg)
     }
 
@@ -1540,6 +1544,7 @@ mod tests {
 
     #[test]
     fn the_trust_column_says_the_pin_and_its_date() {
+        let _home = empty_home();
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(
             super::trust(
@@ -1564,6 +1569,7 @@ mod tests {
 
     #[test]
     fn an_authority_without_a_live_root_says_expired() {
+        let _home = empty_home();
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(
             super::trust(
@@ -1758,11 +1764,7 @@ mod tests {
     #[test]
     fn a_failed_probe_keeps_a_rotation_already_cached() {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
-        let xdg = tempfile::TempDir::new().expect("xdg dir");
-        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
-        let anchors = xdg.path().join("git-time/anchors");
-        std::fs::create_dir_all(&anchors).expect("anchors dir");
-        std::fs::write(anchors.join("freetsa.pem"), FREETSA_ROOT).expect("pin a root");
+        let _home = pinned_home();
         let _ = super::probe::store(
             "freetsa",
             &cached_of("2035-02-09", "cc".repeat(32)),

@@ -550,8 +550,9 @@ fn rotated(
 /// the cell shows `?`. The cache is the only write either way; a probe pins
 /// nothing.
 async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
-    // One instant for the local dates, so every pinned one is judged as of one
-    // moment (a served date is judged when it is printed).
+    // One instant for the local dates and the served ones, so every pinned row
+    // is judged as of one moment and a row cannot straddle an expiry between
+    // its date and its marker.
     let now = jiff::Timestamp::now();
     let (mut probes, missing) = picker::seed(&presets::PRESETS, now);
     // A plain run asks nothing, so its queue is empty and the loop below exits
