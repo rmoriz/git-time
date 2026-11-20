@@ -341,8 +341,9 @@ impl Probes {
 /// newline advances a line, and either scrolls a screen that is already full.
 /// The list is a window that keeps the cursor visible and marks a cut edge with
 /// `…`; the footer (URL, help, count, prompt, the probe tally, error) is always
-/// there. Below the room the footer needs, it degrades to the cursor row and the
-/// footer.
+/// there. Below the room the footer needs, it degrades: first the cut marks go,
+/// then the help, then the count — the URL, the prompt, the tally and the error
+/// stay, and so does the cursor row.
 #[must_use]
 pub fn frame(
     selection: &Selection,
@@ -357,11 +358,9 @@ pub fn frame(
     // One instant for the whole frame, so a repaint cannot straddle midnight.
     let now = jiff::Timestamp::now();
 
-    // The room the trust cell may take at this width: everything else on the row
-    // keeps its place, so a cut lands inside the cell instead of on `http`.
+    // One column short of the edge, or the terminal wraps the row and the next
+    // `\r\n` lands two lines down.
     let width = cols.saturating_sub(1).max(1);
-    let trust_width =
-        TRUST_WIDTH.min(width.saturating_sub(ROW_PREFIX_WIDTH + NAME_WIDTH + TRANSPORT_WIDTH));
 
     // Footer: URL, help, count, prompt, the probe tally, and the error line when
     // there is one.
@@ -395,16 +394,17 @@ pub fn frame(
             lines.push("  …".to_owned());
         }
         for (index, preset) in presets.iter().enumerate().take(end).skip(start) {
-            lines.push(row(selection, index, preset, probes, trust_width, now));
+            lines.push(row(selection, index, preset, probes, width, now));
         }
         if end < len {
             lines.push("  …".to_owned());
         }
     }
 
+    let count = format!("{} selected", selection.chosen().len());
     lines.push(format!("url: {url}"));
     lines.push(HELP.to_owned());
-    lines.push(format!("{} selected", selection.chosen().len()));
+    lines.push(count.clone());
     lines.push(format!("> {}_", selection.typed()));
     if failed > 0 {
         lines.push(format!("probe failed: {failed}"));
@@ -420,8 +420,9 @@ pub fn frame(
     }
 
     // A tall footer (a probe tally, an error) can leave no room for a cut mark;
-    // the cursor row and the footer matter more, so the marks go.
-    while lines.len() > rows.saturating_sub(1).max(1) {
+    // the cursor row and the footer matter more, so the marks go first.
+    let allowed = rows.saturating_sub(1).max(1);
+    while lines.len() > allowed {
         match lines.iter().position(|line| line == "  …") {
             Some(index) => {
                 lines.remove(index);
@@ -429,9 +430,17 @@ pub fn frame(
             None => break,
         }
     }
+    // Then the help and the count give way — a longer line each than the ones
+    // that stay, and nothing a reader needs to make the next key press.
+    for optional in [HELP, count.as_str()] {
+        if lines.len() <= allowed {
+            break;
+        }
+        if let Some(index) = lines.iter().position(|line| line == optional) {
+            lines.remove(index);
+        }
+    }
 
-    // One column short of the edge, or the terminal wraps the row and the next
-    // `\r\n` lands two lines down.
     let mut out = String::with_capacity((budget + footer) * 64);
     for (index, line) in lines.iter().enumerate() {
         if index > 0 {
@@ -448,7 +457,7 @@ fn row(
     index: usize,
     preset: &Preset,
     probes: &Probes,
-    trust_width: usize,
+    width: usize,
     now: jiff::Timestamp,
 ) -> String {
     let cursor = if index == selection.cursor() {
@@ -466,6 +475,18 @@ fn row(
         now,
         probes.cell(index),
     );
+    // A narrow terminal cuts the cell, not the transport: only the space that
+    // always trails the cell is reserved on a row that carries none, and at
+    // least one character of the cell survives so a narrow frame is not blank
+    // there.
+    let trailing = if preset.insecure_http {
+        TRANSPORT_WIDTH
+    } else {
+        1
+    };
+    let trust_width = TRUST_WIDTH
+        .min(width.saturating_sub(ROW_PREFIX_WIDTH + NAME_WIDTH + trailing))
+        .max(1);
     format!(
         " {cursor} [{tick}] {:>2}  {:<NAME_WIDTH$} {:<trust_width$} {}",
         index + 1,
@@ -776,6 +797,16 @@ mod tests {
         rendered(&probes_with(&[(index, cell)]), index)
     }
 
+    /// An empty `XDG_CONFIG_HOME` held for the test, so a row that has a bundle
+    /// on the machine running the suite still renders as unpinned. The lock is
+    /// returned first so it is dropped before the directory it guards.
+    fn empty_home() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let lock = crate::cmd::probe::tests::xdg_lock();
+        let xdg = tempfile::TempDir::new().expect("xdg dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
+        (lock, xdg)
+    }
+
     #[test]
     fn the_cursor_wraps_at_both_ends() {
         let mut selection = picked();
@@ -985,6 +1016,12 @@ mod tests {
         assert!(rendered.contains("0 selected"), "{rendered}");
         assert!(rendered.contains("enter save"), "{rendered}");
         assert!(rendered.contains("> _"), "{rendered}");
+        // Nothing was probed, so neither tally line is drawn.
+        assert!(!rendered.contains("probe failed:"), "{rendered}");
+        assert!(
+            !rendered.contains("served root not published:"),
+            "{rendered}"
+        );
     }
 
     /// Frame lines without the `\r`, so a test can compare and measure them.
@@ -1070,15 +1107,38 @@ mod tests {
             assert!(!rendered.ends_with('\n'), "no trailing line at {rows} rows");
         }
 
-        // The probe tally is two more footer lines: a short screen still has to
-        // keep the frame one line short of the bottom.
-        let probes = probes_with(&[(0, Cell::Failed), (2, Cell::Unpublished)]);
-        let rendered = frame(&picked(), &presets::PRESETS, &probes, 8, 80);
-        assert!(
-            rendered.lines().count() < 8,
-            "{} lines for 8 rows with a tall footer",
-            rendered.lines().count()
-        );
+        // Everything the footer can hold — an error, a failure and an
+        // unpublished row — still has to leave the last row free at every size,
+        // so the help and the count give way rather than overflow.
+        let probes = probes_with(&[(0, Cell::Failed), (6, Cell::Unpublished)]);
+        let mut selection = picked();
+        press(&mut selection, Key::Typed('9'));
+        press(&mut selection, Key::Typed('9'));
+        assert!(matches!(press(&mut selection, Key::Enter), Outcome::Stay));
+        assert!(selection.error().is_some(), "the premise: an error line");
+        for rows in 7..=24 {
+            let rendered = frame(&selection, &presets::PRESETS, &probes, rows, 80);
+            // `<= rows - 1`, spelled as clippy wants it.
+            assert!(
+                rendered.lines().count() < rows,
+                "{} lines for {rows} rows",
+                rendered.lines().count()
+            );
+        }
+        // What gives way is the help and the count, in that order — never the
+        // URL, the prompt, the tallies or the error.
+        let tight = frame(&selection, &presets::PRESETS, &probes, 7, 80);
+        for kept in [
+            "url: ",
+            "> 99_",
+            "probe failed: 1",
+            "served root not published: ",
+            "not a selection",
+        ] {
+            assert!(tight.contains(kept), "`{kept}` survives: {tight:?}");
+        }
+        assert!(!tight.contains(" selected"), "{tight:?}");
+        assert!(!tight.contains("enter save"), "{tight:?}");
     }
 
     #[test]
@@ -1429,20 +1489,29 @@ mod tests {
 
     #[test]
     fn an_unpinned_row_shows_the_served_date() {
-        let probes = probes_with(&[(3, Cell::Known(cached("2035-02-09")))]);
+        let _home = empty_home();
+        let probes = probes_with(&[(3, Cell::Known(cached("2099-01-01")))]);
         let line = rendered(&probes, 3);
-        assert!(line.contains("fetch 2035-02-09"), "{line:?}");
+        assert!(line.contains("fetch 2099-01-01"), "{line:?}");
     }
 
+    /// The near wording lives in `served`, so a fixed `now` keeps this from
+    /// expiring with the calendar; the frame reaching it is covered above.
     #[test]
     fn a_near_served_date_keeps_the_word_and_the_day() {
-        let probes = probes_with(&[(3, Cell::Known(cached("2027-01-01")))]);
-        let line = rendered(&probes, 3);
-        assert!(line.contains("fetch expires 2027-01-01"), "{line:?}");
+        assert_eq!(
+            super::served(&cached("2027-01-01"), at(2026, 12, 1)),
+            "fetch expires 2027-01-01"
+        );
+        assert_eq!(
+            super::served(&cached("2020-01-01"), at(2026, 12, 1)),
+            "fetch EXPIRED"
+        );
     }
 
     #[test]
     fn a_failed_or_unpublished_probe_is_a_question_mark() {
+        let _home = empty_home();
         for cell in [Cell::Failed, Cell::Unpublished] {
             let line = rendered(&probes_with(&[(3, cell)]), 3);
             assert!(line.contains(" ? "), "{line:?}");
@@ -1451,12 +1520,14 @@ mod tests {
 
     #[test]
     fn a_pending_row_knows_nothing_yet() {
+        let _home = empty_home();
         let line = rendered(&probes_with(&[(3, Cell::Pending)]), 3);
         assert!(line.contains(" … "), "{line:?}");
     }
 
     #[test]
     fn an_idle_row_keeps_the_old_wording() {
+        let _home = empty_home();
         let line = rendered(&probes_with(&[(3, Cell::Idle)]), 3);
         assert!(line.contains("pin -"), "{line:?}");
     }
@@ -1496,7 +1567,8 @@ mod tests {
 
     #[test]
     fn a_narrow_terminal_cuts_the_cell_not_the_transport() {
-        let probes = probes_with(&[(1, Cell::Known(cached("2035-02-09")))]);
+        let _home = empty_home();
+        let probes = probes_with(&[(1, Cell::Known(cached("2099-01-01")))]);
         let out = frame(&picked_at(1), &presets::PRESETS, &probes, 24, 40);
         for line in out.lines() {
             assert!(line.chars().count() <= 39, "{line:?}");
@@ -1506,6 +1578,41 @@ mod tests {
             .find(|line| line.contains("digicert"))
             .expect("the cursor row");
         assert!(row.ends_with("http"), "{row:?}");
+    }
+
+    /// One column narrower than the row's fixed parts: the cell saturates at one
+    /// character instead of eating the transport by one.
+    #[test]
+    fn a_very_narrow_row_keeps_the_transport() {
+        let _home = empty_home();
+        let probes = probes_with(&[(1, Cell::Known(cached("2099-01-01")))]);
+        let out = frame(&picked_at(1), &presets::PRESETS, &probes, 24, 36);
+        let row = out
+            .lines()
+            .find(|line| line.contains("digicert"))
+            .expect("the cursor row");
+        assert!(row.chars().count() <= 35, "{row:?}");
+        assert!(row.ends_with("ht…"), "{row:?}");
+    }
+
+    /// The help is the widest fixed line and sits one character inside an
+    /// 80-column frame's edge: a longer one would lose its tail, `q abort`
+    /// included, without a test noticing.
+    #[test]
+    fn the_help_line_is_not_cut() {
+        let rendered = frame(
+            &picked(),
+            &presets::PRESETS,
+            &Probes::idle(presets::PRESETS.len()),
+            24,
+            80,
+        );
+        let help = rendered
+            .lines()
+            .find(|line| line.contains("enter save"))
+            .expect("the help line");
+        assert_eq!(help, super::HELP);
+        assert!(help.chars().count() < 80, "{}", help.chars().count());
     }
 
     #[test]
