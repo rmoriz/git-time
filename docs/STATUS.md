@@ -16,6 +16,13 @@ Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-
 - The cache only accepts the one entry shape a probe writes; a hand-edited or truncated line is a
   miss and is refetched rather than shown as a date.
 - Listing a served date is judged against one instant per run, so a row cannot straddle an expiry.
+- `tsa select` and `tsa preset list` also list a configured `time.tsa.<id>` authority no preset
+  knows, after the built-ins and marked `custom` where a scope is shown. Such a row starts
+  ticked, is kept rather than fetched when chosen, and loses its section when unticked (the bundle
+  stays on disk). It publishes nothing, so it is never probed: it reads `tofu` until its own
+  bundle is pinned, `EXPIRED` once every root there is past, and is pinned with
+  `git time anchor fetch <url> --id <id> [--insecure-http]`. An unknown section with no url is no
+  row and survives a save.
 
 ## What works today
 
@@ -225,4 +232,8 @@ explicit parameters, still fails in `webpki` (see the known gaps).
   chain is signed SHA-1, or whose CA encodes its curve explicitly, is rejected as `invalid-untrusted`
   before the token itself is judged. The token's own CMS signature handles both shapes, so only the
   chain build relies on `webpki`; walking the chain ourselves would lift it.
-- `time-dropped` grows without pruning in long-lived clones.
+- `time-dropped` is bounded, not exact: `drop::prune` runs on every drop, on every hook seal and on
+  `seal --force`, and drops the entries whose object no longer resolves plus the oldest beyond 200.
+  A commit that still exists therefore leaves the record when it is sealed again with `--force`
+  (which forgets it) or when the cap pushes it out, and a file that cannot be rewritten leaves its
+  stale line behind, which `seal` reports as `skipped (dropped)`.

@@ -513,21 +513,36 @@ Exits 0, 1 for an unknown id, and 2 for a bad id or configuration error.
 .SS "tsa preset"
 .B git time tsa preset list [ \-\-refresh ]
 .PP
-Print the built\-in presets with their endpoint, algorithm, scope
-.B ( default
+Print the built\-in presets and every configured authority that carries a
+url, with their endpoint, algorithm, scope
+.B ( default ,
+.B opt\-in
 or
-.BR "opt\-in" ),
+.BR custom ),
 the newest fingerprint they publish
 .RB ( tofu
-only for a hand\-added row that publishes none), the newest root's expiry
-date, and
+only for a row that publishes none), the newest root's expiry date, and
 .B anchored
 or
 .BR missing .
+A
+.B custom
+row is a
+.B time.tsa.\fIid\fR
+section no built\-in row covers, and it is listed after the built\-ins.
+Nothing is published for it, so the listing never fetches it: its date comes
+from its own bundle, reading
+.B tofu
+until that bundle is pinned and
+.B EXPIRED
+once every root in it is past.
+Pin it with
+.BR "git time anchor fetch \fIurl\fR \-\-id \fIid\fR [ \-\-insecure\-http ]" ,
+which prints the fingerprint in full.
 The date carries
 .B (expires soon)
 in its last 90 days and
-.B expired
+.B EXPIRED
 past it; a published root that is not pinned here has no certificate to read
 and shows a cached probe answer instead, in the words
 .B tsa select
@@ -546,11 +561,12 @@ come from
 .BR \-\-refresh ,
 the latter only when an answer arrives too late to be read, and both only
 among the rows with no local pin.
+A custom row publishes nothing, so neither is ever queued for it.
 A pinned row keeps its pin date throughout and never trades it for the served
 one; an answer naming a foreign root marks it as above.
-No current row is in the
-.B tofu
-position.
+.B not pinned
+is the wording for a built\-in that publishes no root, and no built\-in is in
+that position any more.
 .PP
 A plain run opens no socket at all: it paints the rows that answered from the
 cache and nothing is queued.
@@ -597,15 +613,25 @@ configuration error.
 .SS "tsa select"
 .B git time tsa select [ \-\-interactive ] [ \-\-dry\-run ]
 .PP
-Choose interactively which preset authorities this repository uses, pin the
-chosen anchors, and remove preset sections that were not chosen.
-A section whose id is not a preset is untouched, so saving with nothing
-selected narrows the configuration.
+Choose interactively which authorities this repository uses, pin the chosen
+anchors that are built in, and remove the sections that were not chosen.
+Every configured authority that carries a url is a row: the built\-ins, then a
+configured id no built\-in covers, which is listed after them and says
+.B custom
+where a scope is shown.
+An unticked one loses its section too, though the bundle it names stays on
+disk; an unknown section with no url cannot be enabled and is left alone.
+Saving with nothing selected is therefore the removal path.
 .PP
 The rows of the authorities already configured start ticked, so entering the
 selector to change one keeps the others; an unconfigured row starts clear.
+A custom row is kept, not pinned again, because there is no published root to
+compare against, so its own bundle stays exactly as it is.
+Pin it with
+.BR "git time anchor fetch \fIurl\fR \-\-id \fIid\fR [ \-\-insecure\-http ]" ,
+which prints the fingerprint in full.
 .B n
-clears every tick, and saving that empty selection is how preset sections are
+clears every tick, and saving that empty selection is how sections are
 removed.
 .PP
 The list is a cursor interface:
@@ -622,7 +648,7 @@ or the arrow keys move,
 .B r
 refreshes,
 .B enter
-saves,
+saves and pins the built-in anchors among the ticks,
 .B q
 aborts.
 Type a selection
@@ -642,6 +668,13 @@ and a published root not pinned on this machine reads
 .BR "pin \-" ;
 .B enter
 pins it. A root that disagrees with the table is a mismatch and a refusal.
+.B tofu
+is a custom row's tier until its own bundle is pinned: nothing was published
+to compare, so the first pin can only be reviewed through the fingerprint
+.B anchor fetch
+prints, and once a bundle is there the row reads its date like any other, or
+.B EXPIRED
+once every root in it is past.
 A live terminal replaces that wording with
 .B …
 and then the served date, so
@@ -699,7 +732,7 @@ Without a terminal the command refuses rather than hanging.
 Prompt even when stdin is not a terminal, so a piped answer works.
 .TP
 .B \-\-dry\-run
-Print what would be enabled and disabled, change nothing.
+Print what would be enabled, kept and disabled, change nothing.
 .PP
 Exits 0, 1 when a chosen anchor cannot be pinned, and 2 without a terminal,
 after three unparseable answers, or on a configuration error.
