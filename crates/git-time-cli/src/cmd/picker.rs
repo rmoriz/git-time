@@ -1218,6 +1218,7 @@ mod tests {
             policy: None,
             fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
             insecure_http: true,
+            anchor_path: None,
             curated: false,
         }
     }
@@ -1520,6 +1521,7 @@ mod tests {
             policy: None,
             fingerprints: &[],
             insecure_http: true,
+            anchor_path: None,
             curated: false,
         }
     }

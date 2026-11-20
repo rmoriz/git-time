@@ -577,7 +577,10 @@ pub fn tsa_ids(repo: &Repo) -> Result<Vec<String>, Exit> {
 }
 
 /// The `key value` pairs of every `time.tsa.*` key.
-fn listing(repo: &Repo) -> Result<Vec<(String, String)>, Exit> {
+///
+/// `tsa::rows` reads the sections through this, so every reader works off the
+/// same list and the section fields are parsed in one place.
+pub(crate) fn listing(repo: &Repo) -> Result<Vec<(String, String)>, Exit> {
     let listing = match crate::cmd::git_stdout(repo, &["config", "--get-regexp", "^time\\.tsa\\."])
     {
         Ok(listing) => listing,

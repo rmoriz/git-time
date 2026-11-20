@@ -779,6 +779,7 @@ pub(crate) mod tests {
             policy: None,
             fingerprints,
             insecure_http: false,
+            anchor_path: None,
             curated: false,
         }
     }

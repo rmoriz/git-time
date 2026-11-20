@@ -23,7 +23,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use der::Decode as _;
@@ -948,11 +948,122 @@ fn accepted(
         .map_err(|error| Exit::usage(format!("{command}: {error}")))
 }
 
+/// One `time.tsa.<id>` section, as [`rows`] reads it.
+///
+/// An empty value counts as unset, as `local_get` reads a blanked key: a
+/// `url=` neither makes a row nor erases the preset's own url.
+#[derive(Default)]
+struct Section {
+    url: Option<String>,
+    anchor: Option<String>,
+    alg: Option<String>,
+    policy: Option<String>,
+    /// The `insecure-http` key, when set: the section wins over the preset's
+    /// own value, exactly as `Policy::load` reads it.
+    insecure_http: Option<bool>,
+}
+
+/// `text` leaked for the rest of the process.
+fn leak_text(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+/// `path` resolved against `repo` and leaked for the rest of the process.
+fn leak_path(repo: &Repo, path: &str) -> &'static Path {
+    Box::leak(anchors::resolve(repo, Path::new(path)).into_boxed_path())
+}
+
+/// The rows a surface shows: the built-in table, then every section a path in.
+///
+/// A configured id the table knows overrides its row from the section — the
+/// section is what seals, so the row must name what it points at, and a mirror
+/// still serves the published roots the `!` marker is judged against. An unknown
+/// id needs a url to be enableable at all, so a url-less section is no row and
+/// is left alone by `apply`. Strings are leaked: the process is about to exit,
+/// and every `&'static [Preset]` signature then stands unchanged.
+// Only the tests call this until the listings and `apply` take their rows from
+// it; the `pub(crate)` shape is for them, so the bin needs the exemption.
+#[allow(dead_code)]
+pub(crate) fn rows(repo: &Repo) -> Result<&'static [presets::Preset], Exit> {
+    let mut sections: BTreeMap<String, Section> = BTreeMap::new();
+    for (key, value) in anchors::listing(repo)? {
+        let Some(rest) = key.strip_prefix("time.tsa.") else {
+            continue;
+        };
+        let Some((id, field)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        let section = sections.entry(id.to_owned()).or_default();
+        let slot = match field {
+            "url" if !value.is_empty() => &mut section.url,
+            "anchor" if !value.is_empty() => &mut section.anchor,
+            "alg" if !value.is_empty() => &mut section.alg,
+            "policy" if !value.is_empty() => &mut section.policy,
+            "insecure-http" if !value.is_empty() => {
+                section.insecure_http = Some(reads_true(&value));
+                continue;
+            }
+            _ => continue,
+        };
+        *slot = Some(value);
+    }
+
+    let mut rows = presets::PRESETS.to_vec();
+    for id in anchors::tsa_ids(repo)? {
+        let Some(section) = sections.get(&id) else {
+            continue;
+        };
+        if let Some(index) = presets::PRESETS.iter().position(|preset| preset.name == id) {
+            if let Some(url) = &section.url {
+                rows[index].url = leak_text(url.clone());
+            }
+            if let Some(alg) = &section.alg {
+                rows[index].alg = leak_text(alg.clone());
+            }
+            if let Some(policy) = &section.policy {
+                rows[index].policy = Some(leak_text(policy.clone()));
+            }
+            // The configured key wins, as it does in `Policy::load`; an unset
+            // key leaves the preset's own transport alone.
+            if let Some(insecure_http) = section.insecure_http {
+                rows[index].insecure_http = insecure_http;
+            }
+            if let Some(anchor) = &section.anchor {
+                rows[index].anchor_path = Some(leak_path(repo, anchor));
+            }
+            continue;
+        }
+        let Some(url) = &section.url else {
+            continue;
+        };
+        rows.push(presets::Preset {
+            name: leak_text(id),
+            url: leak_text(url.clone()),
+            anchor_url: "",
+            chain: &[],
+            alg: leak_text(section.alg.clone().unwrap_or_else(|| "sha256".to_owned())),
+            policy: section
+                .policy
+                .as_ref()
+                .map(|policy| leak_text(policy.clone())),
+            fingerprints: &[],
+            insecure_http: section.insecure_http.unwrap_or(false),
+            anchor_path: section
+                .anchor
+                .as_ref()
+                .map(|anchor| leak_path(repo, anchor)),
+            curated: false,
+        });
+    }
+    Ok(Box::leak(rows.into_boxed_slice()))
+}
+
 /// The preset indices the configuration already enables, for the seed.
 ///
-/// Only preset ids are known to the table; a hand-added section has no row and
-/// stays untouched either way. The result is in table order, like the picker's
-/// own state, so a piped answer enables in the order shown.
+/// A hand-added section has a row now, but the seeding is still preset-only: it
+/// matches table ids, and a later task widens it to every configured row. The
+/// result is in table order, like the picker's own state, so a piped answer
+/// enables in the order shown.
 fn already_enabled(repo: &Repo) -> Result<Vec<usize>, Exit> {
     let ids = anchors::tsa_ids(repo)?;
     let mut seed: Vec<usize> = ids
@@ -1422,26 +1533,29 @@ mod tests {
     use git_time_core::presets;
     use git_time_core::repo::Repo;
 
-    /// Write `time.tsa.<id>.url` in the local config of `dir`.
-    fn configure(dir: &std::path::Path, id: &str) {
+    /// Write one local config key of `dir`.
+    fn set(dir: &std::path::Path, key: &str, value: &str) {
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
-            .args([
-                "config",
-                "--local",
-                &format!("time.tsa.{id}.url"),
-                &format!("https://tsa.example/{id}"),
-            ])
+            .args(["config", "--local", key, value])
             .status()
             .expect("git config");
-        assert!(status.success(), "configure {id}");
+        assert!(status.success(), "configure {key}");
     }
 
-    /// The seed holds the configured preset rows in table order, not in the
-    /// alphabetical order `tsa_ids` answers in, and a hand-added id is no row.
-    #[test]
-    fn the_seed_is_the_configured_presets_in_table_order() {
+    /// Write `time.tsa.<id>.url` and/or `time.tsa.<id>.anchor` in the local
+    /// config of `dir`.
+    fn configure(dir: &std::path::Path, id: &str, url: Option<&str>, anchor: Option<&str>) {
+        for (field, value) in [("url", url), ("anchor", anchor)] {
+            let Some(value) = value else { continue };
+            set(dir, &format!("time.tsa.{id}.{field}"), value);
+        }
+    }
+
+    /// A repository in a fresh temp dir. The caller runs these tests with the
+    /// global and system configs nulled, so only the local config is in play.
+    fn repository() -> (tempfile::TempDir, Repo) {
         let dir = tempfile::TempDir::new().expect("temp dir");
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -1450,12 +1564,163 @@ mod tests {
             .expect("git init");
         assert!(status.success(), "init");
         let repo = Repo::open(dir.path()).expect("a repository");
+        (dir, repo)
+    }
+
+    /// The seed holds the configured preset rows in table order, not in the
+    /// alphabetical order `tsa_ids` answers in, and a hand-added id is no row.
+    #[test]
+    fn the_seed_is_the_configured_presets_in_table_order() {
+        let (dir, repo) = repository();
         // Reverse of the table, and a hand-added id with no row.
-        configure(dir.path(), "digicert");
-        configure(dir.path(), "freetsa");
-        configure(dir.path(), "acme");
+        configure(
+            dir.path(),
+            "digicert",
+            Some("https://tsa.example/digicert"),
+            None,
+        );
+        configure(
+            dir.path(),
+            "freetsa",
+            Some("https://tsa.example/freetsa"),
+            None,
+        );
+        configure(dir.path(), "acme", Some("https://tsa.example/acme"), None);
 
         assert_eq!(already_enabled(&repo).expect("the seed"), [0, 1]);
+    }
+
+    /// A configured unknown id joins the table as a last, custom, TOFU row that
+    /// names the section's endpoint and its configured bundle.
+    #[test]
+    fn a_configured_section_is_a_custom_row_last_with_tofu() {
+        let (dir, repo) = repository();
+        configure(
+            dir.path(),
+            "zz-acme",
+            Some("https://tsa.acme.example/tsr"),
+            Some("bundles/acme.pem"),
+        );
+
+        let rows = super::rows(&repo).expect("rows");
+        assert_eq!(rows.len(), presets::PRESETS.len() + 1);
+        let last = rows.last().expect("a custom row");
+        assert_eq!(last.name, "zz-acme");
+        assert_eq!(last.url, "https://tsa.acme.example/tsr");
+        assert!(last.fingerprints.is_empty(), "an unknown id is TOFU");
+        assert_eq!(
+            last.anchor_path,
+            Some(dir.path().join("bundles/acme.pem").as_path())
+        );
+        assert!(!last.curated, "a custom row is never a default");
+    }
+
+    /// A section with an anchor but no url cannot be enabled, so it is no row.
+    #[test]
+    fn an_unknown_section_without_a_url_is_no_row() {
+        let (dir, repo) = repository();
+        configure(dir.path(), "zz-noauth", None, Some("bundles/noauth.pem"));
+
+        let rows = super::rows(&repo).expect("rows");
+        assert_eq!(rows.len(), presets::PRESETS.len());
+        assert!(rows.iter().all(|row| row.name != "zz-noauth"));
+    }
+
+    /// A configured id the table knows overrides its row from the section: the
+    /// row must name what the repository actually seals with, and the section's
+    /// algorithm, policy and transport win over the published ones.
+    #[test]
+    fn a_configured_preset_takes_the_section_url_and_path() {
+        let (dir, repo) = repository();
+        configure(
+            dir.path(),
+            "freetsa",
+            Some("https://mirror.example/tsr"),
+            Some("bundles/freetsa.pem"),
+        );
+        set(dir.path(), "time.tsa.freetsa.alg", "sha512");
+        set(dir.path(), "time.tsa.freetsa.policy", "1.2.3.4.9");
+        set(dir.path(), "time.tsa.freetsa.insecure-http", "true");
+        // A plain-http preset can be un-marked by an explicit `false`.
+        configure(
+            dir.path(),
+            "digicert",
+            Some("http://digicert.example"),
+            None,
+        );
+        set(dir.path(), "time.tsa.digicert.insecure-http", "false");
+        // An unset key leaves the preset's own value alone.
+        configure(dir.path(), "apple", Some("http://apple.example"), None);
+
+        let rows = super::rows(&repo).expect("rows");
+        let freetsa: Vec<_> = rows.iter().filter(|row| row.name == "freetsa").collect();
+        assert_eq!(freetsa.len(), 1, "no duplicate row");
+        assert_eq!(freetsa[0].url, "https://mirror.example/tsr");
+        assert_eq!(freetsa[0].alg, "sha512");
+        assert_eq!(freetsa[0].policy, Some("1.2.3.4.9"));
+        assert!(freetsa[0].insecure_http, "the section marks it plain http");
+        assert_eq!(
+            freetsa[0].anchor_path,
+            Some(dir.path().join("bundles/freetsa.pem").as_path())
+        );
+
+        let digicert = rows
+            .iter()
+            .find(|row| row.name == "digicert")
+            .expect("a row");
+        assert!(
+            presets::find("digicert")
+                .expect("a plain-http preset")
+                .insecure_http,
+            "the preset is plain http before the section says otherwise"
+        );
+        assert!(
+            !digicert.insecure_http,
+            "a configured `false` un-marks a plain-http preset"
+        );
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "apple")
+                .expect("a row")
+                .insecure_http,
+            "an unset key keeps the preset's own value"
+        );
+    }
+
+    /// A preset id with an anchor but no url is still a row: the preset
+    /// supplies the endpoint, the section the bundle path.
+    #[test]
+    fn a_preset_with_only_an_anchor_keeps_its_url() {
+        let (dir, repo) = repository();
+        configure(dir.path(), "cesnet", None, Some("bundles/cesnet.pem"));
+
+        let rows = super::rows(&repo).expect("rows");
+        let cesnet: Vec<_> = rows.iter().filter(|row| row.name == "cesnet").collect();
+        assert_eq!(cesnet.len(), 1);
+        assert_eq!(
+            cesnet[0].url,
+            presets::find("cesnet").expect("a preset").url
+        );
+        assert_eq!(
+            cesnet[0].anchor_path,
+            Some(dir.path().join("bundles/cesnet.pem").as_path())
+        );
+    }
+
+    /// Custom rows follow the table in id order and never repeat an id.
+    #[test]
+    fn custom_rows_are_sorted_and_never_duplicate() {
+        let (dir, repo) = repository();
+        configure(dir.path(), "zz-b", Some("https://tsa.example/b"), None);
+        configure(dir.path(), "zz-a", Some("https://tsa.example/a"), None);
+
+        let rows = super::rows(&repo).expect("rows");
+        let custom: Vec<&str> = rows
+            .iter()
+            .skip(presets::PRESETS.len())
+            .map(|row| row.name)
+            .collect();
+        assert_eq!(custom, ["zz-a", "zz-b"]);
     }
 
     /// The cursor UI opens on the seed. No pty exists in the suite, so the
@@ -1502,6 +1767,7 @@ mod tests {
             policy: None,
             fingerprints: &[],
             insecure_http: true,
+            anchor_path: None,
             curated: false,
         };
         // Nothing was asked, which is the only no-date wording a plain run has.
