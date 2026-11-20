@@ -58,14 +58,20 @@ pub fn dir() -> PathBuf {
     config_home().join("git-time").join("anchors")
 }
 
-/// The bundle path for `preset`: the configured `anchor` when the repository
-/// named one, else the default `dir()/<name>.pem` that `install` writes.
+/// The bundle path of `id`: `configured` when the repository named one, else the
+/// default `dir()/<id>.pem` that `install` writes.
+///
+/// A freshly fetched bundle written anywhere else would print a fingerprint of a
+/// file the policy never reads, so every reader and writer resolves through this
+/// one expression.
+fn path_for(configured: Option<&Path>, id: &str) -> PathBuf {
+    configured.map_or_else(|| dir().join(format!("{id}.pem")), Path::to_path_buf)
+}
+
+/// The bundle path for `preset`, from its own configured `anchor`.
 #[must_use]
 pub fn bundle_path(preset: &Preset) -> PathBuf {
-    preset
-        .anchor_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| dir().join(format!("{}.pem", preset.name)))
+    path_for(preset.anchor_path, preset.name)
 }
 
 /// The lowercase hex SHA-256 fingerprint of `bytes`.
@@ -650,10 +656,11 @@ pub fn configured(repo: &Repo) -> Result<Vec<Configured>, Exit> {
 /// A freshly fetched bundle written anywhere else would print a fingerprint of
 /// a file the policy never reads, so every writer resolves through this.
 pub fn target(repo: &Repo, id: &str) -> Result<PathBuf, Exit> {
-    Ok(configured(repo)?
+    let configured = configured(repo)?
         .into_iter()
         .find(|anchor| anchor.id == id)
-        .map_or_else(|| dir().join(format!("{id}.pem")), |anchor| anchor.path))
+        .map(|anchor| anchor.path);
+    Ok(path_for(configured.as_deref(), id))
 }
 
 /// Whether the repository has any `time.tsa.*` key, whatever the id.

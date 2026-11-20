@@ -536,7 +536,12 @@ fn parse_enum<T: Copy>(
         })
 }
 
-fn parse_bool(value: &str, key: &str) -> Result<bool, ConfigError> {
+/// Parse a git boolean, the spelling `insecure-http` is written in.
+///
+/// Public because a surface that shows a value without loading the whole policy
+/// — the authority rows — must accept exactly the spellings a load accepts; an
+/// invalid value is an error here, as it is in [`Policy::load`].
+pub fn parse_bool(value: &str, key: &str) -> Result<bool, ConfigError> {
     match value.to_ascii_lowercase().as_str() {
         "true" | "yes" | "on" | "1" => Ok(true),
         "false" | "no" | "off" | "0" => Ok(false),

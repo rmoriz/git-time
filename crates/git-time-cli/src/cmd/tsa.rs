@@ -910,8 +910,10 @@ fn needs_a_terminal() -> Exit {
 /// where an answer is expected.
 ///
 /// `accept` is forwarded from `install`, whose own `--accept` would otherwise be
-/// dropped by the handover: the ids it can name are the chosen preset rows,
-/// because those are the only ids this run fetches.
+/// dropped by the handover. A bare fingerprint resolves against the chosen
+/// preset rows only, because those are the only rows this run fetches; an
+/// `<id>=` value is used only when the id is one of them, and a custom row says
+/// its value goes unused.
 pub(crate) async fn select(
     repo: &Repo,
     accept: &[String],
@@ -972,15 +974,32 @@ pub(crate) async fn select(
 /// A bare fingerprint is unambiguous only when one row was chosen, so the ids in
 /// play are the chosen ones and nothing else. A custom row contributes no id:
 /// there is no anchor url to fetch, so its bundle is never reviewed by this run.
+/// An `<id>=` value naming such a row is therefore taken and then unused; it
+/// says so rather than leaving the writer to wonder.
 fn accepted(
     accept: &[String],
     chosen: &[usize],
     rows: &[presets::Preset],
     command: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Exit> {
-    let ids: Vec<&str> = chosen
-        .iter()
-        .filter_map(|index| rows.get(*index))
+    let picked: Vec<&presets::Preset> =
+        chosen.iter().filter_map(|index| rows.get(*index)).collect();
+    for value in accept {
+        let Ok((id, _)) = crate::cmd::accept::parse(value) else {
+            continue;
+        };
+        if picked
+            .iter()
+            .any(|preset| preset.name == id && presets::find(preset.name).is_none())
+        {
+            println!(
+                "{command}: `{id}` is a custom row and its bundle is not fetched; the `--accept` \
+                 value is unused"
+            );
+        }
+    }
+    let ids: Vec<&str> = picked
+        .into_iter()
         .filter(|preset| presets::find(preset.name).is_some())
         .map(|preset| preset.name)
         .collect();
@@ -998,8 +1017,10 @@ struct Section {
     anchor: Option<String>,
     alg: Option<String>,
     policy: Option<String>,
-    /// The `insecure-http` key, when set: the section wins over the preset's
-    /// own value, exactly as `Policy::load` reads it.
+    /// The `insecure-http` key, when set and parseable: the section wins over
+    /// the preset's own value, exactly as `Policy::load` reads it. An invalid
+    /// value is `None` here, keeping the preset's default next to the refusal a
+    /// load reports.
     insecure_http: Option<bool>,
 }
 
@@ -1037,7 +1058,12 @@ pub(crate) fn rows(repo: &Repo) -> Result<&'static [presets::Preset], Exit> {
             "alg" if !value.is_empty() => &mut section.alg,
             "policy" if !value.is_empty() => &mut section.policy,
             "insecure-http" if !value.is_empty() => {
-                section.insecure_http = Some(reads_true(&value));
+                // The policy's parser, so a spelling that loads cannot read as
+                // `false` here. An invalid value is refused at seal time; that
+                // row still keeps the preset's own default rather than claiming
+                // a `false` the policy never accepted.
+                section.insecure_http =
+                    git_time_core::policy::parse_bool(&value, "time.tsa.insecure-http").ok();
                 continue;
             }
             _ => continue,
@@ -1312,12 +1338,8 @@ async fn apply(
                     }
                     continue;
                 }
-                let anchor = anchors::configured(repo)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|anchor| anchor.id == preset.name)
-                    .map(|anchor| anchor.path)
-                    .unwrap_or_else(|| anchors::dir().join(format!("{}.pem", preset.name)));
+                let anchor = anchors::target(repo, preset.name)
+                    .unwrap_or_else(|_| anchors::dir().join(format!("{}.pem", preset.name)));
                 // The root the pin just wrote, with its own date: the newly
                 // pinned root leads the bundle, so it is the first root — and a
                 // leaf never stands in for it. The digest keeps the spelling the
@@ -1577,11 +1599,12 @@ fn validate_policy(alg: Alg, policy: &str) -> Result<(), Exit> {
 }
 
 /// Whether a config value is one of the git spellings of true.
+///
+/// The parser is the policy's own, so a spelling that loads can never read as
+/// `false` here. An invalid value is `false`, which is all a bare `bool` can
+/// say; the section itself is still refused at seal time.
 fn reads_true(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "true" | "yes" | "on" | "1"
-    )
+    git_time_core::policy::parse_bool(value, "").unwrap_or(false)
 }
 
 /// One local config value, `None` when the key is unset.
@@ -1869,6 +1892,37 @@ mod tests {
         )
         .expect("the id is taken as given");
         assert_eq!(by_id["digicert"], "AA:BB");
+    }
+
+    /// An `insecure-http` value the policy refuses keeps the preset's own value
+    /// in the row: the row must not claim a `false` that `Policy::load` never
+    /// accepts. A spelling the policy does accept is read the same way in both
+    /// places, so `on` marks the row insecure here too.
+    #[test]
+    fn an_unparsable_insecure_http_keeps_the_preset_value() {
+        let (dir, repo) = repository();
+        // `apple` is a plain-http preset, `freetsa` an https one. A preset
+        // section needs an anchor (or a url) to be a row at all.
+        configure(dir.path(), "apple", None, Some("bundles/apple.pem"));
+        configure(dir.path(), "freetsa", None, Some("bundles/freetsa.pem"));
+        set(dir.path(), "time.tsa.apple.insecure-http", "junk");
+        set(dir.path(), "time.tsa.freetsa.insecure-http", "on");
+
+        let rows = super::rows(&repo).expect("rows");
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "apple")
+                .expect("a row")
+                .insecure_http,
+            "an invalid value leaves the preset's own `true` alone"
+        );
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "freetsa")
+                .expect("a row")
+                .insecure_http,
+            "`on` is a spelling the policy accepts"
+        );
     }
 
     /// A hand-added, unmeasured row is trust on first use and has no date to

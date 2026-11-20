@@ -33,7 +33,7 @@
 use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
 
-use git_time_core::presets::Preset;
+use git_time_core::presets::{self, Preset};
 
 use crate::cmd::anchors;
 use crate::cmd::probe;
@@ -566,9 +566,12 @@ pub(crate) fn trust(
         Cell::Known(cached) => served(&cached, now),
         Cell::Unpublished | Cell::Failed => "?".to_owned(),
         Cell::Pending => "…".to_owned(),
-        // Nothing was asked: the fallback keeps the line prompt's wording.
+        // Nothing was asked: the fallback keeps the line prompt's wording. The
+        // custom verdict is the listing's own predicate, not the empty
+        // publication list, so both surfaces agree on a hand-added row however
+        // its fingerprint list reads.
         Cell::Idle => {
-            if preset.fingerprints.is_empty() {
+            if presets::find(preset.name).is_none() {
                 "tofu".to_owned()
             } else {
                 "pin -".to_owned()
@@ -1180,9 +1183,15 @@ mod tests {
         assert!(!rendered.contains("tofu"), "{rendered}");
         let unpublished = frame(&picked(), &[unpublished()], &Probes::idle(1), 24, 80);
         assert!(unpublished.contains("tofu"), "{unpublished}");
+        // A built-in with nothing pinned here: the `pin -` wording is keyed off
+        // the table, not the publication list.
+        let known = *presets::find("digicert").expect("a preset");
         let missing = frame(
             &picked(),
-            &[published_without_bundle()],
+            &[presets::Preset {
+                insecure_http: false,
+                ..known
+            }],
             &Probes::idle(1),
             24,
             80,
@@ -1405,8 +1414,9 @@ mod tests {
         };
 
         // A 40-character name, cut. The trust column holds `pin <day>`,
-        // `EXPIRED` or `pin -`; a verdict is cut inside its own column, so with
-        // no bundle pinned here only the name needs the ellipsis.
+        // `EXPIRED`, `pin -` or `tofu`; a verdict is cut inside its own column,
+        // so with no bundle pinned here only the name needs the ellipsis. The
+        // long name is no preset, so its tier is `tofu`.
         let long = row_of(&[long_preset()]);
         assert!(long.chars().count() < 60, "{long:?}");
         assert_eq!(long.matches('…').count(), 1, "the name is cut: {long:?}");
@@ -1420,7 +1430,7 @@ mod tests {
         };
         let short = row_of(&presets::PRESETS[1..2]); // digicert: pinned and `http`
         assert_eq!(
-            column(&long, "pin "),
+            column(&long, "tofu"),
             column(&short, "pin "),
             "{long:?} / {short:?}"
         );
@@ -1429,7 +1439,7 @@ mod tests {
             column(&short, "http"),
             "{long:?} / {short:?}"
         );
-        assert_eq!(column(&long, "pin "), 11 + super::NAME_WIDTH + 1);
+        assert_eq!(column(&long, "tofu"), 11 + super::NAME_WIDTH + 1);
     }
 
     #[test]
@@ -1526,10 +1536,11 @@ mod tests {
         }
     }
 
-    /// A preset that publishes a root but has none pinned locally: the `pin -`
-    /// tier. Constructed for the same reason as [`unpublished`], so the
-    /// assertion does not depend on what is pinned on the machine. The name is
-    /// its own so `frame()` cannot find a stray `unpublished.pem` of a reader.
+    /// A preset that publishes a root but has none pinned locally: a *real*
+    /// preset reads `pin -` there. The name is its own so `frame()` cannot find
+    /// a stray bundle of a reader; a name no table knows is `tofu` on both
+    /// surfaces however its publication list reads, which
+    /// [`both_surfaces_agree_on_an_unpinned_tier`] pins.
     fn published_without_bundle() -> presets::Preset {
         presets::Preset {
             name: "published-but-local",
@@ -1593,6 +1604,38 @@ mod tests {
     fn unpublished_is_tofu() {
         assert!(unpublished().fingerprints.is_empty());
         assert_eq!(published_without_bundle().fingerprints, ["AA:BB:CC"]);
+    }
+
+    /// The two surfaces judge the "custom" tier by the same predicate: a name no
+    /// table knows is `tofu` on both, whatever its publication list says, and a
+    /// built-in with nothing pinned keeps the `pin -` column wording and the
+    /// listing's `not pinned`.
+    #[test]
+    fn both_surfaces_agree_on_an_unpinned_tier() {
+        let _home = empty_home();
+        let now = at(2026, 1, 1);
+        let unknown = published_without_bundle();
+        assert_eq!(super::trust(&unknown, None, now, Cell::Idle), "tofu");
+        assert_eq!(
+            crate::cmd::tsa::pin_state(&unknown, None, Cell::Idle, false, now),
+            "tofu"
+        );
+
+        let known = presets::find("digicert").expect("a preset");
+        assert_eq!(super::trust(known, None, now, Cell::Idle), "pin -");
+        assert_eq!(
+            crate::cmd::tsa::pin_state(
+                &presets::Preset {
+                    fingerprints: &[],
+                    ..*known
+                },
+                None,
+                Cell::Idle,
+                false,
+                now
+            ),
+            "not pinned"
+        );
     }
 
     #[test]
