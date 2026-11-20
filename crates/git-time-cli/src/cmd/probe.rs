@@ -270,6 +270,30 @@ impl Prober {
         self.results.try_iter().collect()
     }
 
+    /// Close the queue and take every answer still in flight, in arrival order.
+    ///
+    /// The queue closes first, so a row no worker has taken up is given back
+    /// instead of being fetched into a screen that is already leaving. The
+    /// workers then finish what they hold and drop their senders, which is what
+    /// ends the receive: nothing is joined, and a hung fetch is still bounded by
+    /// its own timeout. A refunded row therefore never answers.
+    ///
+    /// This is the last drain: [`Prober::drain`] would no longer see the queue's
+    /// late answers because the receiver is consumed here.
+    #[must_use]
+    pub fn settle(self) -> Vec<(usize, Served)> {
+        {
+            let mut queue = lock(&self.shared);
+            queue.closed = true;
+        }
+        self.shared.wake.notify_all();
+        let mut results = self.drain();
+        while let Ok(result) = self.results.recv() {
+            results.push(result);
+        }
+        results
+    }
+
     /// The rows still queued or in flight.
     //
     // The picker repaints on delivered answers and never waits on the queue, so
@@ -811,6 +835,36 @@ pub(crate) mod tests {
                 .all(|(_, served)| matches!(served, super::Served::Failed))
         );
         assert_eq!(prober.failed(), presets::PRESETS.len());
+    }
+
+    #[test]
+    fn settling_takes_the_in_flight_rows_and_starts_no_other() {
+        let _guard = xdg_lock();
+        xdg();
+        let urls = urls();
+        // Log first, then park, so the log says which rows were taken up and the
+        // workers cannot cycle through the table before `settle` is called.
+        let log = Arc::clone(&urls);
+        let fetch: super::Fetch = Arc::new(move |url, _| {
+            log.lock().unwrap().push(url.to_owned());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            std::fs::read(FREETSA_ROOT).map_err(|error| error.to_string())
+        });
+        let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
+        // Every worker parks on its first row; the rest of the table is queued.
+        for _ in 0..200 {
+            if urls.lock().unwrap().len() >= super::PROBE_THREADS {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let results = prober.settle();
+        let asked = urls.lock().unwrap().len();
+        assert_eq!(results.len(), asked, "every started row answered");
+        assert!(
+            asked < presets::PRESETS.len(),
+            "the queue was not drained: {asked}"
+        );
     }
 
     #[test]

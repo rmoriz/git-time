@@ -745,7 +745,11 @@ pub(crate) fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
 /// answer is the one left in the table. Both surfaces that drain a prober go
 /// through here, so the cell vocabulary cannot drift between them.
 pub(crate) fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
-    let results = prober.drain();
+    take(probes, prober.drain())
+}
+
+/// Write `results` into `probes`, answering whether any arrived.
+fn take(probes: &mut Probes, results: Vec<(usize, probe::Served)>) -> bool {
     if results.is_empty() {
         return false;
     }
@@ -792,7 +796,8 @@ fn refresh(presets: &[Preset], probes: &mut Probes, prober: &probe::Prober) {
 /// The first frame is painted from the cache before any fetch is started, and
 /// answers are drained between key reads; a slow or dead authority costs a
 /// repaint and never the screen. A silent decisecond repaints only when an
-/// answer arrived or the terminal was resized.
+/// answer arrived or the terminal was resized. The key that leaves waits for the
+/// rows already in flight, so a quit does not throw an answer away unseen.
 pub fn run(
     selection: &mut Selection,
     presets: &'static [Preset],
@@ -833,7 +838,16 @@ pub fn run(
         }
         match selection.apply_key(key, presets.len()) {
             Outcome::Stay => terminal.paint(&frame(selection, presets, probes, rows, cols)),
-            outcome => return Some(outcome),
+            outcome => {
+                // The key is the last one: nothing new is fetched, but the rows
+                // already in flight are waited for, so their answer is on the
+                // last frame and the cache keeps it for the next run. Painting
+                // has to happen before `Raw` drops and the alternate screen goes.
+                if take(probes, prober.settle()) {
+                    terminal.paint(&frame(selection, presets, probes, rows, cols));
+                }
+                return Some(outcome);
+            }
         }
     }
 }

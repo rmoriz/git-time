@@ -2480,6 +2480,62 @@ fn select_checks_the_terminal_before_it_reads_the_config() {
         .expect("restore the config");
 }
 
+/// The picker on the terminal a user actually has: the served date reaches the
+/// frame while the probe is still in flight, and quitting with it in flight
+/// still keeps the answer on the screen and in the cache. A second run whose
+/// stub fails shows the cached date, so the cache is what an offline run reads.
+#[test]
+fn select_probes_the_open_rows_and_answers_from_the_cache_offline() {
+    let repo = Repo::new();
+    repo.init();
+    // The log names what was asked, so a socket cannot pass for the stub.
+    let log = repo.path().join("probe-urls");
+    let served = format!(
+        "printf '%s\\n' \"$GIT_TIME_ANCHOR_URL\" >> '{}'; cat '{}'",
+        pstr(&log),
+        pstr(&freetsa_root())
+    );
+    let Some(first) = repo.run_time_pty(
+        &["tsa", "select"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", served)],
+        "q\n",
+    ) else {
+        eprintln!("no script(1) here: the probing picker was not exercised");
+        return;
+    };
+    let stdout = text(&first.stdout);
+    assert!(first.status.success(), "{stdout}{}", text(&first.stderr));
+    assert!(
+        stdout.contains("fetch 2041-03-07"),
+        "the served date is on the frame: {stdout}"
+    );
+    // Other rows were in flight as well, so the log holds more than this URL;
+    // FreeTSA is the one the run must have asked.
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        asked.lines().any(|url| url == "https://freetsa.org/tsr"),
+        "the freetsa URL was fetched: {asked}{stdout}"
+    );
+    let entry = repo.xdg.path().join("git-time/probe/freetsa");
+    let cache = std::fs::read_to_string(&entry).expect("the cached date");
+    assert!(!cache.contains("BEGIN CERTIFICATE"), "{cache}");
+    assert_eq!(cache.lines().count(), 1, "one line: {cache}");
+
+    // The stub now fails, so nothing can be re-probed; the date already cached
+    // is still what the row shows.
+    let Some(broken) = repo.run_time_pty(
+        &["tsa", "select"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", "exit 1".to_owned())],
+        "q\n",
+    ) else {
+        eprintln!("no script(1) here: the offline run was not exercised");
+        return;
+    };
+    let stdout = text(&broken.stdout);
+    assert!(broken.status.success(), "{stdout}{}", text(&broken.stderr));
+    assert!(stdout.contains("fetch 2041-03-07"), "{stdout}");
+}
+
 #[test]
 fn select_dry_run_prints_the_plan_and_writes_nothing() {
     let repo = Repo::new();
