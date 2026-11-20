@@ -41,16 +41,11 @@ pub struct Cached {
     pub fingerprint: String,
 }
 
-/// The directory the entries live in: `$XDG_CONFIG_HOME` when set,
-/// `~/.config` otherwise, then `git-time/probe`.
+/// The directory the entries live in: the probe leaf under
+/// [`super::anchors::config_home`], so the cache stays a sibling of the pins.
 #[must_use]
 pub fn dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("git-time").join("probe")
+    super::anchors::config_home().join("git-time").join("probe")
 }
 
 /// The cached answer for `id`, only when it is younger than [`TTL`].
@@ -475,6 +470,17 @@ pub(crate) mod tests {
 
     fn at(seconds: i64) -> jiff::Timestamp {
         jiff::Timestamp::from_second(seconds).expect("a second")
+    }
+
+    #[test]
+    fn both_state_dirs_hang_off_one_config_home() {
+        let _guard = xdg_lock();
+        let base = std::path::PathBuf::from(xdg());
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", &base) };
+        let home = crate::cmd::anchors::config_home();
+        assert_eq!(home, base);
+        assert_eq!(super::dir(), home.join("git-time/probe"));
+        assert_eq!(crate::cmd::anchors::dir(), home.join("git-time/anchors"));
     }
 
     fn served() -> Cached {
