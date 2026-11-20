@@ -33,7 +33,7 @@
 use std::io::{Read as _, Write as _};
 use std::process::{Command, Stdio};
 
-use git_time_core::presets::Preset;
+use git_time_core::presets::{self, Preset};
 
 use crate::cmd::anchors;
 use crate::cmd::probe;
@@ -470,9 +470,9 @@ fn row(
         ' '
     };
     let tick = if selection.is_chosen(index) { 'x' } else { ' ' };
-    // The default bundle path is what `install` writes; a configured path is not
-    // known here, and a preset that is pinned here is pinned there.
-    let anchor = anchors::dir().join(format!("{}.pem", preset.name));
+    // The configured bundle path when the repository named one, else the
+    // default `install` writes.
+    let anchor = anchors::bundle_path(preset);
     let trust = trust(
         preset,
         anchors::roots(&anchor).as_deref(),
@@ -525,7 +525,7 @@ fn row(
 /// The date is what a reader weighs a rotation by, so it sits where the choice
 /// is made — and it is the newest live root's, since a bundle's order is
 /// append order and not date order.
-fn trust(
+pub(crate) fn trust(
     preset: &Preset,
     roots: Option<&[anchors::RootRow]>,
     now: jiff::Timestamp,
@@ -566,9 +566,12 @@ fn trust(
         Cell::Known(cached) => served(&cached, now),
         Cell::Unpublished | Cell::Failed => "?".to_owned(),
         Cell::Pending => "…".to_owned(),
-        // Nothing was asked: the fallback keeps the line prompt's wording.
+        // Nothing was asked: the fallback keeps the line prompt's wording. The
+        // custom verdict is the listing's own predicate, not the empty
+        // publication list, so both surfaces agree on a hand-added row however
+        // its fingerprint list reads.
         Cell::Idle => {
-            if preset.fingerprints.is_empty() {
+            if presets::find(preset.name).is_none() {
                 "tofu".to_owned()
             } else {
                 "pin -".to_owned()
@@ -1180,9 +1183,15 @@ mod tests {
         assert!(!rendered.contains("tofu"), "{rendered}");
         let unpublished = frame(&picked(), &[unpublished()], &Probes::idle(1), 24, 80);
         assert!(unpublished.contains("tofu"), "{unpublished}");
+        // A built-in with nothing pinned here: the `pin -` wording is keyed off
+        // the table, not the publication list.
+        let known = *presets::find("digicert").expect("a preset");
         let missing = frame(
             &picked(),
-            &[published_without_bundle()],
+            &[presets::Preset {
+                insecure_http: false,
+                ..known
+            }],
             &Probes::idle(1),
             24,
             80,
@@ -1218,6 +1227,7 @@ mod tests {
             policy: None,
             fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
             insecure_http: true,
+            anchor_path: None,
             curated: false,
         }
     }
@@ -1404,8 +1414,9 @@ mod tests {
         };
 
         // A 40-character name, cut. The trust column holds `pin <day>`,
-        // `EXPIRED` or `pin -`; a verdict is cut inside its own column, so with
-        // no bundle pinned here only the name needs the ellipsis.
+        // `EXPIRED`, `pin -` or `tofu`; a verdict is cut inside its own column,
+        // so with no bundle pinned here only the name needs the ellipsis. The
+        // long name is no preset, so its tier is `tofu`.
         let long = row_of(&[long_preset()]);
         assert!(long.chars().count() < 60, "{long:?}");
         assert_eq!(long.matches('…').count(), 1, "the name is cut: {long:?}");
@@ -1419,7 +1430,7 @@ mod tests {
         };
         let short = row_of(&presets::PRESETS[1..2]); // digicert: pinned and `http`
         assert_eq!(
-            column(&long, "pin "),
+            column(&long, "tofu"),
             column(&short, "pin "),
             "{long:?} / {short:?}"
         );
@@ -1428,7 +1439,7 @@ mod tests {
             column(&short, "http"),
             "{long:?} / {short:?}"
         );
-        assert_eq!(column(&long, "pin "), 11 + super::NAME_WIDTH + 1);
+        assert_eq!(column(&long, "tofu"), 11 + super::NAME_WIDTH + 1);
     }
 
     #[test]
@@ -1520,14 +1531,16 @@ mod tests {
             policy: None,
             fingerprints: &[],
             insecure_http: true,
+            anchor_path: None,
             curated: false,
         }
     }
 
-    /// A preset that publishes a root but has none pinned locally: the `pin -`
-    /// tier. Constructed for the same reason as [`unpublished`], so the
-    /// assertion does not depend on what is pinned on the machine. The name is
-    /// its own so `frame()` cannot find a stray `unpublished.pem` of a reader.
+    /// A preset that publishes a root but has none pinned locally: a *real*
+    /// preset reads `pin -` there. The name is its own so `frame()` cannot find
+    /// a stray bundle of a reader; a name no table knows is `tofu` on both
+    /// surfaces however its publication list reads, which
+    /// [`both_surfaces_agree_on_an_unpinned_tier`] pins.
     fn published_without_bundle() -> presets::Preset {
         presets::Preset {
             name: "published-but-local",
@@ -1536,10 +1549,93 @@ mod tests {
         }
     }
 
+    /// A row as a configured, unknown `time.tsa.<id>` section produces one: an
+    /// id no table knows and trust on first use. The configured bundle path is
+    /// set by the test, because it names a temp dir.
+    fn configured_custom() -> presets::Preset {
+        presets::Preset {
+            name: "zz-acme",
+            url: "https://tsa.acme.example/tsr",
+            anchor_url: "",
+            insecure_http: false,
+            ..unpublished()
+        }
+    }
+
+    /// The configured bundle path is what the row reads: without one a custom
+    /// row is TOFU, and with a root behind the configured path it shows that
+    /// root's date instead of the pin-dash wording its empty publication list
+    /// would otherwise earn.
+    #[test]
+    fn a_custom_row_says_tofu_until_its_own_bundle_is_pinned() {
+        // `XDG_CONFIG_HOME` is process-wide, so hold it across both frames.
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        let xdg = tempfile::TempDir::new().expect("xdg dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
+        let bundle = xdg.path().join("acme.pem");
+
+        let mut preset = configured_custom();
+        preset.anchor_path = Some(Box::leak(bundle.clone().into_boxed_path()));
+        let line = || {
+            frame(
+                &picked(),
+                std::slice::from_ref(&preset),
+                &Probes::idle(1),
+                24,
+                80,
+            )
+            .lines()
+            .find(|line| line.trim_start().starts_with("> ["))
+            .expect("the cursor row")
+            .to_owned()
+        };
+
+        let tofu = line();
+        assert!(tofu.contains("tofu"), "{tofu:?}");
+
+        // The fixture root closes in 2041, so a bundle here is a live pin; the
+        // date match alone also rules out the `pin -` wording.
+        std::fs::write(&bundle, FREETSA_ROOT).expect("pin a root");
+        let pinned = line();
+        assert!(pinned.contains("pin 2041-03-07"), "{pinned:?}");
+    }
+
     #[test]
     fn unpublished_is_tofu() {
         assert!(unpublished().fingerprints.is_empty());
         assert_eq!(published_without_bundle().fingerprints, ["AA:BB:CC"]);
+    }
+
+    /// The two surfaces judge the "custom" tier by the same predicate: a name no
+    /// table knows is `tofu` on both, whatever its publication list says, and a
+    /// built-in with nothing pinned keeps the `pin -` column wording and the
+    /// listing's `not pinned`.
+    #[test]
+    fn both_surfaces_agree_on_an_unpinned_tier() {
+        let _home = empty_home();
+        let now = at(2026, 1, 1);
+        let unknown = published_without_bundle();
+        assert_eq!(super::trust(&unknown, None, now, Cell::Idle), "tofu");
+        assert_eq!(
+            crate::cmd::tsa::pin_state(&unknown, None, Cell::Idle, false, now),
+            "tofu"
+        );
+
+        let known = presets::find("digicert").expect("a preset");
+        assert_eq!(super::trust(known, None, now, Cell::Idle), "pin -");
+        assert_eq!(
+            crate::cmd::tsa::pin_state(
+                &presets::Preset {
+                    fingerprints: &[],
+                    ..*known
+                },
+                None,
+                Cell::Idle,
+                false,
+                now
+            ),
+            "not pinned"
+        );
     }
 
     #[test]
@@ -1564,6 +1660,25 @@ mod tests {
                 Cell::Idle
             ),
             "pin expires 2027-01-01"
+        );
+    }
+
+    #[test]
+    fn an_all_expired_bundle_says_expired_on_both_surfaces() {
+        let _home = empty_home();
+        let preset = presets::find("digicert").expect("a preset");
+        let roots = [super::anchors::RootRow {
+            fingerprint: "aa".repeat(32),
+            not_after: "2020-01-01".to_owned(),
+        }];
+        let now = jiff::Timestamp::now();
+        assert_eq!(
+            super::trust(preset, Some(&roots), now, Cell::Idle),
+            "EXPIRED"
+        );
+        assert_eq!(
+            crate::cmd::tsa::pin_state(preset, Some(&roots), Cell::Idle, false, now),
+            "EXPIRED"
         );
     }
 

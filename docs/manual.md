@@ -197,7 +197,8 @@ Both exit `2` on usage or config.
 
 ### `git time tsa preset list [--refresh]` / `git time tsa preset add <name> [--accept <id>=<fingerprint>]`
 
-Print the built-in presets, or configure one, anchor included, through the install fetch path.
+Print the built-in presets and the configured authorities, or configure one, anchor included,
+through the install fetch path.
 `preset add` exits `1` when the anchor could not be pinned (a one-off add exists to pin), and `2`
 for an unknown name or an unparseable `--accept`. A root fingerprint that does not match is a
 refusal, so a pinned preset never takes a substituted root; when the publication really moved,
@@ -205,24 +206,32 @@ compare the fetched value out of band and repeat with `--accept` — bare, since
 exactly one id, or as `<id>=<fingerprint>` under that same id (any other id matches nothing and is
 not an error).
 
-`preset list` prints one row per preset: name, endpoint, algorithm, scope, the newest fingerprint the
-authority publishes, the newest root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
-last 90 days and `expired` past it; where no certificate is pinned here the column shows a cached
-probe answer in the picker's words (`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-`
-for a row the cache cannot answer. A pinned row whose authority serves a root the local bundle does
-not hold appends ` !` to the date: that authority has rotated, and the answer is a review. A plain run
-only ever reads, so it never prints `?`. Among the rows with no local pin, `?` and `…` come from
-`--refresh`, the latter only when an answer arrives too late to be read, and a row that failed or
-served no published root and has no entry keeps `-` here; the next `--refresh` asks it again. A pinned
-row keeps its pin date throughout, with ` !` while an answer names a foreign root, and the served date
-never replaces the pin. It opens no socket at all — the rows that answered are
-painted from the cache. The week-long cache is shared with `tsa select`, and
-`--refresh` asks every authority that publishes a root and waits for the answers before printing. A
-refresh drops nothing first, so one that fails leaves the previous date in place until its seven days
-run out, and its ` !` marker — read from that entry, not from the failed reply — stays with it.
-Either way the cache is the only write — a probe pins nothing.
-`tofu` and `not pinned` are the two tiers a hand-added, unpublished authority would need; no built-in
-row is in that position any more, so the table shows neither.
+`preset list` prints one row per built-in preset and per configured authority that carries a url.
+Each row is: name, endpoint, algorithm, scope, the newest fingerprint the authority publishes, the
+newest root's expiry date, and `anchored` or `missing`. The scope is `default`, `opt-in` or
+`custom`; the last names a `time.tsa.<id>` section no built-in row covers, and those rows follow the
+built-ins. The date carries `(expires soon)` in its last 90 days and `EXPIRED` past it; where no
+published root is pinned here the column shows a cached probe answer in the picker's words (`fetch
+<date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-` for a row the cache cannot answer. A pinned
+row whose authority serves a root the local bundle does not hold appends ` !` to the date: that
+authority has rotated, and the answer is a review. A plain run only ever reads, so it never prints
+`?`. Among the rows with no local pin, `?` and `…` come from `--refresh`, the latter only when an
+answer arrives too late to be read, and a row that failed or served no published root and has no
+entry keeps `-` here; the next `--refresh` asks it again. A custom row is not among the rows a
+refresh asks: it publishes nothing, so nothing is queued for it and its own bundle alone answers. A
+pinned row keeps its pin date throughout, with ` !` while an answer names a foreign root, and the
+served date never replaces the pin. It opens no socket at all — the rows that answered are painted
+from the cache. The week-long cache is shared with `tsa select`, and `--refresh` asks every
+authority that publishes a root and waits for the answers before printing. A refresh drops
+nothing first, so one that fails leaves the previous date in place until its seven days run out,
+and its ` !` marker — read from that entry, not from the failed reply — stays with it. Either
+way the cache is the only write — a probe pins nothing.
+
+A custom row with no bundle reads `tofu`, and one whose whole bundle is past reads `EXPIRED`, in the
+table and in the selector. `git time anchor fetch <url> --id <id> [--insecure-http]` is the pin, and
+with nothing published to compare it prints the fingerprint in full, which is all a first review has
+to weigh. `not pinned` is the wording for a built-in that publishes no root; no built-in is in that
+position any more, so `not pinned` never appears.
 
 The `default` scope marks the curated pair — `freetsa` and `digicert`, both pinned against a
 measured root. It is what the selector recommends, not a preselection; `install` writes it only
@@ -232,10 +241,10 @@ pinned and the most available of the rest, and two rather than one so `required 
 fallback. `sectigo` is not recommended: its endpoint refuses the TLS handshake on some stacks.
 Everything else is opt-in.
 
-The table is ordered the `default` rows first. Every built-in row publishes a root, so any fetch of
-one can check it. A hand-added authority publishes nothing, so its `anchor fetch` (the step after
-`tsa add`) falls back to trust on first use and prints the fetched root fingerprint in full — that
-line is what makes the first pin reviewable, and `git time anchor pin` records it in
+The table is ordered `default` rows, then `opt-in`, then `custom`. Every built-in row publishes a
+root, so any fetch of one can check it. A custom row publishes nothing, so its `anchor fetch` (the
+step after `tsa add`) falls back to trust on first use and prints the fetched root fingerprint in
+full — that line is what makes the first pin reviewable, and `git time anchor pin` records it in
 `time.anchors-lock` afterwards so a later change is visible.
 
 | Preset | Endpoint | Scope | Root |
@@ -284,22 +293,31 @@ row exists. A query string belongs to the endpoint and is stored and posted verb
 The pinned values were measured by querying the endpoint and walking the chain (the reply's
 certificates, plus the AIA `caIssuers` pointer where the root was not embedded). `izenpe` is the
 one exception: its value is supplied, and the walk now reaches the same root, so a live run
-compares against it. Every built-in row is pinned today, so trust on first use is what a
-hand-added, unpublished authority gets. Two earlier values were wrong for their endpoint and are
-replaced by the measured ones — `sectigo` and `certum` now carry the fingerprint of the root their
-endpoint actually chains to. Without that, a pinned preset would refuse its own authority forever.
+compares against it. Every built-in row is pinned today, so trust on first use is all a custom row
+gets. Two earlier values were wrong for their endpoint and are replaced by the measured ones —
+`sectigo` and `certum` now carry the fingerprint of the root their endpoint actually chains to.
+Without that, a pinned preset would refuse its own authority forever.
 
 ### `git time tsa select [--interactive] [--dry-run]`
 
-Choose which preset authorities this repository uses, then pin the chosen anchors and remove the
-preset sections that were not chosen. A section whose id is not a preset is untouched, and saving
-with nothing selected is therefore the removal path.
+Choose which authorities this repository uses, then pin the chosen built-in anchors and remove the
+sections that were not chosen. Every configured authority that carries a url is a row — the
+built-ins followed by a configured id no built-in covers, which is listed after them and says
+`custom` where a scope is shown — so an unticked one loses its section too, though the bundle it
+names stays on disk; an unknown section with no url cannot be enabled and is left untouched.
+Saving with nothing selected is therefore the removal path. A section that names only a url is still
+a row, but it cannot seal until it names an `anchor` as well, because the policy refuses a section
+without one; `git time tsa add` writes both keys. A row whose section lives in a wider config scope
+(a machine-wide `time.tsa.<id>`) cannot be removed with `--local`: unticking it says so and leaves
+the section where it is, and the rest of the answer still applies.
 
 The rows of the authorities already configured start ticked, so a change keeps the others that the
-user did not mean to touch; an unconfigured row starts clear. `n` clears every tick, and saving that
-empty selection is how the preset sections are removed.
+user did not mean to touch; an unconfigured row starts clear. A custom row is kept, not pinned
+again, because there is no published root to compare against; its own bundle stays exactly as it is.
+Pin it with `git time anchor fetch <url> --id <id> [--insecure-http]`, which prints the fingerprint
+in full. `n` clears every tick, and saving that empty selection is how the row sections are removed.
 
-The list is a cursor UI on the alternate screen. `a` really is all 21.
+The list is a cursor UI on the alternate screen. `a` really is every row.
 
 ```
  > [x]  1  freetsa            pin 2041-03-07 
@@ -320,9 +338,9 @@ space toggle  a all  n none  j/k or arrows move  r refresh  enter save  q abort
 | `Home`, `End`, `[H`, `[F` | Jump to the first, the last row |
 | `space` | Tick or untick the row under the cursor |
 | `a` | Tick every row |
-| `n` | Untick every row; saving then removes the preset sections |
+| `n` | Untick every row; saving then removes the row sections |
 | `r` | Drop the cached dates, ask every publishing authority again, repaint |
-| `enter` | Save and pin the ticks |
+| `enter` | Save; built-in anchors among the ticks get pinned |
 | `q`, `esc`, `ctrl-c` | Leave without writing |
 | `0`–`9`, `,`, `-` | Append to the prompt line |
 | `backspace` | Delete the last typed character |
@@ -334,16 +352,18 @@ time tsa select --interactive` still works. A buffer that does not parse shows o
 keeps the frame. A terminal that cannot be put into raw mode at all falls back to the line prompt of
 the early versions, saying so in one line.
 
-The `pin` column is the trust tier: the root is checked against the table when it is pinned and a
-mismatch is a refusal. The date is the newest root's `notAfter`; a root in its last 90 days
-reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the row is due
-a rotation before the answer refuses the fetch. `pin -` is a published root that is not pinned on
-this machine yet, and `enter` pins it; the probe below replaces the wording with `…` and then the
-served date on a live terminal, so `pin -` is what the line prompt keeps.
-The `tofu` tier takes no built-in row any more: a row that publishes nothing can only be reviewed by
-reading the fingerprint the command prints, and `git time anchor pin` records the pinned bundle's
-fingerprint in `time.anchors-lock` so a later change is caught. `http` marks a plain-`http`
-endpoint; the endpoint of the cursor row is printed in full below the list.
+The `pin` column is the trust tier: the root is checked against the table when it is pinned for a
+built-in and a mismatch is a refusal. The date is the newest root's `notAfter`; a root in its last
+90 days reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the
+row is due a rotation before the answer refuses the fetch. `pin -` is a published root that is not
+pinned on this machine yet, and `enter` pins it; the probe below replaces the wording with `…` and
+then the served date on a live terminal, so `pin -` is what the line prompt keeps.
+The `tofu` tier is a custom row's until its own bundle is pinned: it publishes nothing to check, so
+there is no published fingerprint to compare and no probe to run, and the first pin can only be
+reviewed by reading the fingerprint `anchor fetch` prints; `git time anchor pin` records the pinned
+bundle's fingerprint in `time.anchors-lock` so a later change is caught. Once a bundle is there the
+row reads its date like any other, and `EXPIRED` once every root in it is past. `http` marks a
+plain-`http` endpoint; the endpoint of the cursor row is printed in full below the list.
 
 Every authority that publishes a root is also probed in the background, four at a time, and the
 column fills itself in; a row that publishes nothing is never probed, because no reply could match
@@ -376,10 +396,11 @@ resize is honoured. The last row and the last column stay free, so nothing wraps
 never scrolls under the frame. On a terminal too short for the footer it degrades to the cursor row
 and the footer.
 
-Each enabled authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot be pinned
-prints `failed <id>: <reason>` and makes the command exit `1` while the others still pin. Under
-`time.gate = pre-commit` a missing anchor also warns that commits will be refused. `--dry-run`
-prints the outcome and changes nothing.
+Each enabled built-in authority prints `enabled <id> (<url>) fingerprint <sha1>`; one that cannot
+be pinned prints `failed <id>: <reason>` and makes the command exit `1` while the others still pin.
+A kept custom row prints `kept <id> (<url>)` and pins nothing. Under `time.gate = pre-commit` a
+missing anchor also warns that commits will be refused. `--dry-run` prints the outcome (`would
+enable …`, `would keep …`, `would disable …`) and changes nothing.
 
 The command asks a question, so a stdin that is not a terminal is refused (`2`) rather than left to
 hang. `--interactive` means the answer is being piped. Two routes never ask at all: `git time tsa

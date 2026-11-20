@@ -15,15 +15,16 @@
 //! `[a-z0-9-]`: it ends up in a config key, a trailer value and a file name, so
 //! anything else would need quoting somewhere.
 //!
-//! `select` is the cursor UI over the preset table: the configured authorities
-//! start ticked, tick what this repository should use, save, and only then are
-//! anchors pinned and preset sections missing from the answer removed. It needs
-//! a terminal unless `--interactive` says an answer is being piped; a script
-//! otherwise uses `preset add` or `add`.
+//! `select` is the cursor UI over the row table — the built-in presets plus
+//! every configured id that has a url: the configured rows start ticked, tick
+//! what this repository should use, save, and only then are anchors pinned and
+//! row sections missing from the answer removed. A custom row is kept rather
+//! than re-pinned. It needs a terminal unless `--interactive` says an answer is
+//! being piped; a script otherwise uses `preset add` or `add`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use der::Decode as _;
@@ -457,18 +458,24 @@ fn remove(repo: &Repo, id: &str) -> Exit {
     Exit::ok()
 }
 
-/// What the listing says about a preset whose date is `expiry`, with `cell` the
+/// What the listing says about a row whose bundle is `roots`, with `cell` the
 /// probe's answer for it.
 ///
 /// A local certificate is the date a seal is checked against, so it comes first
-/// and is printed as it is. Without one the cell speaks in the picker's words:
-/// a served root reads `fetch <date>` (or the near-expiry and expired forms), a
-/// pending row `…`, and a failed or unpublished reply `?`. Nothing was asked
-/// (`Cell::Idle`) falls back to today's `-`; `not pinned` is the message for a
-/// preset that publishes no root either, so the missing date reads as the
-/// preset's shape and not as a broken pin. No built-in row is in that position
-/// any more, and a hand-added one is not in this table, so the branch keeps a
-/// unit test instead of a row.
+/// and is printed as it is. Every root of a dead bundle reads `EXPIRED`, so a
+/// dead pin cannot fall through to the probe cell; otherwise the date is the
+/// newest live root's, since a bundle's order is append order and not date
+/// order. Without one the cell speaks in the picker's words: a served root
+/// reads `fetch <date>` (or the near-expiry and expired forms), a pending row
+/// `…`, and a failed or unpublished reply `?`.
+///
+/// Nothing was asked (`Cell::Idle`) has no probe date: a row no table knows is
+/// hand-added and reads `tofu`, the picker's word, because it publishes nothing
+/// to pin; `not pinned` is the message for a built-in preset that publishes no
+/// root either, so the missing date reads as the preset's shape and not as a
+/// broken pin. A published built-in with no local certificate only says the
+/// date is missing, `-`. No built-in row publishes nothing any more, so that
+/// branch keeps a unit test instead of a row.
 ///
 /// A served date carries no certificate of its own, so `now` judges it against
 /// the caller's instant rather than a second clock read.
@@ -476,28 +483,42 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 /// `rotated` appends ` !` to the state: the served root is one no root of the
 /// local bundle holds, which is the rotation signal the picker also draws. It is
 /// never set without a bundle, so an unpinned row keeps its plain wording.
-fn pin_state(
+pub(crate) fn pin_state(
     preset: &presets::Preset,
+    roots: Option<&[anchors::RootRow]>,
     cell: picker::Cell,
-    expiry: Option<String>,
     rotated: bool,
     now: jiff::Timestamp,
 ) -> String {
-    let state = if let Some(expiry) = expiry {
-        expiry
-    } else {
-        match cell {
+    let state = match roots.filter(|roots| !roots.is_empty()) {
+        Some(roots) => {
+            if roots
+                .iter()
+                .all(|root| anchors::expired(&root.not_after, now))
+            {
+                "EXPIRED".to_owned()
+            } else {
+                // The all-expired branch above took the no-live-root case, and
+                // `looming` falls back to the newest root when none is live, so
+                // a non-empty bundle always names a root here.
+                let root = looming(roots, now).expect("a non-empty bundle names a root");
+                anchors::expiry_text(&root.not_after, now)
+            }
+        }
+        None => match cell {
             picker::Cell::Known(cached) => picker::served(&cached, now),
             picker::Cell::Pending => "…".to_owned(),
             picker::Cell::Unpublished | picker::Cell::Failed => "?".to_owned(),
             picker::Cell::Idle => {
-                if preset.fingerprints.is_empty() {
+                if presets::find(preset.name).is_none() {
+                    "tofu".to_owned()
+                } else if preset.fingerprints.is_empty() {
                     "not pinned".to_owned()
                 } else {
                     "-".to_owned()
                 }
             }
-        }
+        },
     };
     if rotated {
         return format!("{state} !");
@@ -536,30 +557,36 @@ fn rotated(
     }
 }
 
-/// Print the built-in presets and whether their anchor is pinned here.
+/// Print the rows — the built-in table and every configured section — and
+/// whether their anchor is pinned here.
 ///
 /// The date comes from the local bundle where there is one, newest live root
 /// first: for a preset that publishes no fingerprint that bundle is the only
 /// place the date exists at all. Otherwise the probe cache is read — it is what
 /// a plain run shows, and nothing is fetched for it, so the table stays offline.
-/// `--refresh` is the one path that opens sockets: it re-queues every authority
-/// through the picker's worker and waits for the queue to drain before printing,
-/// because this is the surface a timer or a CI job reads. No entry is dropped
-/// first, so a failed fetch leaves the previous date in place until its TTL ages
-/// it out, and the ` !` a rotation put on the row is read from that entry while
-/// the cell shows `?`. The cache is the only write either way; a probe pins
-/// nothing.
-async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
+/// A custom row says `custom` in the scope column instead of a tier it does not
+/// have. `--refresh` is the one path that opens sockets: it re-queues every
+/// authority through the picker's worker and waits for the queue to drain before
+/// printing, because this is the surface a timer or a CI job reads. No entry is
+/// dropped first, so a failed fetch leaves the previous date in place until its
+/// TTL ages it out, and the ` !` a rotation put on the row is read from that
+/// entry while the cell shows `?`. The cache is the only write either way; a
+/// probe pins nothing.
+async fn preset_list(repo: &Repo, refresh: bool) -> Exit {
+    let rows = match rows(repo) {
+        Ok(rows) => rows,
+        Err(exit) => return exit,
+    };
     // One instant for the local dates and the served ones, so every pinned row
     // is judged as of one moment and a row cannot straddle an expiry between
     // its date and its marker.
     let now = jiff::Timestamp::now();
-    let (mut probes, missing) = picker::seed(&presets::PRESETS, now);
+    let (mut probes, missing) = picker::seed(rows, now);
     // A plain run asks nothing, so its queue is empty and the loop below exits
     // at once; a row the cache cannot answer keeps today's `-` rather than a `…`
     // that would never clear.
     let queue: Vec<usize> = if refresh {
-        let published: Vec<usize> = presets::PRESETS
+        let published: Vec<usize> = rows
             .iter()
             .enumerate()
             .filter(|(_, preset)| !preset.fingerprints.is_empty())
@@ -575,8 +602,8 @@ async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
         }
         Vec::new()
     };
-    let skip = picker::skip_of(&queue, presets::PRESETS.len());
-    let prober = probe::Prober::start(&presets::PRESETS, probe::network_fetch(), &skip);
+    let skip = picker::skip_of(&queue, rows.len());
+    let prober = probe::Prober::start(rows, probe::network_fetch(), &skip);
     // Blocks until the whole queue drains: this is the headless surface, so a
     // caller wants the finished answer. Only the network path bounds a dead
     // authority on its own (its fetch timeout); a stub runs through
@@ -592,20 +619,18 @@ async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let _ = picker::absorb(&prober, &mut probes);
-    for (index, preset) in presets::PRESETS.iter().enumerate() {
-        let anchor = anchors::dir().join(format!("{}.pem", preset.name));
+    for (index, preset) in rows.iter().enumerate() {
+        // The configured bundle path when the repository named one, else the
+        // default `install` writes.
+        let anchor = anchors::bundle_path(preset);
         // Only a local certificate can say when it expires. Bundle order is not
         // date order after an append, so the newest root that is still valid is
         // the one shown.
         let roots = anchors::roots(&anchor);
-        let expiry = roots
-            .as_deref()
-            .and_then(|roots| looming(roots, now))
-            .map(|root| anchors::expiry_text(&root.not_after, now));
         let state = pin_state(
             preset,
+            roots.as_deref(),
             probes.cell(index),
-            expiry,
             rotated(preset, roots.as_deref(), probes.cell(index), now),
             now,
         );
@@ -614,8 +639,15 @@ async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
             preset.name,
             preset.url,
             preset.alg,
-            // What `install` writes by default, and what is opt-in.
-            if preset.curated { "default" } else { "opt-in" },
+            // A custom row has no published tier; the rest are the default and
+            // the opt-in set.
+            if presets::find(preset.name).is_none() {
+                "custom"
+            } else if preset.curated {
+                "default"
+            } else {
+                "opt-in"
+            },
             // A pinned root is verifiable on the first fetch; the rest are
             // trust on first use and say so here as well as at the pin. After a
             // rotation the newest value is the one shown, not the list.
@@ -865,9 +897,10 @@ fn needs_a_terminal() -> Exit {
 
 /// Run `git time tsa select`: show the table, take a selection, pin it.
 ///
-/// The selection decides what is enabled *and* what is not: a preset section
-/// that is not chosen is removed, so the command can narrow a configuration as
-/// well as widen it. Sections whose id is not a preset are never touched.
+/// The selection decides what is enabled *and* what is not: a row that is not
+/// chosen has its section removed, so the command can narrow a configuration as
+/// well as widen it. A section that is no row — an unknown id without a url —
+/// cannot be enabled and is never touched.
 ///
 /// It starts from what is configured, so an authority left out of the answer
 /// was unticked on purpose rather than forgotten by the start state.
@@ -877,8 +910,10 @@ fn needs_a_terminal() -> Exit {
 /// where an answer is expected.
 ///
 /// `accept` is forwarded from `install`, whose own `--accept` would otherwise be
-/// dropped by the handover: the ids it can name are the chosen ones, because
-/// those are the only ids this run fetches.
+/// dropped by the handover. A bare fingerprint resolves against the chosen
+/// preset rows only, because those are the only rows this run fetches; an
+/// `<id>=` value is used only when the id is one of them, and a custom row says
+/// its value goes unused.
 pub(crate) async fn select(
     repo: &Repo,
     accept: &[String],
@@ -886,11 +921,15 @@ pub(crate) async fn select(
     _interactive: bool,
     dry_run: bool,
 ) -> Exit {
-    // The answer is the whole set: every preset section missing from it is
-    // removed. An empty start would therefore drop every authority the user did
-    // not mean to touch, and neither surface would show what is configured. The
-    // ticks begin at the configuration; the answer stays authoritative over it.
-    let seed = match already_enabled(repo) {
+    let rows = match rows(repo) {
+        Ok(rows) => rows,
+        Err(exit) => return exit,
+    };
+    // The answer is the whole set: every row missing from it is removed. An
+    // empty start would therefore drop every authority the user did not mean to
+    // touch, and neither surface would show what is configured. The ticks begin
+    // at the configuration; the answer stays authoritative over it.
+    let seed = match already_enabled(repo, rows) {
         Ok(seed) => seed,
         Err(exit) => return exit,
     };
@@ -899,8 +938,8 @@ pub(crate) async fn select(
         // Nothing asked yet, so the line-prompt fallback keeps `pin -` and the
         // picker path replaces this table with the cache seed once it owns the
         // terminal.
-        let mut probes = picker::Probes::idle(presets::PRESETS.len());
-        if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS, &mut probes) {
+        let mut probes = picker::Probes::idle(rows.len());
+        if let Some(outcome) = picker::run(&mut selection, rows, &mut probes) {
             match outcome {
                 picker::Outcome::Save(chosen) => chosen,
                 picker::Outcome::Abort => {
@@ -911,53 +950,188 @@ pub(crate) async fn select(
             }
         } else {
             // A terminal, but no raw mode to be had: the line prompt still asks.
-            match ask(&seed, command) {
+            match ask(&seed, rows, command) {
                 Ok(chosen) => chosen,
                 Err(exit) => return exit,
             }
         }
     } else {
         // A piped answer: the line prompt reads it, one line.
-        match ask(&seed, command) {
+        match ask(&seed, rows, command) {
             Ok(chosen) => chosen,
             Err(exit) => return exit,
         }
     };
-    let accept = match accepted(accept, &chosen, command) {
+    let accept = match accepted(accept, &chosen, rows, command) {
         Ok(accept) => accept,
         Err(exit) => return exit,
     };
-    apply(repo, &chosen, &accept, dry_run).await
+    apply(repo, &chosen, rows, &accept, dry_run).await
 }
 
 /// Resolve `--accept` values for a selection against the rows it chose.
 ///
 /// A bare fingerprint is unambiguous only when one row was chosen, so the ids in
-/// play are the chosen ones and nothing else.
+/// play are the chosen ones and nothing else. A custom row contributes no id:
+/// there is no anchor url to fetch, so its bundle is never reviewed by this run.
+/// An `<id>=` value naming such a row is therefore taken and then unused; it
+/// says so rather than leaving the writer to wonder.
 fn accepted(
     accept: &[String],
     chosen: &[usize],
+    rows: &[presets::Preset],
     command: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Exit> {
-    let ids: Vec<&str> = chosen
-        .iter()
-        .filter_map(|index| presets::PRESETS.get(*index))
+    let picked: Vec<&presets::Preset> =
+        chosen.iter().filter_map(|index| rows.get(*index)).collect();
+    for value in accept {
+        let Ok((id, _)) = crate::cmd::accept::parse(value) else {
+            continue;
+        };
+        if picked
+            .iter()
+            .any(|preset| preset.name == id && presets::find(preset.name).is_none())
+        {
+            println!(
+                "{command}: `{id}` is a custom row and its bundle is not fetched; the `--accept` \
+                 value is unused"
+            );
+        }
+    }
+    let ids: Vec<&str> = picked
+        .into_iter()
+        .filter(|preset| presets::find(preset.name).is_some())
         .map(|preset| preset.name)
         .collect();
     crate::cmd::accept::one_or_id(accept, &ids)
         .map_err(|error| Exit::usage(format!("{command}: {error}")))
 }
 
-/// The preset indices the configuration already enables, for the seed.
+/// One `time.tsa.<id>` section, as [`rows`] reads it.
 ///
-/// Only preset ids are known to the table; a hand-added section has no row and
-/// stays untouched either way. The result is in table order, like the picker's
-/// own state, so a piped answer enables in the order shown.
-fn already_enabled(repo: &Repo) -> Result<Vec<usize>, Exit> {
+/// An empty value counts as unset, as `local_get` reads a blanked key: a
+/// `url=` neither makes a row nor erases the preset's own url.
+#[derive(Default)]
+struct Section {
+    url: Option<String>,
+    anchor: Option<String>,
+    alg: Option<String>,
+    policy: Option<String>,
+    /// The `insecure-http` key, when set and parseable: the section wins over
+    /// the preset's own value, exactly as `Policy::load` reads it. An invalid
+    /// value is `None` here, keeping the preset's default next to the refusal a
+    /// load reports.
+    insecure_http: Option<bool>,
+}
+
+/// `text` leaked for the rest of the process.
+fn leak_text(text: String) -> &'static str {
+    Box::leak(text.into_boxed_str())
+}
+
+/// `path` resolved against `repo` and leaked for the rest of the process.
+fn leak_path(repo: &Repo, path: &str) -> &'static Path {
+    Box::leak(anchors::resolve(repo, Path::new(path)).into_boxed_path())
+}
+
+/// The rows a surface shows: the built-in table, then every section a path in.
+///
+/// A configured id the table knows overrides its row from the section — the
+/// section is what seals, so the row must name what it points at, and a mirror
+/// still serves the published roots the `!` marker is judged against. An unknown
+/// id needs a url to be enableable at all, so a url-less section is no row and
+/// is left alone by `apply`. Strings are leaked: the process is about to exit,
+/// and every `&'static [Preset]` signature then stands unchanged.
+pub(crate) fn rows(repo: &Repo) -> Result<&'static [presets::Preset], Exit> {
+    let mut sections: BTreeMap<String, Section> = BTreeMap::new();
+    for (key, value) in anchors::listing(repo)? {
+        let Some(rest) = key.strip_prefix("time.tsa.") else {
+            continue;
+        };
+        let Some((id, field)) = rest.rsplit_once('.') else {
+            continue;
+        };
+        let section = sections.entry(id.to_owned()).or_default();
+        let slot = match field {
+            "url" if !value.is_empty() => &mut section.url,
+            "anchor" if !value.is_empty() => &mut section.anchor,
+            "alg" if !value.is_empty() => &mut section.alg,
+            "policy" if !value.is_empty() => &mut section.policy,
+            "insecure-http" if !value.is_empty() => {
+                // The policy's parser, so a spelling that loads cannot read as
+                // `false` here. An invalid value is refused at seal time; that
+                // row still keeps the preset's own default rather than claiming
+                // a `false` the policy never accepted.
+                section.insecure_http =
+                    git_time_core::policy::parse_bool(&value, "time.tsa.insecure-http").ok();
+                continue;
+            }
+            _ => continue,
+        };
+        *slot = Some(value);
+    }
+
+    let mut rows = presets::PRESETS.to_vec();
+    for id in anchors::tsa_ids(repo)? {
+        let Some(section) = sections.get(&id) else {
+            continue;
+        };
+        if let Some(index) = presets::PRESETS.iter().position(|preset| preset.name == id) {
+            if let Some(url) = &section.url {
+                rows[index].url = leak_text(url.clone());
+            }
+            if let Some(alg) = &section.alg {
+                rows[index].alg = leak_text(alg.clone());
+            }
+            if let Some(policy) = &section.policy {
+                rows[index].policy = Some(leak_text(policy.clone()));
+            }
+            // The configured key wins, as it does in `Policy::load`; an unset
+            // key leaves the preset's own transport alone.
+            if let Some(insecure_http) = section.insecure_http {
+                rows[index].insecure_http = insecure_http;
+            }
+            if let Some(anchor) = &section.anchor {
+                rows[index].anchor_path = Some(leak_path(repo, anchor));
+            }
+            continue;
+        }
+        let Some(url) = &section.url else {
+            continue;
+        };
+        rows.push(presets::Preset {
+            name: leak_text(id),
+            url: leak_text(url.clone()),
+            anchor_url: "",
+            chain: &[],
+            alg: leak_text(section.alg.clone().unwrap_or_else(|| "sha256".to_owned())),
+            policy: section
+                .policy
+                .as_ref()
+                .map(|policy| leak_text(policy.clone())),
+            fingerprints: &[],
+            insecure_http: section.insecure_http.unwrap_or(false),
+            anchor_path: section
+                .anchor
+                .as_ref()
+                .map(|anchor| leak_path(repo, anchor)),
+            curated: false,
+        });
+    }
+    Ok(Box::leak(rows.into_boxed_slice()))
+}
+
+/// The row indices the configuration already enables, for the seed.
+///
+/// Every configured id that is a row is ticked — a custom row included, whose
+/// section is exactly why it is here. An anchor-only section is no row and so
+/// stays unticked, as it is left alone by [`apply`]. The result is in row order,
+/// like the picker's own state, so a piped answer enables in the order shown.
+fn already_enabled(repo: &Repo, rows: &[presets::Preset]) -> Result<Vec<usize>, Exit> {
     let ids = anchors::tsa_ids(repo)?;
     let mut seed: Vec<usize> = ids
         .iter()
-        .filter_map(|id| presets::PRESETS.iter().position(|preset| preset.name == id))
+        .filter_map(|id| rows.iter().position(|preset| preset.name == *id))
         .collect();
     seed.sort_unstable();
     Ok(seed)
@@ -971,20 +1145,27 @@ fn initial(seed: &[usize]) -> picker::Selection {
     picker::Selection::ticked(seed)
 }
 
-/// Print the preset table and take the selection, re-asking on nonsense.
+/// Print the row table and take the selection, re-asking on nonsense.
 ///
 /// `seed` marks the rows the configuration already enables. The table is the
 /// tick state the empty answer accepts; a typed answer overrides it, exactly as
-/// the picker's buffer does.
-fn ask(seed: &[usize], command: &str) -> Result<Vec<usize>, Exit> {
-    for (index, preset) in presets::PRESETS.iter().enumerate() {
+/// the picker's buffer does. A custom row has no tier of its own and says
+/// `custom` in the scope column.
+fn ask(seed: &[usize], rows: &[presets::Preset], command: &str) -> Result<Vec<usize>, Exit> {
+    for (index, preset) in rows.iter().enumerate() {
         println!(
             "{}) [{}] {} {} {} {}{}",
             index + 1,
             if seed.contains(&index) { 'x' } else { ' ' },
             preset.name,
             preset.url,
-            if preset.curated { "default" } else { "opt-in" },
+            if presets::find(preset.name).is_none() {
+                "custom"
+            } else if preset.curated {
+                "default"
+            } else {
+                "opt-in"
+            },
             match preset.fingerprints.last().copied() {
                 Some(fingerprint) => format!("pinned {fingerprint}"),
                 None => "tofu".to_owned(),
@@ -1019,7 +1200,7 @@ fn ask(seed: &[usize], command: &str) -> Result<Vec<usize>, Exit> {
         if line.trim().is_empty() {
             return Ok(seed.to_vec());
         }
-        match parse_choice(&line, presets::PRESETS.len()) {
+        match parse_choice(&line, rows.len()) {
             Ok(chosen) => return Ok(chosen),
             Err(message) => eprintln!("{command}: {message}"),
         }
@@ -1075,22 +1256,27 @@ fn index(text: &str, count: usize) -> Option<usize> {
 async fn apply(
     repo: &Repo,
     chosen: &[usize],
+    rows: &[presets::Preset],
     accept: &std::collections::BTreeMap<String, String>,
     dry_run: bool,
 ) -> Exit {
-    let configured = match anchors::configured(repo) {
-        Ok(configured) => configured,
+    let configured_ids: BTreeSet<String> = match anchors::tsa_ids(repo) {
+        Ok(ids) => ids.into_iter().collect(),
         Err(exit) => return exit,
     };
-    // Only preset ids are managed here; a hand-added section stays.
-    let unwanted: Vec<&str> = presets::names()
-        .filter(|name| {
-            !chosen
-                .iter()
-                .filter_map(|index| presets::PRESETS.get(*index))
-                .any(|preset| preset.name == *name)
-                && configured.iter().any(|anchor| anchor.id == *name)
+    // Every configured row that is not chosen is unwanted; a section that is no
+    // row is absent from `rows` and therefore survives.
+    let chosen_names: BTreeSet<&str> = chosen
+        .iter()
+        .filter_map(|index| rows.get(*index))
+        .map(|preset| preset.name)
+        .collect();
+    let unwanted: Vec<&str> = rows
+        .iter()
+        .filter(|preset| {
+            !chosen_names.contains(preset.name) && configured_ids.contains(preset.name)
         })
+        .map(|preset| preset.name)
         .collect();
 
     if dry_run {
@@ -1107,9 +1293,20 @@ async fn apply(
 
     let mut failed = false;
     for index in chosen {
-        let Some(preset) = presets::PRESETS.get(*index) else {
+        let Some(preset) = rows.get(*index) else {
             continue;
         };
+        // A custom row has no chain to fetch and is configured already: keeping
+        // it is the whole action, and re-pinning it would fail on the empty
+        // chain.
+        if presets::find(preset.name).is_none() {
+            if dry_run {
+                println!("would keep {} ({})", preset.name, preset.url);
+            } else {
+                println!("kept {} ({})", preset.name, preset.url);
+            }
+            continue;
+        }
         if dry_run {
             println!(
                 "would enable {} ({}) fingerprint {}",
@@ -1141,12 +1338,7 @@ async fn apply(
                     }
                     continue;
                 }
-                let anchor = anchors::configured(repo)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .find(|anchor| anchor.id == preset.name)
-                    .map(|anchor| anchor.path)
-                    .unwrap_or_else(|| anchors::dir().join(format!("{}.pem", preset.name)));
+                let anchor = anchors::bundle_path(preset);
                 // The root the pin just wrote, with its own date: the newly
                 // pinned root leads the bundle, so it is the first root — and a
                 // leaf never stands in for it. The digest keeps the spelling the
@@ -1199,9 +1391,15 @@ async fn apply(
     }
 }
 
-/// Delete one preset's whole section, saying so.
+/// Delete one authority's whole section, saying so.
+///
+/// [`rows`] reads the merged config, so an ambient `time.tsa.<id>` in a wider
+/// scope is a ticked row with nothing to remove locally. Unticking it must not
+/// abort the rest of the answer: the section simply stays where it lives, which
+/// is the honest outcome, because `--local` cannot reach it anyway. Only a
+/// missing *local* section is forgiven; every other failure still stops.
 fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
-    git_stdout(
+    match git_stdout(
         repo,
         &[
             "config",
@@ -1209,7 +1407,14 @@ fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
             "--remove-section",
             &format!("time.tsa.{id}"),
         ],
-    )?;
+    ) {
+        Ok(_) => {}
+        Err(exit) if exit.message().contains("no such section") => {
+            println!("disabled {id} (left in the wider scope)");
+            return Ok(());
+        }
+        Err(exit) => return Err(exit),
+    }
     println!("disabled {id}");
     Ok(())
 }
@@ -1393,11 +1598,12 @@ fn validate_policy(alg: Alg, policy: &str) -> Result<(), Exit> {
 }
 
 /// Whether a config value is one of the git spellings of true.
+///
+/// The parser is the policy's own, so a spelling that loads can never read as
+/// `false` here. An invalid value is `false`, which is all a bare `bool` can
+/// say; the section itself is still refused at seal time.
 fn reads_true(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "true" | "yes" | "on" | "1"
-    )
+    git_time_core::policy::parse_bool(value, "").unwrap_or(false)
 }
 
 /// One local config value, `None` when the key is unset.
@@ -1422,26 +1628,49 @@ mod tests {
     use git_time_core::presets;
     use git_time_core::repo::Repo;
 
-    /// Write `time.tsa.<id>.url` in the local config of `dir`.
-    fn configure(dir: &std::path::Path, id: &str) {
+    /// Write one local config key of `dir`.
+    fn set(dir: &std::path::Path, key: &str, value: &str) {
         let status = std::process::Command::new("git")
             .arg("-C")
             .arg(dir)
-            .args([
-                "config",
-                "--local",
-                &format!("time.tsa.{id}.url"),
-                &format!("https://tsa.example/{id}"),
-            ])
+            .args(["config", "--local", key, value])
             .status()
             .expect("git config");
-        assert!(status.success(), "configure {id}");
+        assert!(status.success(), "configure {key}");
     }
 
-    /// The seed holds the configured preset rows in table order, not in the
-    /// alphabetical order `tsa_ids` answers in, and a hand-added id is no row.
-    #[test]
-    fn the_seed_is_the_configured_presets_in_table_order() {
+    /// Write `time.tsa.<id>.url` and/or `time.tsa.<id>.anchor` in the local
+    /// config of `dir`.
+    fn configure(dir: &std::path::Path, id: &str, url: Option<&str>, anchor: Option<&str>) {
+        for (field, value) in [("url", url), ("anchor", anchor)] {
+            let Some(value) = value else { continue };
+            set(dir, &format!("time.tsa.{id}.{field}"), value);
+        }
+    }
+
+    /// Keep the developer's global and system config out of these tests.
+    ///
+    /// [`repository`] runs `git init` and [`super::rows`] reads the merged
+    /// config, so a real `time.tsa.*` in the ambient global file would become an
+    /// extra row and turn the assertions red. Set once per test binary; edition
+    /// 2024 makes `set_var` unsafe because another test may be reading the
+    /// environment, and a test that spawns `git` could meet the write.
+    fn insulate() {
+        static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        ONCE.get_or_init(|| {
+            // SAFETY: assigned at most once per process and to values nothing
+            // has cached here; the window is the first `repository` call.
+            unsafe {
+                std::env::set_var("GIT_CONFIG_GLOBAL", "/dev/null");
+                std::env::set_var("GIT_CONFIG_SYSTEM", "/dev/null");
+            }
+        });
+    }
+
+    /// A repository in a fresh temp dir, with the ambient git configuration
+    /// nulled first so only the local config is in play.
+    fn repository() -> (tempfile::TempDir, Repo) {
+        insulate();
         let dir = tempfile::TempDir::new().expect("temp dir");
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
@@ -1450,12 +1679,167 @@ mod tests {
             .expect("git init");
         assert!(status.success(), "init");
         let repo = Repo::open(dir.path()).expect("a repository");
-        // Reverse of the table, and a hand-added id with no row.
-        configure(dir.path(), "digicert");
-        configure(dir.path(), "freetsa");
-        configure(dir.path(), "acme");
+        (dir, repo)
+    }
 
-        assert_eq!(already_enabled(&repo).expect("the seed"), [0, 1]);
+    /// The seed holds every configured row in row order, not in the
+    /// alphabetical order `tsa_ids` answers in: a custom row is seeded too, last.
+    #[test]
+    fn the_seed_is_the_configured_rows_in_row_order() {
+        let (dir, repo) = repository();
+        // Reverse of the table, and a custom id that is a row.
+        configure(
+            dir.path(),
+            "digicert",
+            Some("https://tsa.example/digicert"),
+            None,
+        );
+        configure(
+            dir.path(),
+            "freetsa",
+            Some("https://tsa.example/freetsa"),
+            None,
+        );
+        configure(dir.path(), "acme", Some("https://tsa.example/acme"), None);
+
+        let rows = super::rows(&repo).expect("rows");
+        assert_eq!(
+            already_enabled(&repo, rows).expect("the seed"),
+            [0, 1, presets::PRESETS.len()]
+        );
+    }
+
+    /// A configured unknown id joins the table as a last, custom, TOFU row that
+    /// names the section's endpoint and its configured bundle.
+    #[test]
+    fn a_configured_section_is_a_custom_row_last_with_tofu() {
+        let (dir, repo) = repository();
+        configure(
+            dir.path(),
+            "zz-acme",
+            Some("https://tsa.acme.example/tsr"),
+            Some("bundles/acme.pem"),
+        );
+
+        let rows = super::rows(&repo).expect("rows");
+        assert_eq!(rows.len(), presets::PRESETS.len() + 1);
+        let last = rows.last().expect("a custom row");
+        assert_eq!(last.name, "zz-acme");
+        assert_eq!(last.url, "https://tsa.acme.example/tsr");
+        assert!(last.fingerprints.is_empty(), "an unknown id is TOFU");
+        assert_eq!(
+            last.anchor_path,
+            Some(dir.path().join("bundles/acme.pem").as_path())
+        );
+        assert!(!last.curated, "a custom row is never a default");
+    }
+
+    /// A section with an anchor but no url cannot be enabled, so it is no row.
+    #[test]
+    fn an_unknown_section_without_a_url_is_no_row() {
+        let (dir, repo) = repository();
+        configure(dir.path(), "zz-noauth", None, Some("bundles/noauth.pem"));
+
+        let rows = super::rows(&repo).expect("rows");
+        assert_eq!(rows.len(), presets::PRESETS.len());
+        assert!(rows.iter().all(|row| row.name != "zz-noauth"));
+    }
+
+    /// A configured id the table knows overrides its row from the section: the
+    /// row must name what the repository actually seals with, and the section's
+    /// algorithm, policy and transport win over the published ones.
+    #[test]
+    fn a_configured_preset_takes_the_section_url_and_path() {
+        let (dir, repo) = repository();
+        configure(
+            dir.path(),
+            "freetsa",
+            Some("https://mirror.example/tsr"),
+            Some("bundles/freetsa.pem"),
+        );
+        set(dir.path(), "time.tsa.freetsa.alg", "sha512");
+        set(dir.path(), "time.tsa.freetsa.policy", "1.2.3.4.9");
+        set(dir.path(), "time.tsa.freetsa.insecure-http", "true");
+        // A plain-http preset can be un-marked by an explicit `false`.
+        configure(
+            dir.path(),
+            "digicert",
+            Some("http://digicert.example"),
+            None,
+        );
+        set(dir.path(), "time.tsa.digicert.insecure-http", "false");
+        // An unset key leaves the preset's own value alone.
+        configure(dir.path(), "apple", Some("http://apple.example"), None);
+
+        let rows = super::rows(&repo).expect("rows");
+        let freetsa: Vec<_> = rows.iter().filter(|row| row.name == "freetsa").collect();
+        assert_eq!(freetsa.len(), 1, "no duplicate row");
+        assert_eq!(freetsa[0].url, "https://mirror.example/tsr");
+        assert_eq!(freetsa[0].alg, "sha512");
+        assert_eq!(freetsa[0].policy, Some("1.2.3.4.9"));
+        assert!(freetsa[0].insecure_http, "the section marks it plain http");
+        assert_eq!(
+            freetsa[0].anchor_path,
+            Some(dir.path().join("bundles/freetsa.pem").as_path())
+        );
+
+        let digicert = rows
+            .iter()
+            .find(|row| row.name == "digicert")
+            .expect("a row");
+        assert!(
+            presets::find("digicert")
+                .expect("a plain-http preset")
+                .insecure_http,
+            "the preset is plain http before the section says otherwise"
+        );
+        assert!(
+            !digicert.insecure_http,
+            "a configured `false` un-marks a plain-http preset"
+        );
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "apple")
+                .expect("a row")
+                .insecure_http,
+            "an unset key keeps the preset's own value"
+        );
+    }
+
+    /// A preset id with an anchor but no url is still a row: the preset
+    /// supplies the endpoint, the section the bundle path.
+    #[test]
+    fn a_preset_with_only_an_anchor_keeps_its_url() {
+        let (dir, repo) = repository();
+        configure(dir.path(), "cesnet", None, Some("bundles/cesnet.pem"));
+
+        let rows = super::rows(&repo).expect("rows");
+        let cesnet: Vec<_> = rows.iter().filter(|row| row.name == "cesnet").collect();
+        assert_eq!(cesnet.len(), 1);
+        assert_eq!(
+            cesnet[0].url,
+            presets::find("cesnet").expect("a preset").url
+        );
+        assert_eq!(
+            cesnet[0].anchor_path,
+            Some(dir.path().join("bundles/cesnet.pem").as_path())
+        );
+    }
+
+    /// Custom rows follow the table in id order and never repeat an id.
+    #[test]
+    fn custom_rows_are_sorted_and_never_duplicate() {
+        let (dir, repo) = repository();
+        configure(dir.path(), "zz-b", Some("https://tsa.example/b"), None);
+        configure(dir.path(), "zz-a", Some("https://tsa.example/a"), None);
+
+        let rows = super::rows(&repo).expect("rows");
+        let custom: Vec<&str> = rows
+            .iter()
+            .skip(presets::PRESETS.len())
+            .map(|row| row.name)
+            .collect();
+        assert_eq!(custom, ["zz-a", "zz-b"]);
     }
 
     /// The cursor UI opens on the seed. No pty exists in the suite, so the
@@ -1467,33 +1851,89 @@ mod tests {
         assert!(selection.is_chosen(1));
     }
 
-    /// A bare accept is unambiguous only for a selection of one row; two rows
-    /// need the id, since only the chosen rows can be fetched.
+    /// A bare accept is unambiguous only for a selection of one preset row; two
+    /// rows need the id, and a custom row counts for nothing because the run
+    /// fetches no id for it.
     #[test]
-    fn a_bare_accept_is_read_against_the_chosen_row() {
+    fn a_bare_accept_ignores_a_chosen_custom_row() {
+        let (dir, repo) = repository();
+        configure(
+            dir.path(),
+            "zz-acme",
+            Some("https://tsa.acme.example/tsr"),
+            None,
+        );
+        let rows = super::rows(&repo).expect("rows");
+        let custom = rows
+            .iter()
+            .position(|row| row.name == "zz-acme")
+            .expect("a custom row");
+        let freetsa = rows
+            .iter()
+            .position(|row| row.name == "freetsa")
+            .expect("a preset row");
+
         let bare = ["AA:BB".to_owned()];
-        let one =
-            accepted(&bare, &[0], "git time tsa select").expect("one chosen row names the id");
-        assert_eq!(one[presets::PRESETS[0].name], "AA:BB");
+        let one = accepted(&bare, &[freetsa, custom], rows, "git time tsa select")
+            .expect("the preset row is the only id in play");
+        assert_eq!(one.len(), 1, "{one:?}");
+        assert_eq!(one["freetsa"], "AA:BB");
 
-        let two =
-            accepted(&bare, &[0, 1], "git time tsa select").expect_err("two rows are ambiguous");
-        assert!(two.message().contains(presets::PRESETS[0].name), "{two:?}");
+        let two = accepted(&bare, &[freetsa, 1], rows, "git time tsa select")
+            .expect_err("two preset rows are ambiguous");
+        assert!(two.message().contains("freetsa"), "{two:?}");
 
-        let by_id = accepted(&["digicert=AA:BB".to_owned()], &[1], "git time tsa select")
-            .expect("the id is taken as given");
+        let by_id = accepted(
+            &["digicert=AA:BB".to_owned()],
+            &[1],
+            rows,
+            "git time tsa select",
+        )
+        .expect("the id is taken as given");
         assert_eq!(by_id["digicert"], "AA:BB");
     }
 
-    /// A hand-added, unmeasured preset has nothing to date it with and says so;
-    /// a published one with no local certificate only says the date is missing,
-    /// and a measured one shows the measurement. No built-in row is in the
-    /// first position any more, which is why this is constructed.
+    /// An `insecure-http` value the policy refuses keeps the preset's own value
+    /// in the row: the row must not claim a `false` that `Policy::load` never
+    /// accepts. A spelling the policy does accept is read the same way in both
+    /// places, so `on` marks the row insecure here too.
+    #[test]
+    fn an_unparsable_insecure_http_keeps_the_preset_value() {
+        let (dir, repo) = repository();
+        // `apple` is a plain-http preset, `freetsa` an https one. A preset
+        // section needs an anchor (or a url) to be a row at all.
+        configure(dir.path(), "apple", None, Some("bundles/apple.pem"));
+        configure(dir.path(), "freetsa", None, Some("bundles/freetsa.pem"));
+        set(dir.path(), "time.tsa.apple.insecure-http", "junk");
+        set(dir.path(), "time.tsa.freetsa.insecure-http", "on");
+
+        let rows = super::rows(&repo).expect("rows");
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "apple")
+                .expect("a row")
+                .insecure_http,
+            "an invalid value leaves the preset's own `true` alone"
+        );
+        assert!(
+            rows.iter()
+                .find(|row| row.name == "freetsa")
+                .expect("a row")
+                .insecure_http,
+            "`on` is a spelling the policy accepts"
+        );
+    }
+
+    /// A hand-added, unmeasured row is trust on first use and has no date to
+    /// show; a published row with no local certificate only says the date is
+    /// missing, and a measured one shows the measurement. No built-in row
+    /// publishes nothing any more, so that shape takes a known name.
     #[test]
     fn the_listing_says_why_a_date_is_missing() {
+        use crate::cmd::anchors::RootRow;
         use crate::cmd::picker::Cell;
 
-        let mut preset = presets::Preset {
+        let custom = presets::Preset {
             name: "unpublished",
             url: "http://tsa.example/tsr",
             anchor_url: "http://tsa.example/tsr",
@@ -1502,25 +1942,46 @@ mod tests {
             policy: None,
             fingerprints: &[],
             insecure_http: true,
+            anchor_path: None,
             curated: false,
         };
         // Nothing was asked, which is the only no-date wording a plain run has.
+        // An unknown id is TOFU, the picker's own word, not `not pinned`.
         assert_eq!(
-            pin_state(&preset, Cell::Idle, None, false, jiff::Timestamp::now()),
+            pin_state(&custom, None, Cell::Idle, false, jiff::Timestamp::now()),
+            "tofu"
+        );
+
+        let published = presets::find("freetsa").expect("a published preset");
+        assert_eq!(
+            pin_state(published, None, Cell::Idle, false, jiff::Timestamp::now()),
+            "-"
+        );
+        let unpublished_preset = presets::Preset {
+            fingerprints: &[],
+            ..*published
+        };
+        assert_eq!(
+            pin_state(
+                &unpublished_preset,
+                None,
+                Cell::Idle,
+                false,
+                jiff::Timestamp::now()
+            ),
             "not pinned"
         );
 
-        preset.fingerprints = &["AA:BB"];
+        // The shape `anchors::expiry_text` returns at the caller, short form
+        // included, and the local bundle wins over any probe. A fixed instant
+        // keeps the verdict off the calendar.
+        let soon = jiff::Timestamp::from_second(1_793_000_000).expect("2026-10-26");
+        let roots = [RootRow {
+            fingerprint: "aa".repeat(32),
+            not_after: "2026-12-02".to_owned(),
+        }];
         assert_eq!(
-            pin_state(&preset, Cell::Idle, None, false, jiff::Timestamp::now()),
-            "-"
-        );
-
-        // The shape `expiry_text` returns at the caller, short form included,
-        // and the local bundle wins over any probe.
-        let expiry = Some("2026-12-02 (expires soon)".to_owned());
-        assert_eq!(
-            pin_state(&preset, Cell::Failed, expiry, false, jiff::Timestamp::now()),
+            pin_state(&custom, Some(&roots), Cell::Failed, false, soon),
             "2026-12-02 (expires soon)"
         );
 
@@ -1529,27 +1990,43 @@ mod tests {
             not_after: "2041-03-07".to_owned(),
             fingerprint: "aa".repeat(32),
         });
+        let now = jiff::Timestamp::now();
         assert_eq!(
-            pin_state(&preset, served, None, false, jiff::Timestamp::now()),
+            pin_state(&custom, None, served, false, now),
             "fetch 2041-03-07"
         );
+        assert_eq!(pin_state(&custom, None, Cell::Pending, false, now), "…");
+        assert_eq!(pin_state(&custom, None, Cell::Failed, false, now), "?");
+        assert_eq!(pin_state(&custom, None, Cell::Unpublished, false, now), "?");
+    }
+
+    /// A custom row has no publication list and no bundle, so its `Idle` cell
+    /// must say `tofu`, the picker's word for trust on first use; a built-in
+    /// row keeps the listing's missing-date `-` and the picker's `pin -`.
+    #[test]
+    fn a_custom_row_says_tofu_where_a_builtin_says_a_missing_date() {
+        use crate::cmd::picker::Cell;
+
+        let now = jiff::Timestamp::now();
+        let custom = presets::Preset {
+            name: "zz-acme",
+            url: "https://tsa.acme.example/tsr",
+            anchor_url: "",
+            chain: &[],
+            alg: "sha256",
+            policy: None,
+            fingerprints: &[],
+            insecure_http: false,
+            anchor_path: None,
+            curated: false,
+        };
+        assert_eq!(pin_state(&custom, None, Cell::Idle, false, now), "tofu");
+
+        let freetsa = presets::find("freetsa").expect("a published preset");
+        assert_eq!(pin_state(freetsa, None, Cell::Idle, false, now), "-");
         assert_eq!(
-            pin_state(&preset, Cell::Pending, None, false, jiff::Timestamp::now()),
-            "…"
-        );
-        assert_eq!(
-            pin_state(&preset, Cell::Failed, None, false, jiff::Timestamp::now()),
-            "?"
-        );
-        assert_eq!(
-            pin_state(
-                &preset,
-                Cell::Unpublished,
-                None,
-                false,
-                jiff::Timestamp::now()
-            ),
-            "?"
+            crate::cmd::picker::trust(freetsa, None, now, Cell::Idle),
+            "pin -"
         );
     }
 
@@ -1565,11 +2042,11 @@ mod tests {
         let before = jiff::Timestamp::from_second(1_793_000_000).expect("2026-10-26");
         let after = jiff::Timestamp::from_second(1_800_000_000).expect("2027-01-15");
         assert_eq!(
-            pin_state(preset, served.clone(), None, false, before),
+            pin_state(preset, None, served.clone(), false, before),
             "fetch expires 2026-12-02"
         );
         assert_eq!(
-            pin_state(preset, served, None, false, after),
+            pin_state(preset, None, served, false, after),
             "fetch EXPIRED"
         );
     }
@@ -1608,15 +2085,9 @@ mod tests {
             Cell::Known(foreign.clone()),
             now
         ));
-        let expiry = Some("2041-03-07".to_owned());
+        let bundle = Some(&roots[..]);
         assert_eq!(
-            pin_state(
-                preset,
-                Cell::Known(foreign.clone()),
-                expiry.clone(),
-                true,
-                now
-            ),
+            pin_state(preset, bundle, Cell::Known(foreign.clone()), true, now),
             "2041-03-07 !"
         );
         // The one the bundle holds stays quiet.
@@ -1627,7 +2098,7 @@ mod tests {
             now
         ));
         assert_eq!(
-            pin_state(preset, Cell::Known(held.clone()), expiry, false, now),
+            pin_state(preset, bundle, Cell::Known(held.clone()), false, now),
             "2041-03-07"
         );
 

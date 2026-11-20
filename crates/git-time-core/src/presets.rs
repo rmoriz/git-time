@@ -85,7 +85,12 @@
 //! those presets so the writer records the acceptance and the seal warns about
 //! it.
 
+use std::path::Path;
+
 /// One public authority a preset configures.
+///
+/// Every field is `Copy`, so the type stays `Copy`: a table row can be read by
+/// value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Preset {
     /// The config id and the anchor file stem.
@@ -133,6 +138,9 @@ pub struct Preset {
     pub fingerprints: &'static [&'static str],
     /// Whether the endpoint is plain `http://` and is accepted as such.
     pub insecure_http: bool,
+    /// Where this authority's bundle is pinned, when the repository configured a
+    /// path other than the default `dir()/<name>.pem`. `None` is the default.
+    pub anchor_path: Option<&'static Path>,
     /// Whether the curated default writes it.
     ///
     /// [`curated`] is a prefix of the table. A default that queries every
@@ -159,6 +167,7 @@ pub const PRESETS: [Preset; 21] = [
             "A6:37:9E:7C:EC:C0:5F:AA:3C:BF:07:60:13:D7:45:E3:27:BB:BA:A3:8C:0B:9A:F2:24:69:D4:70:1D:18:AA:BC",
         ],
         insecure_http: false,
+        anchor_path: None,
         curated: true,
     },
     Preset {
@@ -170,6 +179,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
         insecure_http: true,
+        anchor_path: None,
         curated: true,
     },
     Preset {
@@ -183,6 +193,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["CB:73:94:4C:04:2E:53:BF:C4:57:9D:2F:71:2F:3E:EA:99:FE:43:07"],
         insecure_http: false,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -194,6 +205,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["07:E0:32:E0:20:B7:2C:3F:19:2F:06:28:A2:59:3A:19:A7:0F:06:9E"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -207,6 +219,7 @@ pub const PRESETS: [Preset; 21] = [
             "8E:5B:8B:AE:DC:4D:58:BE:0E:30:1C:CC:B6:ED:17:3C:08:D7:C7:7C:E4:35:09:73:38:9F:F1:AF:A1:1D:7A:65",
         ],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -218,6 +231,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["F4:00:42:E2:E5:F7:E8:EF:81:89:FE:D1:55:19:AE:CE:42:C3:BF:A2"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -229,6 +243,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -240,6 +255,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["44:4D:AE:31:5D:00:21:9C:6A:15:2F:0C:C0:2A:AE:32:3B:F9:C6:AC"],
         insecure_http: false,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -254,6 +270,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["E8:9D:08:31:6C:29:D1:15:74:9A:27:ED:58:13:32:CB:0A:B4:D7:9F"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -265,6 +282,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["61:1E:5B:66:2C:59:3A:08:FF:58:D1:4A:E2:24:52:D1:98:DF:6C:60"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -279,6 +297,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     // The owner's live-TSA list, minus the endpoints already above. Its
@@ -293,6 +312,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -304,6 +324,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["52:42:1A:EA:C4:24:C2:43:5E:7F:53:55:A3:04:37:A3:B1:74:58:79"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -315,6 +336,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["BA:29:41:60:77:98:3F:F4:F3:EF:F2:31:05:3B:2E:EA:6D:4D:45:FD"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -326,6 +348,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["1B:8E:EA:57:96:29:1A:C9:39:EA:B8:0A:81:1A:73:73:C0:93:79:67"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -337,6 +360,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["B7:AB:33:08:D1:EA:44:77:BA:14:80:12:5A:6F:BD:A9:36:49:0C:BB"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -348,6 +372,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["98:98:9F:EE:C1:6A:D7:74:61:54:15:E9:3A:96:3E:A3:EE:F5:FE:4F"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -361,6 +386,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["E7:84:74:90:F7:11:43:FC:CE:F6:F6:5A:30:DA:1F:23:9E:0F:D7:BA"],
         insecure_http: false,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -374,6 +400,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["9E:79:CD:4E:A8:C2:79:08:11:D6:DA:43:ED:23:90:A6:CE:FF:35:3C"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -385,6 +412,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["88:21:9A:14:A6:A1:FF:5B:62:25:17:F7:00:1E:C3:02:C3:11:01:D7"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
     Preset {
@@ -396,6 +424,7 @@ pub const PRESETS: [Preset; 21] = [
         policy: None,
         fingerprints: &["93:05:7A:88:15:C6:4F:CE:88:2F:FA:91:16:52:28:78:BC:53:64:17"],
         insecure_http: true,
+        anchor_path: None,
         curated: false,
     },
 ];

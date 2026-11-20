@@ -37,13 +37,18 @@ trust this tool's own crypto.
 `tsa select` is a cursor list. `j`/`k` or the arrows move, `space` ticks, `a` and `n` take or clear
 everything, `r` asks the authorities again, and digits typed on the prompt line take that selection
 (`1,3-4`, `all`, `none`).
-Authorities already configured start ticked. The `pin` column is the trust tier: the root is checked
-against the table and a mismatch is a refusal. `pin -` is a published root that is not pinned on this
-machine yet, and `enter` pins it on the way out; the probe below replaces the wording with `…` and
-then the served date, so `pin -` is what the line prompt keeps.
-`tofu` takes no row any more, because every preset publishes a root: a preset that publishes
-nothing can only be reviewed by reading the fingerprint the command prints. `http` marks a plain-http
-endpoint; the full URL of the cursor row is printed below the list, so no column has to carry it.
+Authorities already configured start ticked, a `custom` row among them. The `pin` column is the
+trust tier: the root is checked against the table and a mismatch is a refusal. `pin -` is a
+published root that is not pinned on this machine yet, and `enter` pins it on the way out; the
+probe below replaces the wording with `…` and then the served date, so `pin -` is what the line
+prompt keeps.
+`tofu` is a `custom` row's tier: such a row publishes no root to check, so its first pin can only be
+reviewed by reading the fingerprint `git time anchor fetch` prints. `enter` pins only the built-in
+rows and keeps a custom one exactly as it is; saving with a custom row unticked removes its section,
+like any other. A section in a wider config scope (a machine-wide `time.tsa.<id>`) has nothing to
+remove locally, so `enter` leaves it there and says so.
+`http` marks a plain-http endpoint; the full URL of the cursor row is printed below the list, so no
+column has to carry it.
 
 ```console
  > [x]  1  freetsa            pin 2041-03-07 
@@ -59,19 +64,19 @@ space toggle  a all  n none  j/k or arrows move  r refresh  enter save  q abort
 ```
 
 `enter` saves and pins; `q`, `esc` or `ctrl-c` leave without writing. A change keeps the other
-configured authorities because they start ticked; `n` clears every tick, and saving that empty set is
-how preset sections are removed. The `pin` dates are the roots' expiry; a root in its last 90 days
+configured authorities because they start ticked; `n` clears every tick, and saving that empty set
+is how sections are removed. The `pin` dates are the roots' expiry; a root in its last 90 days
 reads `pin expires <date>`, a bundle all past reads `EXPIRED`. `git time install` on a repository
 with no authority hands over to the same UI, so installing and choosing can be one step.
 
 The picker also asks each authority for its root in the background and fills the column in while
-nothing is pinned here: `fetch <date>` is the newest root the authority served, `…` means the answer
-is still out, and `?` means it failed or served no published root; an authority that publishes
-nothing is never asked and keeps `tofu`. `fetch` is not a pin — a probe pins nothing — and the
-answer is cached for a week under `$XDG_CONFIG_HOME/git-time/probe/` (or `~/.config/…`), so a date
-can be up to a week old until `r` asks again. Only answers are cached, so a failed or unpublished row
-is asked again on the next run. A served root the pinned bundle does not hold appends `!`, which is a
-rotation to look at.
+nothing is pinned here: `fetch <date>` is the newest root the authority served, `…` means the
+answer is still out, and `?` means it failed or served no published root; a row that publishes
+nothing — every custom one — is never asked and keeps `tofu`. `fetch` is not a pin — a probe pins
+nothing — and the answer is cached for a week under `$XDG_CONFIG_HOME/git-time/probe/` (or
+`~/.config/…`), so a date can be up to a week old until `r` asks again. Only answers are cached,
+so a failed or unpublished row is asked again on the next run. A served root the pinned bundle does
+not hold appends `!`, which is a rotation to look at.
 
 In a script, no prompt happens: `git time tsa preset add <id>` enables one preset and `git time
 tsa add <url>` a hand-picked endpoint, both never asking. A `tsa select` without a terminal exits

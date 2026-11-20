@@ -258,14 +258,7 @@ pub(crate) async fn pin(
 ) -> Result<Pinned, Exit> {
     let base = format!("time.tsa.{}", authority.name);
     // Read before writing: the key may be set already and is then the target.
-    let configured = anchors::configured(repo)?
-        .into_iter()
-        .find(|anchor| anchor.id == authority.name)
-        .map(|anchor| anchor.path);
-    let path = match configured {
-        Some(path) => path,
-        None => anchors::dir().join(format!("{}.pem", authority.name)),
-    };
+    let path = anchors::target(repo, authority.name)?;
     if let Some(parent) = path.parent()
         && let Err(error) = std::fs::create_dir_all(parent)
     {
