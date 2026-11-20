@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -98,7 +98,7 @@ pub fn store(id: &str, served: &Cached, now: jiff::Timestamp) -> bool {
 /// out against [`TTL`]. This is the "drop it for real" path, used by the tests
 /// to start from an empty cache.
 #[must_use]
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn forget(id: &str) -> bool {
     fs::remove_file(dir().join(id)).is_ok()
 }
@@ -228,6 +228,19 @@ struct Shared {
     queue: Mutex<Queue>,
     wake: Condvar,
     failed: AtomicUsize,
+    /// The sending half of the result channel, taken out by [`Prober::settle`]
+    /// and `Drop` so that the workers dropping their clones is what ends the
+    /// channel. It lives here rather than in the `Prober` because the threads
+    /// that need a clone are started lazily, after the prober exists.
+    sender: Mutex<Option<Sender<(usize, Served)>>>,
+    /// Whether [`spawn`] already started the workers: set before the first
+    /// thread, so two queueing calls cannot start two sets.
+    workers: AtomicBool,
+    /// How many workers this prober has started: read by the tests that pin
+    /// when workers come up. Per prober rather than a static, because the tests
+    /// run side by side and would otherwise count each other's spawns.
+    #[cfg(test)]
+    spawned: AtomicUsize,
 }
 
 /// A queue of rows being probed by detached threads, and their results.
@@ -240,11 +253,17 @@ pub struct Prober {
 }
 
 impl Prober {
-    /// Queue every preset except the `skip`ped indices and start the workers.
+    /// Queue every preset except the `skip`ped indices, and start the workers
+    /// only if that left a row.
+    ///
+    /// A plain run or a selector with a fresh cache skips everything, so its
+    /// prober holds no thread at all until something is queued — either here
+    /// or through a later [`Prober::refresh`].
     #[must_use]
     pub fn start(presets: &'static [Preset], fetch: Fetch, skip: &[usize]) -> Self {
         let mut rows = VecDeque::new();
-        enqueue(&mut rows, presets.len(), skip);
+        let queued = enqueue(&mut rows, presets.len(), skip);
+        let (sender, results) = mpsc::channel();
         let shared = Arc::new(Shared {
             presets,
             fetch,
@@ -255,12 +274,13 @@ impl Prober {
             }),
             wake: Condvar::new(),
             failed: AtomicUsize::new(0),
+            sender: Mutex::new(Some(sender)),
+            workers: AtomicBool::new(false),
+            #[cfg(test)]
+            spawned: AtomicUsize::new(0),
         });
-        let (sender, results) = mpsc::channel();
-        for _ in 0..PROBE_THREADS {
-            let shared = Arc::clone(&shared);
-            let sender = sender.clone();
-            std::thread::spawn(move || work(&shared, &sender));
+        if queued > 0 {
+            spawn(&shared);
         }
         Self { shared, results }
     }
@@ -272,10 +292,19 @@ impl Prober {
     /// caller keys by index and keeps the last answer, and a [`Served::Known`]
     /// store overwrites the entry the earlier answer left — the cache holds one
     /// date per authority, so the newest reply is the one that counts.
+    ///
+    /// This is also where the workers come up when the queue was empty at
+    /// [`Prober::start`]: `r` on a fresh cache has to fetch, so a refresh that
+    /// queues anything starts them.
     pub fn refresh(&self, skip: &[usize]) {
-        {
+        let queued = {
             let mut queue = lock(&self.shared);
-            enqueue(&mut queue.rows, self.shared.presets.len(), skip);
+            enqueue(&mut queue.rows, self.shared.presets.len(), skip)
+        };
+        // Out of the lock: `spawn` clones the sender and starts the threads,
+        // which take the queue again on their first row.
+        if queued > 0 {
+            spawn(&self.shared);
         }
         self.shared.wake.notify_all();
     }
@@ -293,23 +322,36 @@ impl Prober {
     ///
     /// The queue closes first, so a row no worker has taken up is given back
     /// instead of being fetched into a screen that is already leaving. The
-    /// workers then finish what they hold and drop their senders, which is what
-    /// ends the receive: nothing is joined, and [`SETTLE`] bounds the whole wait
-    /// against one instant, because neither fetch path bounds a quit. Whatever
-    /// has not arrived by then is dropped; the cache write happens before the
-    /// send, so a dropped answer is still cached for the next run.
+    /// sender is taken out of the shared state for the same reason: the last
+    /// clone left with the workers, whose drops end the receive once they have
+    /// finished what they hold. Nothing is joined, and [`SETTLE`] bounds the
+    /// whole wait against one instant, because neither fetch path bounds a quit.
+    /// Whatever has not arrived by then is dropped; the cache write happens
+    /// before the send, so a dropped answer is still cached for the next run.
+    ///
+    /// A queue that is neither filled nor in flight has no worker to wait for —
+    /// its closed, taken channel ends at once — so that case only drains what
+    /// has already arrived and returns.
     ///
     /// This is the last drain: [`Prober::drain`] would no longer see the queue's
     /// late answers because the receiver is consumed here.
     #[must_use]
     pub fn settle(self) -> Vec<(usize, Served)> {
-        {
+        let idle = {
             let mut queue = lock(&self.shared);
             queue.closed = true;
-        }
+            // `in_flight` as well as the rows: a row a worker holds is still an
+            // answer that can arrive, and a worker parked on an empty queue
+            // looks the same from here as one that is fetching.
+            queue.rows.is_empty() && queue.in_flight == 0
+        };
+        close_sender(&self.shared);
         self.shared.wake.notify_all();
-        let deadline = Instant::now() + SETTLE;
         let mut results = self.drain();
+        if idle {
+            return results;
+        }
+        let deadline = Instant::now() + SETTLE;
         // `checked_duration_since` also ends the loop once the deadline has
         // passed during the previous receive.
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
@@ -344,6 +386,14 @@ impl Prober {
     pub fn failed(&self) -> usize {
         self.shared.failed.load(Ordering::Relaxed)
     }
+
+    /// How many workers were started, so a test can pin that a queue which never
+    /// fills starts none and that a refresh does.
+    #[cfg(test)]
+    #[must_use]
+    pub fn spawned(&self) -> usize {
+        self.shared.spawned.load(Ordering::Relaxed)
+    }
 }
 
 impl Drop for Prober {
@@ -351,8 +401,24 @@ impl Drop for Prober {
         let mut queue = lock(&self.shared);
         queue.closed = true;
         drop(queue);
+        // A prober that is dropped without `settle` still has to let its worker
+        // set end: the taken sender is the one they would otherwise leave alive.
+        close_sender(&self.shared);
         self.shared.wake.notify_all();
     }
+}
+
+/// Take the sending half out of the shared state and drop it.
+///
+/// Whatever clones the workers hold keep the channel open until they return;
+/// with no sender left anywhere the receive ends at once.
+fn close_sender(shared: &Shared) {
+    let taken = shared
+        .sender
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    drop(taken);
 }
 
 /// Take the queue lock, ignoring a panic in a previous holder.
@@ -363,9 +429,44 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Queue> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Append every index below `count` that is not in `skip`, in order.
-fn enqueue(rows: &mut VecDeque<usize>, count: usize, skip: &[usize]) {
+/// Append every index below `count` that is not in `skip`, in order, answering
+/// how many were appended.
+fn enqueue(rows: &mut VecDeque<usize>, count: usize, skip: &[usize]) -> usize {
+    let before = rows.len();
     rows.extend((0..count).filter(|index| !skip.contains(index)));
+    rows.len() - before
+}
+
+/// Start the workers, once.
+///
+/// Both the queueing calls reach this, so the flag makes a second call a no-op
+/// even while the first is still starting its threads. A prober whose sender is
+/// already taken (a `settle` in progress) starts nothing: the threads it would
+/// start could not report. That makes a `refresh` racing a `settle` on another
+/// thread a no-op as well — the sender is gone and the queue is closed — so a
+/// row it queues in that window is not fetched, which is the pre-existing
+/// post-close rule.
+fn spawn(shared: &Arc<Shared>) {
+    let slot = shared
+        .sender
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(sender) = slot.clone() else {
+        return;
+    };
+    if shared.workers.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    drop(slot);
+    for _ in 0..PROBE_THREADS {
+        let worker_shared = Arc::clone(shared);
+        let worker_sender = sender.clone();
+        std::thread::spawn(move || work(&worker_shared, &worker_sender));
+        // After the spawn, so the count is of threads that exist rather than of
+        // attempts.
+        #[cfg(test)]
+        shared.spawned.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// The in-flight mark of one popped row.
@@ -1055,6 +1156,54 @@ pub(crate) mod tests {
         prober.refresh(&[]);
         assert!(prober.pending() >= presets::PRESETS.len());
         wait(&prober);
+    }
+
+    #[test]
+    fn a_fully_skipped_table_spawns_no_worker() {
+        let every: Vec<usize> = (0..presets::PRESETS.len()).collect();
+        let prober = super::Prober::start(
+            &presets::PRESETS,
+            Arc::new(|_, _| -> Result<Vec<u8>, String> {
+                panic!("an empty queue fetches nothing")
+            }),
+            &every,
+        );
+        assert_eq!(prober.pending(), 0, "nothing was queued");
+        assert_eq!(prober.spawned(), 0, "and no worker came up for it");
+        let started = std::time::Instant::now();
+        let results = prober.settle();
+        let waited = started.elapsed();
+        assert!(
+            results.is_empty(),
+            "settling returns nothing: {}",
+            results.len()
+        );
+        assert!(
+            waited < super::SETTLE,
+            "and does not wait it out: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn the_first_refresh_starts_the_workers() {
+        let _guard = xdg_lock();
+        xdg();
+        urls();
+        let every: Vec<usize> = (0..presets::PRESETS.len()).collect();
+        let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &every);
+        assert_eq!(prober.spawned(), 0, "the empty queue starts nothing");
+        prober.refresh(&[]);
+        let mut indices: Vec<usize> = wait(&prober).into_iter().map(|(index, _)| index).collect();
+        indices.sort_unstable();
+        assert_eq!(indices, (0..presets::PRESETS.len()).collect::<Vec<_>>());
+        assert_eq!(prober.spawned(), super::PROBE_THREADS, "one set of workers");
+        // The set is started once: a later refresh only queues again.
+        prober.refresh(&[]);
+        assert_eq!(
+            prober.spawned(),
+            super::PROBE_THREADS,
+            "a second refresh starts nothing"
+        );
     }
 
     #[test]
