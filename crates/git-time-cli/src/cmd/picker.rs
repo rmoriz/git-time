@@ -470,9 +470,9 @@ fn row(
         ' '
     };
     let tick = if selection.is_chosen(index) { 'x' } else { ' ' };
-    // The default bundle path is what `install` writes; a configured path is not
-    // known here, and a preset that is pinned here is pinned there.
-    let anchor = anchors::dir().join(format!("{}.pem", preset.name));
+    // The configured bundle path when the repository named one, else the
+    // default `install` writes.
+    let anchor = anchors::bundle_path(preset);
     let trust = trust(
         preset,
         anchors::roots(&anchor).as_deref(),
@@ -525,7 +525,7 @@ fn row(
 /// The date is what a reader weighs a rotation by, so it sits where the choice
 /// is made — and it is the newest live root's, since a bundle's order is
 /// append order and not date order.
-fn trust(
+pub(crate) fn trust(
     preset: &Preset,
     roots: Option<&[anchors::RootRow]>,
     now: jiff::Timestamp,
@@ -1538,6 +1538,57 @@ mod tests {
         }
     }
 
+    /// A row as a configured, unknown `time.tsa.<id>` section produces one: an
+    /// id no table knows and trust on first use. The configured bundle path is
+    /// set by the test, because it names a temp dir.
+    fn configured_custom() -> presets::Preset {
+        presets::Preset {
+            name: "zz-acme",
+            url: "https://tsa.acme.example/tsr",
+            anchor_url: "",
+            insecure_http: false,
+            ..unpublished()
+        }
+    }
+
+    /// The configured bundle path is what the row reads: without one a custom
+    /// row is TOFU, and with a root behind the configured path it shows that
+    /// root's date instead of the pin-dash wording its empty publication list
+    /// would otherwise earn.
+    #[test]
+    fn a_custom_row_says_tofu_until_its_own_bundle_is_pinned() {
+        // `XDG_CONFIG_HOME` is process-wide, so hold it across both frames.
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        let xdg = tempfile::TempDir::new().expect("xdg dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
+        let bundle = xdg.path().join("acme.pem");
+
+        let mut preset = configured_custom();
+        preset.anchor_path = Some(Box::leak(bundle.clone().into_boxed_path()));
+        let line = || {
+            frame(
+                &picked(),
+                std::slice::from_ref(&preset),
+                &Probes::idle(1),
+                24,
+                80,
+            )
+            .lines()
+            .find(|line| line.trim_start().starts_with("> ["))
+            .expect("the cursor row")
+            .to_owned()
+        };
+
+        let tofu = line();
+        assert!(tofu.contains("tofu"), "{tofu:?}");
+
+        // The fixture root closes in 2041, so a bundle here is a live pin; the
+        // date match alone also rules out the `pin -` wording.
+        std::fs::write(&bundle, FREETSA_ROOT).expect("pin a root");
+        let pinned = line();
+        assert!(pinned.contains("pin 2041-03-07"), "{pinned:?}");
+    }
+
     #[test]
     fn unpublished_is_tofu() {
         assert!(unpublished().fingerprints.is_empty());
@@ -1566,6 +1617,25 @@ mod tests {
                 Cell::Idle
             ),
             "pin expires 2027-01-01"
+        );
+    }
+
+    #[test]
+    fn an_all_expired_bundle_says_expired_on_both_surfaces() {
+        let _home = empty_home();
+        let preset = presets::find("digicert").expect("a preset");
+        let roots = [super::anchors::RootRow {
+            fingerprint: "aa".repeat(32),
+            not_after: "2020-01-01".to_owned(),
+        }];
+        let now = jiff::Timestamp::now();
+        assert_eq!(
+            super::trust(preset, Some(&roots), now, Cell::Idle),
+            "EXPIRED"
+        );
+        assert_eq!(
+            crate::cmd::tsa::pin_state(preset, Some(&roots), Cell::Idle, false, now),
+            "EXPIRED"
         );
     }
 

@@ -28,6 +28,7 @@ use cms::content_info::ContentInfo;
 use cms::signed_data::SignedData;
 use der::{Decode, Encode};
 use git_time_core::imprint::{Alg, Digest};
+use git_time_core::presets::Preset;
 use git_time_core::repo::Repo;
 use git_time_core::tsa::{StampRequest, encode, parse_response};
 use x509_cert::Certificate;
@@ -55,6 +56,16 @@ pub fn config_home() -> PathBuf {
 #[must_use]
 pub fn dir() -> PathBuf {
     config_home().join("git-time").join("anchors")
+}
+
+/// The bundle path for `preset`: the configured `anchor` when the repository
+/// named one, else the default `dir()/<name>.pem` that `install` writes.
+#[must_use]
+pub fn bundle_path(preset: &Preset) -> PathBuf {
+    preset
+        .anchor_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| dir().join(format!("{}.pem", preset.name)))
 }
 
 /// The lowercase hex SHA-256 fingerprint of `bytes`.

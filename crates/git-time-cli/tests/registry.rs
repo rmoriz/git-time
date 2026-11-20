@@ -1813,9 +1813,11 @@ fn preset_list_says_no_date_for_a_published_root_without_a_local_pin() {
 }
 
 /// A local bundle is the copy the date is read from, even when its root is
-/// published: the date has to come from there, not be declared absent.
+/// published: it is never declared missing. A bundle whose only root has
+/// expired has no live date left, so it reads `EXPIRED` rather than a stale
+/// day a reader could take for current.
 #[test]
-fn preset_list_reads_the_date_from_a_pinned_bundle() {
+fn preset_list_says_expired_for_a_dead_pinned_bundle() {
     let repo = Repo::new();
     repo.init();
     let stale = stale_ca(repo.path());
@@ -1827,9 +1829,50 @@ fn preset_list_reads_the_date_from_a_pinned_bundle() {
         .lines()
         .find(|line| line.starts_with("sectigo "))
         .unwrap_or_else(|| panic!("the preset line: {listing}"));
-    assert!(sectigo.contains("2020-02-01 expired"), "{listing}");
+    assert!(sectigo.contains("EXPIRED"), "{listing}");
     assert!(!sectigo.contains("not pinned"), "{listing}");
     assert!(sectigo.contains("(anchored)"), "{listing}");
+}
+
+/// A configured unknown id is a row here too: it says `custom` in the scope
+/// column instead of a tier it has no claim to, and its date comes from the
+/// bundle the section names rather than from a default path.
+#[test]
+fn preset_list_shows_a_custom_row_and_reads_its_configured_bundle() {
+    let repo = Repo::new();
+    repo.init();
+    let bundle = repo.path().join("acme.pem");
+    std::fs::write(&bundle, std::fs::read(freetsa_root()).expect("the fixture"))
+        .expect("write the bundle");
+    git(
+        repo.path(),
+        &[
+            "config",
+            "time.tsa.zz-acme.url",
+            "https://tsa.acme.example/tsr",
+        ],
+    );
+    git(
+        repo.path(),
+        &["config", "time.tsa.zz-acme.anchor", "acme.pem"],
+    );
+
+    let listing = ok(&repo.run_time(&["tsa", "preset", "list"]));
+    let row = listing
+        .lines()
+        .find(|line| line.starts_with("zz-acme "))
+        .unwrap_or_else(|| panic!("the custom row: {listing}"));
+    let fields: Vec<&str> = row.split_whitespace().collect();
+    assert_eq!(fields[3], "custom", "{listing}");
+    assert_eq!(
+        fields[4], "tofu",
+        "an unknown id publishes nothing: {listing}"
+    );
+    assert_eq!(
+        fields[5], "2041-03-07",
+        "the configured bundle is the date: {listing}"
+    );
+    assert_eq!(fields[6], "(anchored)", "{listing}");
 }
 
 /// The rotation `!` reaches the printed line: the pinned bundle holds a root
@@ -1866,7 +1909,7 @@ fn preset_list_marks_a_pinned_row_whose_served_root_the_bundle_lacks() {
     std::fs::copy(&stale, repo.anchors().join("freetsa.pem")).expect("pin the stale CA");
     let listing = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
     let line = freetsa(&listing);
-    assert!(line.contains("2020-02-01 expired !"), "{line}");
+    assert!(line.contains("EXPIRED !"), "{line}");
     assert!(line.contains("(anchored)"), "{line}");
 }
 
