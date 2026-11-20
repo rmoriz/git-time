@@ -5,12 +5,17 @@
 //! is the whole reducer: it maps one [`Key`] to the next state and to an
 //! [`Outcome`], with no I/O at all. [`frame`] renders a state and a [`Probes`]
 //! snapshot to one string. That keeps the interesting part testable without a
-//! terminal; the driver below only reads bytes and paints.
+//! terminal; the driver below only reads bytes, drains answers and paints.
 //!
 //! A [`Cell`] is display material only: what a probe served says what an
 //! authority currently publishes, while the local bundle stays what a seal is
 //! checked against. The two are never conflated — a served date reads `fetch`,
 //! a pinned one `pin`.
+//!
+//! Probing happens in the driver's idle time. The opening snapshot comes from
+//! the cache, the first frame is painted from it, and answers are drained
+//! between key reads; a slow or dead authority costs a repaint and never the
+//! screen. `r` forgets the cache and asks again.
 //!
 //! Terminal control is `stty` and nothing else: no new runtime dependency.
 //! `-g` captures the current settings, `raw -echo min 0 time 1` makes reads
@@ -239,9 +244,6 @@ const HELP: &str =
 /// Display material only: a [`Cell::Known`] date never outranks the local pin,
 /// it only stands in for one while no root is pinned here — and marks a pin
 /// when the served root is one the bundle does not hold.
-// Only `Idle` is constructed outside the tests today: the driver that fills the
-// rest arrives in the next change.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Cell {
     /// Nothing was asked: today's `pin`/`tofu` wording, unchanged.
@@ -276,8 +278,6 @@ impl Probes {
     }
 
     /// A table where every row is waiting for its first answer.
-    // The driver that seeds it arrives in the next change.
-    #[allow(dead_code)]
     #[must_use]
     pub fn pending(count: usize) -> Self {
         Self {
@@ -286,8 +286,6 @@ impl Probes {
     }
 
     /// Set the cell of `index`; an index outside the table is ignored.
-    // The driver that writes cells arrives in the next change.
-    #[allow(dead_code)]
     pub fn set(&mut self, index: usize, cell: Cell) {
         if let Some(slot) = self.cells.get_mut(index) {
             *slot = cell;
@@ -678,34 +676,127 @@ fn stty(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// The opening snapshot and the indices a worker still has to fetch.
+///
+/// A fresh cache entry shows at once and is not queued; everything else waits
+/// for its first answer. A preset that publishes no root is never probed: with
+/// nothing to match a reply can only be `Unpublished`, and the row's own `tofu`
+/// wording says more.
+#[must_use]
+pub fn seed(presets: &[Preset], now: jiff::Timestamp) -> (Probes, Vec<usize>) {
+    let mut probes = Probes::pending(presets.len());
+    let mut missing = Vec::new();
+    for (index, preset) in presets.iter().enumerate() {
+        if preset.fingerprints.is_empty() {
+            probes.set(index, Cell::Idle);
+        } else if let Some(cached) = probe::cached(preset.name, now) {
+            probes.set(index, Cell::Known(cached));
+        } else {
+            missing.push(index);
+        }
+    }
+    (probes, missing)
+}
+
+/// The complement of `missing`: the rows a worker must not queue.
+///
+/// [`seed`] names what to fetch, while [`probe::Prober::start`] takes what to
+/// leave alone — the two are easy to hand over the wrong way round.
+fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
+    (0..count)
+        .filter(|index| !missing.contains(index))
+        .collect()
+}
+
+/// Take every finished answer into `probes`, answering whether one arrived.
+///
+/// A refresh can make a row answer twice, so the index is the key and the last
+/// answer is the one left in the table.
+fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
+    let results = prober.drain();
+    if results.is_empty() {
+        return false;
+    }
+    for (index, served) in results {
+        probes.set(
+            index,
+            match served {
+                probe::Served::Known(cached) => Cell::Known(cached),
+                probe::Served::Unpublished => Cell::Unpublished,
+                probe::Served::Failed => Cell::Failed,
+            },
+        );
+    }
+    true
+}
+
+/// Drop the cached answers, mark every probed row waiting and ask again.
+///
+/// `presets` is the table the prober was started on, so its indices are the
+/// queue's. An idle row publishes nothing, so it is skipped rather than being
+/// turned into a question mark it cannot answer.
+fn refresh(presets: &[Preset], probes: &mut Probes, prober: &probe::Prober) {
+    let mut idle = Vec::new();
+    for (index, preset) in presets.iter().enumerate() {
+        if preset.fingerprints.is_empty() {
+            idle.push(index);
+        } else {
+            let _ = probe::forget(preset.name);
+            probes.set(index, Cell::Pending);
+        }
+    }
+    prober.refresh(&idle);
+}
+
 /// Drive the UI until a key saves or aborts.
 ///
 /// `None` when the terminal cannot be put into raw mode; the caller then falls
-/// back to the line prompt.
-pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
+/// back to the line prompt, whose snapshot ([`Probes::idle`]) never probes.
+///
+/// The first frame is painted from the cache before any fetch is started, and
+/// answers are drained between key reads; a slow or dead authority costs a
+/// repaint and never the screen. A silent decisecond repaints only when an
+/// answer arrived or the terminal was resized.
+pub fn run(
+    selection: &mut Selection,
+    presets: &'static [Preset],
+    probes: &mut Probes,
+) -> Option<Outcome> {
     let mut terminal = Raw::open().or_else(|| {
         eprintln!("rfc3161: note: no raw terminal; falling back to the line prompt");
         None
     })?;
-    // The driver wiring comes next; until then every row reads as today.
-    let probes = Probes::idle(presets.len());
+    let (seeded, missing) = seed(presets, jiff::Timestamp::now());
+    let skip = skip_of(&missing, presets.len());
+    *probes = seeded;
     let (mut rows, mut cols) = size();
-    terminal.paint(&frame(selection, presets, &probes, rows, cols));
+    // The frame is on the screen before the first socket opens.
+    terminal.paint(&frame(selection, presets, probes, rows, cols));
+    let prober = probe::Prober::start(presets, probe::network_fetch(), &skip);
     loop {
         let bytes = terminal.read_key();
+        let answered = absorb(&prober, probes);
         let Some(key) = parse_key(&bytes) else {
-            // The only silent change the frame shows is a resize.
+            // The only silent changes the frame shows are an answer and a resize.
             let (next_rows, next_cols) = size();
-            if (next_rows, next_cols) != (rows, cols) {
+            let resized = (next_rows, next_cols) != (rows, cols);
+            if resized {
                 rows = next_rows;
                 cols = next_cols;
-                terminal.paint(&frame(selection, presets, &probes, rows, cols));
+            }
+            if resized || answered {
+                terminal.paint(&frame(selection, presets, probes, rows, cols));
             }
             continue;
         };
         (rows, cols) = size();
+        if key == Key::Refresh {
+            refresh(presets, probes, &prober);
+            terminal.paint(&frame(selection, presets, probes, rows, cols));
+            continue;
+        }
         match selection.apply_key(key, presets.len()) {
-            Outcome::Stay => terminal.paint(&frame(selection, presets, &probes, rows, cols)),
+            Outcome::Stay => terminal.paint(&frame(selection, presets, probes, rows, cols)),
             outcome => return Some(outcome),
         }
     }
@@ -713,6 +804,8 @@ pub fn run(selection: &mut Selection, presets: &[Preset]) -> Option<Outcome> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
@@ -1619,5 +1712,172 @@ mod tests {
     fn r_asks_for_a_refetch() {
         assert_eq!(parse_key(b"r"), Some(Key::Refresh));
         assert_eq!(press(&mut picked(), Key::Refresh), Outcome::Stay);
+    }
+
+    /// The row of `name`, the lookup the seed tests key on.
+    fn index_of(name: &str) -> usize {
+        presets::PRESETS
+            .iter()
+            .position(|preset| preset.name == name)
+            .expect("the preset row")
+    }
+
+    /// A shared `XDG_CONFIG_HOME` with an empty probe cache.
+    ///
+    /// Other tests' workers fill the same directory concurrently, so the cache
+    /// is emptied of every row before a test seeds one of its own.
+    fn empty_cache() -> std::sync::MutexGuard<'static, ()> {
+        let lock = crate::cmd::probe::tests::xdg_lock();
+        crate::cmd::probe::tests::xdg();
+        for preset in &presets::PRESETS {
+            let _ = super::probe::forget(preset.name);
+        }
+        lock
+    }
+
+    #[test]
+    fn a_fresh_cache_entry_seeds_a_known_cell_and_is_not_queued() {
+        let _cache = empty_cache();
+        let _ = super::probe::store(
+            "certum",
+            &cached_of("2035-02-09", "aa"),
+            jiff::Timestamp::now(),
+        );
+        let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        assert!(matches!(probes.cell(index_of("certum")), Cell::Known(_)));
+        assert!(!missing.contains(&index_of("certum")));
+        assert!(missing.contains(&index_of("aped")));
+    }
+
+    #[test]
+    fn presets_without_a_published_root_seed_idle_and_are_not_queued() {
+        // No built-in row has an empty list today; assert on the shipped table so
+        // a future tofu row does not start probing pointlessly.
+        let _cache = empty_cache();
+        let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        for (index, preset) in presets::PRESETS.iter().enumerate() {
+            if preset.fingerprints.is_empty() {
+                assert!(matches!(probes.cell(index), Cell::Idle));
+                assert!(!missing.contains(&index));
+            }
+        }
+    }
+
+    /// Poll `prober` until nothing is queued or in flight.
+    ///
+    /// `pending` counts in-flight rows too, so zero means every reply is
+    /// already in the channel.
+    fn wait(prober: &super::probe::Prober) {
+        for _ in 0..250 {
+            if prober.pending() == 0 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the queue drains");
+    }
+
+    #[test]
+    fn a_prober_skips_the_rows_the_seed_already_answered() {
+        let _cache = empty_cache();
+        let _ = super::probe::store(
+            "certum",
+            &cached_of("2035-02-09", "aa"),
+            jiff::Timestamp::now(),
+        );
+        let (_, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        let skip = super::skip_of(&missing, presets::PRESETS.len());
+        assert!(skip.contains(&index_of("certum")), "a fresh entry is kept");
+        assert!(
+            !skip.contains(&index_of("aped")),
+            "an unknown row is fetched"
+        );
+    }
+
+    #[test]
+    fn a_drained_answer_repaints_and_the_last_answer_wins() {
+        let _cache = empty_cache();
+        let index = index_of("freetsa");
+        // The handover `run` performs. The cache is empty, so nothing is skipped
+        // and every row answers with prose except FreeTSA's, whose reply flips
+        // from the fixture to prose before the refresh: the second drain has to
+        // overwrite the `Known` the first left for that same index.
+        let (_, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        let skip = super::skip_of(&missing, presets::PRESETS.len());
+        let freetsa = presets::PRESETS[index].url;
+        let known = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let fetch: super::probe::Fetch = {
+            let known = Arc::clone(&known);
+            Arc::new(move |url, _| {
+                if url == freetsa && known.load(std::sync::atomic::Ordering::Relaxed) {
+                    Ok::<Vec<u8>, String>(FREETSA_ROOT.to_vec())
+                } else {
+                    Ok::<Vec<u8>, String>(b"<html>not a certificate</html>".to_vec())
+                }
+            })
+        };
+        let prober = super::probe::Prober::start(&presets::PRESETS, fetch, &skip);
+        let mut probes = Probes::pending(presets::PRESETS.len());
+        wait(&prober);
+        assert!(
+            super::absorb(&prober, &mut probes),
+            "the answer changed the frame"
+        );
+        assert!(matches!(probes.cell(index), Cell::Known(_)));
+
+        known.store(false, std::sync::atomic::Ordering::Relaxed);
+        prober.refresh(&skip);
+        wait(&prober);
+        assert!(
+            super::absorb(&prober, &mut probes),
+            "the newer answer repaints"
+        );
+        assert!(matches!(probes.cell(index), Cell::Failed));
+        assert!(!super::absorb(&prober, &mut probes), "nothing left to show");
+    }
+
+    #[test]
+    fn a_refresh_reasks_every_probed_row_and_leaves_tofu_alone() {
+        let _cache = empty_cache();
+        let certum = index_of("certum");
+        let _ = super::probe::store(
+            "certum",
+            &cached_of("2035-02-09", "aa"),
+            jiff::Timestamp::now(),
+        );
+        // A gate parks the workers, so no answer can replace the cells the
+        // refresh writes before they are asserted.
+        let gate = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let fetch: super::probe::Fetch = {
+            let gate = Arc::clone(&gate);
+            Arc::new(move |_, _| {
+                let (open, wake) = &*gate;
+                let mut ready = open.lock().unwrap();
+                while !*ready {
+                    ready = wake.wait(ready).unwrap();
+                }
+                drop(ready);
+                Ok::<Vec<u8>, String>(b"<html>not a certificate</html>".to_vec())
+            })
+        };
+        let prober = super::probe::Prober::start(&presets::PRESETS, Arc::clone(&fetch), &[]);
+        let mut probes = Probes::idle(presets::PRESETS.len());
+        probes.set(certum, Cell::Known(cached("2035-02-09")));
+        super::refresh(&presets::PRESETS, &mut probes, &prober);
+        assert!(matches!(probes.cell(certum), Cell::Pending), "asked again");
+        assert!(
+            super::probe::cached("certum", jiff::Timestamp::now()).is_none(),
+            "the cached answer is dropped"
+        );
+
+        // A preset that publishes no root would only ever answer `Unpublished`,
+        // so it is not queued and keeps its own wording.
+        let tofu: &'static [presets::Preset] = Box::leak(vec![unpublished()].into_boxed_slice());
+        // As `run` starts it: the idle row is already skipped by the seed.
+        let tofu_prober = super::probe::Prober::start(tofu, fetch, &[0]);
+        let mut tofu_probes = Probes::idle(1);
+        super::refresh(tofu, &mut tofu_probes, &tofu_prober);
+        assert!(matches!(tofu_probes.cell(0), Cell::Idle), "tofu stays tofu");
+        assert_eq!(tofu_prober.pending(), 0, "nothing was queued");
     }
 }

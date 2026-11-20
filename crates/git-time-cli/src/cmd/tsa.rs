@@ -778,7 +778,11 @@ pub(crate) async fn select(
     };
     let chosen = if std::io::stdin().is_terminal() {
         let mut selection = initial(&seed);
-        if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS) {
+        // Nothing asked yet, so the line-prompt fallback keeps `pin -` and the
+        // picker path replaces this table with the cache seed once it owns the
+        // terminal.
+        let mut probes = picker::Probes::idle(presets::PRESETS.len());
+        if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS, &mut probes) {
             match outcome {
                 picker::Outcome::Save(chosen) => chosen,
                 picker::Outcome::Abort => {
