@@ -21,7 +21,7 @@
 //! `-g` captures the current settings, `raw -echo min 0 time 1` makes reads
 //! single-key and non-blocking (a decisecond wait), and a `Drop` guard puts the
 //! captured value back — also on panic. The alternate screen and a hidden
-//! cursor bracket the session. Where `stty` is missing or refuses, [`open`]
+//! cursor bracket the session. Where `stty` is missing or refuses, [`Raw::open`]
 //! returns `None` and the caller falls back to the line prompt.
 //!
 //! Typed numbers still work: digits, `,` and `-` append to a buffer on the
@@ -678,18 +678,30 @@ fn stty(args: &[&str]) -> Option<String> {
 
 /// Whether `cached` still names a root `preset` publishes.
 ///
-/// A cache entry is a bare lowercase digest while a preset publishes uppercase
-/// colon-separated octets, so case and colons are stripped first: they are
-/// spelling, not substance. A table that rotated inside the [`probe::TTL`] would
-/// otherwise show a date for a root the row no longer claims — and an unpinned
-/// row has no `!` to say so.
+/// The comparison is by digest width: the cache always holds the SHA-256 that
+/// [`anchors::fingerprint`] wrote, while most presets publish only a SHA-1, and
+/// a 64-character digest can never equal a 40-character one. The cached value is
+/// normalized first (colons stripped, lowercased) because a hand-edited or older
+/// entry need not be in the bare lowercase form the cache itself writes.
+///
+/// A preset that publishes nothing at the cached width cannot be checked at all,
+/// so the entry is accepted and the week-long [`probe::TTL`] is what bounds an
+/// unchecked date. A preset that does publish at that width rejects anything
+/// else: a rotation inside the TTL would otherwise show a date for a root the
+/// row no longer claims, and an unpinned row has no `!` to say so.
 fn still_published(preset: &Preset, cached: &probe::Cached) -> bool {
     let bare = |value: &str| value.replace(':', "").to_ascii_lowercase();
     let served = bare(&cached.fingerprint);
-    preset
+    let at_width: Vec<String> = preset
         .fingerprints
         .iter()
-        .any(|fingerprint| bare(fingerprint) == served)
+        .map(|fingerprint| bare(fingerprint))
+        .filter(|fingerprint| fingerprint.len() == served.len())
+        .collect();
+    if at_width.is_empty() {
+        return true;
+    }
+    at_width.contains(&served)
 }
 
 /// The opening snapshot and the indices a worker still has to fetch.
@@ -1758,46 +1770,77 @@ mod tests {
         lock
     }
 
-    /// A value the named preset publishes, as a cache entry would hold it: the
-    /// bare lowercase form of the first published fingerprint.
-    fn published(preset: &str) -> String {
+    /// The SHA-256 a preset publishes, in the bare lowercase form the worker
+    /// writes: `anchors::fingerprint` abbreviates to exactly that.
+    fn cached_sha256(preset: &str) -> String {
         presets::find(preset)
             .expect("the preset")
             .fingerprints
-            .first()
-            .expect("a published root")
-            .replace(':', "")
-            .to_ascii_lowercase()
+            .iter()
+            .map(|fingerprint| fingerprint.replace(':', "").to_ascii_lowercase())
+            .find(|fingerprint| fingerprint.len() == 64)
+            .expect("a published SHA-256")
+    }
+
+    /// A bare lowercase SHA-256 no preset publishes.
+    fn unknown_sha256() -> String {
+        "bb".repeat(32)
     }
 
     #[test]
     fn a_fresh_cache_entry_seeds_a_known_cell_and_is_not_queued() {
         let _cache = empty_cache();
+        let freetsa = index_of("freetsa");
         let _ = super::probe::store(
-            "certum",
-            &cached_of("2035-02-09", published("certum")),
+            "freetsa",
+            &cached_of("2035-02-09", cached_sha256("freetsa")),
             jiff::Timestamp::now(),
         );
         let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
-        assert!(matches!(probes.cell(index_of("certum")), Cell::Known(_)));
-        assert!(!missing.contains(&index_of("certum")));
+        assert!(matches!(probes.cell(freetsa), Cell::Known(_)));
+        assert!(!missing.contains(&freetsa));
         assert!(missing.contains(&index_of("aped")));
+    }
+
+    /// A SHA-1-only preset can never validate the SHA-256 the cache holds, so
+    /// the entry is shown rather than refetched on every launch.
+    #[test]
+    fn a_sha1_only_preset_accepts_the_sha256_the_cache_holds() {
+        let _cache = empty_cache();
+        let certum = index_of("certum");
+        let preset = presets::find("certum").expect("the preset");
+        assert!(
+            preset
+                .fingerprints
+                .iter()
+                .all(|value| value.replace(':', "").len() != 64),
+            "the premise: certum publishes no SHA-256"
+        );
+        let _ = super::probe::store(
+            "certum",
+            &cached_of("2035-02-09", unknown_sha256()),
+            jiff::Timestamp::now(),
+        );
+        let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        assert!(matches!(probes.cell(certum), Cell::Known(_)));
+        assert!(!missing.contains(&certum));
     }
 
     #[test]
     fn a_cached_root_the_preset_no_longer_publishes_is_asked_again() {
         let _cache = empty_cache();
-        let certum = index_of("certum");
-        // Nothing certum publishes: the table rotated inside the TTL.
+        let freetsa = index_of("freetsa");
+        // A SHA-256, but not the one freetsa publishes: the table rotated
+        // inside the TTL.
         let _ = super::probe::store(
-            "certum",
-            &cached_of("2035-02-09", "bb".repeat(32)),
+            "freetsa",
+            &cached_of("2035-02-09", unknown_sha256()),
             jiff::Timestamp::now(),
         );
         let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
-        assert!(matches!(probes.cell(certum), Cell::Pending));
+        assert!(matches!(probes.cell(freetsa), Cell::Pending));
         assert!(
-            missing.contains(&certum),
+            missing.contains(&freetsa),
             "the stale entry is fetched again"
         );
     }
@@ -1835,7 +1878,7 @@ mod tests {
         let _cache = empty_cache();
         let _ = super::probe::store(
             "certum",
-            &cached_of("2035-02-09", published("certum")),
+            &cached_of("2035-02-09", unknown_sha256()),
             jiff::Timestamp::now(),
         );
         let (_, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
@@ -1852,12 +1895,14 @@ mod tests {
         let _cache = empty_cache();
         let index = index_of("freetsa");
         let cached_row = index_of("certum");
-        // Against the brief: one row carries a cache entry, so the table `seed`
-        // hands over is the one under test — a seeded `Known` has to survive the
-        // drain and only the answers' own indices may change.
+        // One row carries a cache entry, so the table `seed` hands over is the
+        // one under test — a seeded `Known` has to survive the drain and only
+        // the answers' own indices may change. The value is the 64-character
+        // SHA-256 the worker writes; certum publishes only a SHA-1, so the
+        // width rule is what accepts it.
         let _ = super::probe::store(
             "certum",
-            &cached_of("2035-02-09", published("certum")),
+            &cached_of("2035-02-09", unknown_sha256()),
             jiff::Timestamp::now(),
         );
         // The handover `run` performs. Every other row answers prose except
@@ -1922,7 +1967,7 @@ mod tests {
         let certum = index_of("certum");
         let _ = super::probe::store(
             "certum",
-            &cached_of("2035-02-09", published("certum")),
+            &cached_of("2035-02-09", unknown_sha256()),
             jiff::Timestamp::now(),
         );
         // A gate parks the workers, so no answer can replace the cells the

@@ -20,7 +20,11 @@ use git_time_core::presets::Preset;
 pub const TTL: i64 = 7 * 86_400;
 
 /// One answered probe: the root's `notAfter` day and the fingerprint of the
-/// root it names, both taken from the authority verbatim.
+/// root it names.
+///
+/// The fingerprint is the bare lowercase hex SHA-256 that
+/// [`super::anchors::fingerprint`] computes — 64 characters, never the SHA-1
+/// spelling most presets publish and never the raw bytes of the authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cached {
     pub not_after: String,
