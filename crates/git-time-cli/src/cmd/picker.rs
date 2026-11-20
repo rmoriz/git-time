@@ -546,7 +546,13 @@ fn trust(
                 None => "EXPIRED".to_owned(),
             }
         };
-        if let Cell::Known(cached) = cell
+        let served = match cell {
+            Cell::Known(cached) => Some(cached),
+            // A failed refresh, or a row still waiting, has no root of its own;
+            // the marker comes from the last cached answer so it cannot blink.
+            _ => probe::cached(preset.name, now),
+        };
+        if let Some(cached) = served
             && !roots
                 .iter()
                 .any(|root| root.fingerprint == cached.fingerprint)
@@ -784,7 +790,7 @@ fn take(probes: &mut Probes, results: Vec<(usize, probe::Served)>) -> bool {
 /// with its old fetch time, and the TTL ages it out on its own — a refresh run
 /// into a network blip does not cost the dates the next run would show. The cell
 /// still goes [`Cell::Pending`] so the frame shows the work; after a failure it
-/// stays `?` for this run.
+/// stays `?` for this run, and a rotation marker reads from the entry.
 ///
 /// `presets` is the table the prober was started on, so its indices are the
 /// queue's. An idle row publishes nothing, so it is skipped rather than being
@@ -1717,6 +1723,26 @@ mod tests {
         let line = pinned_and_probed(Cell::Failed);
         assert!(line.contains("pin 2041-03-07"), "{line:?}");
         assert!(!line.contains('!'), "{line:?}");
+    }
+
+    /// A failed refresh loses the served root but not the rotation the last
+    /// cached answer recorded: the row would show that marker again next run.
+    #[test]
+    fn a_failed_probe_keeps_a_rotation_already_cached() {
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        let xdg = tempfile::TempDir::new().expect("xdg dir");
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
+        let anchors = xdg.path().join("git-time/anchors");
+        std::fs::create_dir_all(&anchors).expect("anchors dir");
+        std::fs::write(anchors.join("freetsa.pem"), FREETSA_ROOT).expect("pin a root");
+        let _ = super::probe::store(
+            "freetsa",
+            &cached_of("2035-02-09", "cc".repeat(32)),
+            jiff::Timestamp::now(),
+        );
+        let index = index_of("freetsa");
+        let line = rendered(&probes_with(&[(index, Cell::Failed)]), index);
+        assert!(line.contains("pin 2041-03-07 !"), "{line:?}");
     }
 
     #[test]

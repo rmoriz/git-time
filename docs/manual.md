@@ -219,7 +219,8 @@ never replaces the pin. It opens no socket at all — the rows that answered are
 painted from the cache. The week-long cache is shared with `tsa select`, and
 `--refresh` asks every authority that publishes a root and waits for the answers before printing. A
 refresh drops nothing first, so one that fails leaves the previous date in place until its seven days
-run out. Either way the cache is the only write — a probe pins nothing.
+run out, and its ` !` marker — read from that entry, not from the failed reply — stays with it.
+Either way the cache is the only write — a probe pins nothing.
 `tofu` and `not pinned` are the two tiers a hand-added, unpublished authority would need; no built-in
 row is in that position any more, so the table shows neither.
 

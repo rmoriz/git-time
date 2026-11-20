@@ -507,19 +507,32 @@ fn pin_state(
 
 /// Whether `cell` serves a root no root of `roots` matches.
 ///
-/// Only a `Known` answer over a non-empty bundle can be judged: without a local
-/// root there is nothing to compare, and an idle or failed row serves nothing to
-/// compare. The comparison is on the bare `anchors::fingerprint` spelling both
-/// sides carry, exactly as the picker's `trust` column does it.
-fn rotated(roots: Option<&[anchors::RootRow]>, cell: picker::Cell) -> bool {
+/// Only a non-empty bundle can judge anything, so without one there is no `!`.
+/// When the cell holds no served root — failed, still waiting, never asked, or a
+/// reply that named no published root — the last cached answer is what the row
+/// would show next run, and the marker is read from it: a refresh that fails
+/// must not blink a known rotation off.
+///
+/// The comparison is on the bare `anchors::fingerprint` spelling both sides
+/// carry, exactly as the picker's `trust` column does it.
+fn rotated(
+    preset: &presets::Preset,
+    roots: Option<&[anchors::RootRow]>,
+    cell: picker::Cell,
+    now: jiff::Timestamp,
+) -> bool {
     let Some(roots) = roots.filter(|roots| !roots.is_empty()) else {
         return false;
     };
-    match cell {
-        picker::Cell::Known(cached) => !roots
+    let cached = match cell {
+        picker::Cell::Known(cached) => Some(cached),
+        _ => probe::cached(preset.name, now),
+    };
+    match cached {
+        Some(cached) => !roots
             .iter()
             .any(|root| root.fingerprint == cached.fingerprint),
-        _ => false,
+        None => false,
     }
 }
 
@@ -534,7 +547,9 @@ fn rotated(roots: Option<&[anchors::RootRow]>, cell: picker::Cell) -> bool {
 /// through the picker's worker and waits for the queue to drain before printing,
 /// because this is the surface a timer or a CI job reads. No entry is dropped
 /// first, so a failed fetch leaves the previous date in place until its TTL ages
-/// it out. The cache is the only write either way; a probe pins nothing.
+/// it out, and the ` !` a rotation put on the row is read from that entry while
+/// the cell shows `?`. The cache is the only write either way; a probe pins
+/// nothing.
 async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
     // One instant for the local dates, so every pinned one is judged as of one
     // moment (a served date is judged when it is printed).
@@ -591,7 +606,7 @@ async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
             preset,
             probes.cell(index),
             expiry,
-            rotated(roots.as_deref(), probes.cell(index)),
+            rotated(preset, roots.as_deref(), probes.cell(index), now),
             now,
         );
         println!(
@@ -1565,47 +1580,81 @@ mod tests {
     fn a_rotated_authority_is_marked() {
         use crate::cmd::anchors::RootRow;
         use crate::cmd::picker::Cell;
+        use crate::cmd::probe::Cached;
+
+        let _guard = crate::cmd::probe::tests::xdg_lock();
+        crate::cmd::probe::tests::xdg();
+        let _ = crate::cmd::probe::forget("freetsa");
+        let now = jiff::Timestamp::now();
 
         let preset = presets::find("freetsa").expect("a published preset");
         let roots = [RootRow {
             fingerprint: "aa".repeat(32),
             not_after: "2041-03-07".to_owned(),
         }];
-        let foreign = Cell::Known(crate::cmd::probe::Cached {
+        let foreign = Cached {
             not_after: "2035-02-09".to_owned(),
             fingerprint: "cc".repeat(32),
-        });
-        let held = Cell::Known(crate::cmd::probe::Cached {
+        };
+        let held = Cached {
             not_after: "2041-03-07".to_owned(),
             fingerprint: "aa".repeat(32),
-        });
+        };
 
         // The served root is no root of the bundle: the rendered state says so.
-        assert!(rotated(Some(&roots), foreign.clone()));
+        assert!(rotated(
+            preset,
+            Some(&roots),
+            Cell::Known(foreign.clone()),
+            now
+        ));
         let expiry = Some("2041-03-07".to_owned());
         assert_eq!(
             pin_state(
                 preset,
-                foreign.clone(),
+                Cell::Known(foreign.clone()),
                 expiry.clone(),
                 true,
-                jiff::Timestamp::now()
+                now
             ),
             "2041-03-07 !"
         );
         // The one the bundle holds stays quiet.
-        assert!(!rotated(Some(&roots), held.clone()));
+        assert!(!rotated(
+            preset,
+            Some(&roots),
+            Cell::Known(held.clone()),
+            now
+        ));
         assert_eq!(
-            pin_state(preset, held.clone(), expiry, false, jiff::Timestamp::now()),
+            pin_state(preset, Cell::Known(held.clone()), expiry, false, now),
             "2041-03-07"
         );
 
-        // Nothing to compare without a bundle, and no `!` for a row that did not
-        // answer a root.
-        assert!(!rotated(None, foreign.clone()));
-        assert!(!rotated(Some(&[]), foreign.clone()));
-        assert!(!rotated(Some(&roots), Cell::Failed));
-        assert!(!rotated(Some(&roots), Cell::Pending));
-        assert!(!rotated(Some(&roots), Cell::Idle));
+        // A row with no served root of its own keeps the marker from the last
+        // cached answer: a failed refresh must not blink it off.
+        let _ = crate::cmd::probe::store("freetsa", &foreign, now);
+        for cell in [Cell::Failed, Cell::Pending, Cell::Idle, Cell::Unpublished] {
+            assert!(
+                rotated(preset, Some(&roots), cell, now),
+                "the last answer still rotates"
+            );
+        }
+        let _ = crate::cmd::probe::store("freetsa", &held, now);
+        for cell in [Cell::Failed, Cell::Pending, Cell::Idle, Cell::Unpublished] {
+            assert!(
+                !rotated(preset, Some(&roots), cell, now),
+                "the last answer is still held"
+            );
+        }
+
+        // Nothing to compare without a bundle, and no `!` for a row with
+        // neither an answer nor a cache entry.
+        assert!(!rotated(preset, None, Cell::Known(foreign.clone()), now));
+        assert!(!rotated(preset, Some(&[]), Cell::Known(foreign), now));
+        let _ = crate::cmd::probe::forget("freetsa");
+        for cell in [Cell::Failed, Cell::Pending, Cell::Idle, Cell::Unpublished] {
+            assert!(!rotated(preset, Some(&roots), cell, now));
+        }
     }
 }

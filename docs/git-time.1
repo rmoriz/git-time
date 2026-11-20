@@ -559,7 +559,8 @@ A row that failed or served no published root and has no entry keeps
 .B \-
 here; the next
 .B \-\-refresh
-asks it again.
+asks it again, and a marker is read from the cache whenever the reply names no
+root.
 The cache is shared with
 .BR "tsa select" .
 Either way the cache is the only write: a probe pins nothing and writes no
@@ -570,7 +571,9 @@ Exits 0.
 Ask every authority that publishes a root and wait for the queue to drain
 before printing.
 Nothing is dropped first, so a refresh that fails leaves the previous date in
-place until it ages out.
+place until it ages out, and the
+.B !
+marker already read from that entry stays with it.
 A row with no local pin that cannot answer prints
 .BR ? ;
 a pinned row keeps its pin date.
