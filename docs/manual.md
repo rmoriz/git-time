@@ -362,10 +362,10 @@ An answer is kept for seven days in `$XDG_CONFIG_HOME/git-time/probe/<id>` (or `
 second run paints the rows that answered from the cache and opens no socket for them; a row that
 failed or served no published root and has no entry is asked again. A date can be up to a week old;
 `r` asks again without dropping anything first, so a failed refresh keeps the previous answer until
-it ages out. A row with no answer of its own — failed, or still waiting — keeps the ` !` marker of
-that cached answer, so a network blip does not hide a rotation either. `git time tsa preset list`
-reads the same cache — a plain run still fetches nothing —
-and its `--refresh` is the one option that asks instead.
+it ages out. A row with no answer of its own — failed, still waiting, or a reply that named no
+published root — keeps the ` !` marker of that cached answer, so a network blip does not hide a
+rotation either. `git time tsa preset list` reads the same cache — a plain run still fetches
+nothing — and its `--refresh` is the one option that asks instead.
 
 A probe is a display aid, never evidence: a date is worth exactly what the publication behind it is,
 and a `!` is worth a look at that publication.

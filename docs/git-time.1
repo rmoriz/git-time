@@ -531,7 +531,7 @@ in its last 90 days and
 past it; a published root that is not pinned here has no certificate to read
 and shows a cached probe answer instead, in the words
 .B tsa select
-uses and judged when it is printed, or
+uses and judged against the one instant the listing took, or
 .B \-
 for a row the cache cannot answer.
 A pinned row whose authority serves a root the local bundle does not hold
@@ -571,7 +571,7 @@ Ask every authority that publishes a root and wait for the queue to drain
 before printing.
 Nothing is dropped first, so a refresh that fails leaves the previous date in
 place until it ages out, and the
-.B !
+.B !\&
 marker already read from that entry stays with it.
 A row with no local pin that cannot answer prints
 .BR ? ;
@@ -684,7 +684,10 @@ is asked again.
 A date can be up to a week old.
 .B r
 asks again without dropping anything first, so a failed refresh keeps the
-previous answer until it ages out.
+previous answer until it ages out, and a row with no answer of its own keeps
+that answer's
+.B !\&
+marker, so a network blip does not hide a rotation.
 .B tsa preset list
 reads the same cache and
 .B \-\-refresh
