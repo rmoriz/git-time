@@ -952,8 +952,9 @@ mod tests {
     }
 
     /// Pin the FreeTSA fixture here, probe freetsa with `cell` and return its
-    /// row. The caller holds the `XDG_CONFIG_HOME` lock across the frame.
-    fn pinned_and_probed(cell: Cell) -> String {
+    /// row with the temp home, so `XDG_CONFIG_HOME` does not outlive the
+    /// directory it names. The caller holds the lock across the frame.
+    fn pinned_and_probed(cell: Cell) -> (String, tempfile::TempDir) {
         let xdg = tempfile::TempDir::new().expect("xdg dir");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let anchors = xdg.path().join("git-time/anchors");
@@ -963,7 +964,7 @@ mod tests {
             .iter()
             .position(|preset| preset.name == "freetsa")
             .expect("the freetsa row");
-        rendered(&probes_with(&[(index, cell)]), index)
+        (rendered(&probes_with(&[(index, cell)]), index), xdg)
     }
 
     /// An empty `XDG_CONFIG_HOME` held for the test, so a row that has a bundle
@@ -1159,6 +1160,7 @@ mod tests {
 
     #[test]
     fn the_frame_shows_the_trust_tier_and_the_help() {
+        let _home = empty_home();
         let rendered = frame(
             &picked(),
             &presets::PRESETS,
@@ -1335,6 +1337,7 @@ mod tests {
 
     #[test]
     fn the_cursor_row_and_the_footer_are_always_rendered() {
+        let _home = empty_home();
         // At the top nothing is cut above.
         let rendered = frame(
             &picked(),
@@ -1729,21 +1732,22 @@ mod tests {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
         // FreeTSA's root is pinned (2041-03-07); the probe names a root the
         // bundle does not hold, so the pin is marked.
-        let line = pinned_and_probed(Cell::Known(cached_of("2035-02-09", "cc".repeat(32))));
+        let (line, _home) =
+            pinned_and_probed(Cell::Known(cached_of("2035-02-09", "cc".repeat(32))));
         assert!(line.contains("pin 2041-03-07 !"), "{line:?}");
     }
 
     #[test]
     fn a_served_root_the_bundle_holds_stays_quiet() {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
-        let line = pinned_and_probed(Cell::Known(cached_of("2041-03-07", freetsa_fp())));
+        let (line, _home) = pinned_and_probed(Cell::Known(cached_of("2041-03-07", freetsa_fp())));
         assert!(!line.contains('!'), "{line:?}");
     }
 
     #[test]
     fn a_failed_probe_does_not_mark_a_pin() {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
-        let line = pinned_and_probed(Cell::Failed);
+        let (line, _home) = pinned_and_probed(Cell::Failed);
         assert!(line.contains("pin 2041-03-07"), "{line:?}");
         assert!(!line.contains('!'), "{line:?}");
     }
@@ -1770,6 +1774,7 @@ mod tests {
 
     #[test]
     fn the_footer_counts_failures_and_names_unpublished_rows() {
+        let _home = empty_home();
         let probes = probes_with(&[(3, Cell::Failed), (6, Cell::Unpublished)]);
         let out = frame(&picked(), &presets::PRESETS, &probes, 24, 80);
         assert!(out.contains("probe failed: 1"), "{out}");
@@ -1812,6 +1817,7 @@ mod tests {
     /// included, without a test noticing.
     #[test]
     fn the_help_line_is_not_cut() {
+        let _home = empty_home();
         let rendered = frame(
             &picked(),
             &presets::PRESETS,
@@ -2108,5 +2114,10 @@ mod tests {
         super::refresh(tofu, &mut tofu_probes, &tofu_prober);
         assert!(matches!(tofu_probes.cell(0), Cell::Idle), "tofu stays tofu");
         assert_eq!(tofu_prober.pending(), 0, "nothing was queued");
+
+        // Let the first prober's workers out of the gate; the drop alone would
+        // close the queue but they are parked inside the fetch.
+        *gate.0.lock().expect("gate") = true;
+        gate.1.notify_all();
     }
 }
