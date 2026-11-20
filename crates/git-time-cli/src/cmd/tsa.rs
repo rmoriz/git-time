@@ -470,8 +470,8 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 /// any more, and a hand-added one is not in this table, so the branch keeps a
 /// unit test instead of a row.
 ///
-/// A served date carries no certificate of its own, so its verdict is judged
-/// against the clock here rather than against a caller's instant.
+/// A served date carries no certificate of its own, so `now` judges it against
+/// the caller's instant rather than a second clock read.
 ///
 /// `rotated` appends ` !` to the state: the served root is one no root of the
 /// local bundle holds, which is the rotation signal the picker also draws. It is
@@ -481,12 +481,13 @@ fn pin_state(
     cell: picker::Cell,
     expiry: Option<String>,
     rotated: bool,
+    now: jiff::Timestamp,
 ) -> String {
     let state = if let Some(expiry) = expiry {
         expiry
     } else {
         match cell {
-            picker::Cell::Known(cached) => served(&cached, jiff::Timestamp::now()),
+            picker::Cell::Known(cached) => picker::served(&cached, now),
             picker::Cell::Pending => "…".to_owned(),
             picker::Cell::Unpublished | picker::Cell::Failed => "?".to_owned(),
             picker::Cell::Idle => {
@@ -522,20 +523,7 @@ fn rotated(roots: Option<&[anchors::RootRow]>, cell: picker::Cell) -> bool {
     }
 }
 
-/// A served date, in the picker's verdict-leads-the-day shape.
-///
-/// The same wording [`picker`] shows: `fetch <date>`, `fetch expires <date>`
-/// within the warning window, `fetch EXPIRED` once the day is past.
-fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
-    if anchors::expired(&cached.not_after, now) {
-        return "fetch EXPIRED".to_owned();
-    }
-    match anchors::expiry_label(&cached.not_after, now) {
-        "(expires soon)" => format!("fetch expires {}", cached.not_after),
-        _ => format!("fetch {date}", date = cached.not_after),
-    }
-}
-
+/// Print the built-in presets and whether their anchor is pinned here.
 /// Print the built-in presets and whether their anchor is pinned here.
 ///
 /// The date comes from the local bundle where there is one, newest live root
@@ -604,6 +592,7 @@ async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
             probes.cell(index),
             expiry,
             rotated(roots.as_deref(), probes.cell(index)),
+            now,
         );
         println!(
             "{} {} {} {} {} {} ({})",
@@ -1501,16 +1490,22 @@ mod tests {
             curated: false,
         };
         // Nothing was asked, which is the only no-date wording a plain run has.
-        assert_eq!(pin_state(&preset, Cell::Idle, None, false), "not pinned");
+        assert_eq!(
+            pin_state(&preset, Cell::Idle, None, false, jiff::Timestamp::now()),
+            "not pinned"
+        );
 
         preset.fingerprints = &["AA:BB"];
-        assert_eq!(pin_state(&preset, Cell::Idle, None, false), "-");
+        assert_eq!(
+            pin_state(&preset, Cell::Idle, None, false, jiff::Timestamp::now()),
+            "-"
+        );
 
         // The shape `expiry_text` returns at the caller, short form included,
         // and the local bundle wins over any probe.
         let expiry = Some("2026-12-02 (expires soon)".to_owned());
         assert_eq!(
-            pin_state(&preset, Cell::Failed, expiry, false),
+            pin_state(&preset, Cell::Failed, expiry, false, jiff::Timestamp::now()),
             "2026-12-02 (expires soon)"
         );
 
@@ -1519,10 +1514,49 @@ mod tests {
             not_after: "2041-03-07".to_owned(),
             fingerprint: "aa".repeat(32),
         });
-        assert_eq!(pin_state(&preset, served, None, false), "fetch 2041-03-07");
-        assert_eq!(pin_state(&preset, Cell::Pending, None, false), "…");
-        assert_eq!(pin_state(&preset, Cell::Failed, None, false), "?");
-        assert_eq!(pin_state(&preset, Cell::Unpublished, None, false), "?");
+        assert_eq!(
+            pin_state(&preset, served, None, false, jiff::Timestamp::now()),
+            "fetch 2041-03-07"
+        );
+        assert_eq!(
+            pin_state(&preset, Cell::Pending, None, false, jiff::Timestamp::now()),
+            "…"
+        );
+        assert_eq!(
+            pin_state(&preset, Cell::Failed, None, false, jiff::Timestamp::now()),
+            "?"
+        );
+        assert_eq!(
+            pin_state(
+                &preset,
+                Cell::Unpublished,
+                None,
+                false,
+                jiff::Timestamp::now()
+            ),
+            "?"
+        );
+    }
+
+    #[test]
+    fn pin_state_judges_a_served_date_against_the_passed_instant() {
+        use crate::cmd::picker::Cell;
+
+        let preset = presets::find("freetsa").expect("a published preset");
+        let served = Cell::Known(crate::cmd::probe::Cached {
+            not_after: "2026-12-02".to_owned(),
+            fingerprint: "aa".repeat(32),
+        });
+        let before = jiff::Timestamp::from_second(1_793_000_000).expect("2026-10-26");
+        let after = jiff::Timestamp::from_second(1_800_000_000).expect("2027-01-15");
+        assert_eq!(
+            pin_state(preset, served.clone(), None, false, before),
+            "fetch expires 2026-12-02"
+        );
+        assert_eq!(
+            pin_state(preset, served, None, false, after),
+            "fetch EXPIRED"
+        );
     }
 
     /// The `!` a pinned row gets when the authority serves a root no local root
@@ -1550,12 +1584,21 @@ mod tests {
         assert!(rotated(Some(&roots), foreign.clone()));
         let expiry = Some("2041-03-07".to_owned());
         assert_eq!(
-            pin_state(preset, foreign.clone(), expiry.clone(), true),
+            pin_state(
+                preset,
+                foreign.clone(),
+                expiry.clone(),
+                true,
+                jiff::Timestamp::now()
+            ),
             "2041-03-07 !"
         );
         // The one the bundle holds stays quiet.
         assert!(!rotated(Some(&roots), held.clone()));
-        assert_eq!(pin_state(preset, held.clone(), expiry, false), "2041-03-07");
+        assert_eq!(
+            pin_state(preset, held.clone(), expiry, false, jiff::Timestamp::now()),
+            "2041-03-07"
+        );
 
         // Nothing to compare without a bundle, and no `!` for a row that did not
         // answer a root.

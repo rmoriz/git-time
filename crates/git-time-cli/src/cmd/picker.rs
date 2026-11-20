@@ -571,7 +571,9 @@ fn trust(
 }
 
 /// A served date, in the same verdict-leads-the-day shape as a pin.
-fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
+///
+/// Both surfaces render through here, so the vocabulary cannot drift.
+pub(crate) fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
     if anchors::expired(&cached.not_after, now) {
         return "fetch EXPIRED".to_owned();
     }
