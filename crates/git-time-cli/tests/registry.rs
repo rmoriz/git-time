@@ -2294,9 +2294,10 @@ fn a_piped_answer_does_not_leave_the_output_on_the_prompt_line() {
     );
 }
 
-/// `none` removes the preset sections and leaves a hand-added authority alone.
+/// `none` removes every configured row, a hand-added one included: a section
+/// with a url is a row, so the answer is authoritative over it too.
 #[test]
-fn select_none_removes_preset_sections_but_not_hand_added_ones() {
+fn select_none_removes_every_configured_row() {
     let repo = Repo::new();
     repo.init();
     let enabled = repo.run_time_with_stdin(
@@ -2317,13 +2318,13 @@ fn select_none_removes_preset_sections_but_not_hand_added_ones() {
         assert_eq!(repo.config(&format!("time.tsa.{id}.url")), None, "{id}");
     }
     assert_eq!(
-        repo.config("time.tsa.acme.url").as_deref(),
-        Some("http://tsa.example/tsr"),
-        "a hand-added section is not a preset's"
+        repo.config("time.tsa.acme.url"),
+        None,
+        "a hand-added row is unticked like any other"
     );
     let stdout = text(&cleared.stdout);
     assert!(stdout.contains("disabled freetsa"), "{stdout}");
-    assert!(!stdout.contains("disabled acme"), "{stdout}");
+    assert!(stdout.contains("disabled acme"), "{stdout}");
 }
 
 /// A typed buffer is the same selector over the same parser: exactly the named
@@ -2390,7 +2391,7 @@ fn select_enter_keeps_the_configured_authorities_and_none_removes_them() {
 
 /// The table marks the configured rows, so the start state is visible, and an
 /// empty answer keeps exactly them instead of disabling what was not touched. A
-/// hand-added id has no row and is never touched.
+/// hand-added id with a url is such a row; it is kept, not re-pinned.
 #[test]
 fn select_starts_from_the_configured_authorities() {
     let repo = Repo::new();
@@ -2407,16 +2408,21 @@ fn select_starts_from_the_configured_authorities() {
     assert!(stdout.contains("2) [x] digicert "), "{stdout}");
     assert!(stdout.contains("3) [ ] sectigo "), "{stdout}");
     assert!(
-        !stdout.contains("acme"),
-        "a hand-added id has no row and no plan line: {stdout}"
+        stdout.contains("[x] acme "),
+        "a hand-added id is a ticked custom row: {stdout}"
     );
     assert!(stdout.contains("would enable freetsa"), "{stdout}");
     assert!(stdout.contains("would enable digicert"), "{stdout}");
+    assert!(
+        stdout.contains("would keep acme (http://tsa.example/tsr)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("would enable acme"), "{stdout}");
     assert!(!stdout.contains("would disable"), "{stdout}");
 
-    // The empty answer saves the ticks, so the hand-added section survives.
-    // freetsa pins against the fixture; digicert cannot match the stub root, so
-    // the run exits 1 while both stay configured.
+    // The empty answer saves the ticks, so the hand-added section survives
+    // without being fetched. freetsa pins against the fixture; digicert cannot
+    // match the stub root, so the run exits 1 while all three stay configured.
     let kept = repo.run_time_with_stdin(
         &["tsa", "select", "--interactive"],
         &repo.fetch_known_root(),
@@ -2426,7 +2432,12 @@ fn select_starts_from_the_configured_authorities() {
     assert_eq!(
         repo.config("time.tsa.acme.url").as_deref(),
         Some("http://tsa.example/tsr"),
-        "the hand-added section is not a preset's"
+        "the hand-added section is kept"
+    );
+    assert!(
+        text(&kept.stdout).contains("kept acme (http://tsa.example/tsr)"),
+        "{}",
+        text(&kept.stdout)
     );
     assert!(
         !text(&kept.stdout).contains("disabled acme"),
@@ -2733,6 +2744,195 @@ fn select_reports_a_failed_authority_and_still_pins_the_others() {
     assert_eq!(
         repo.config("time.tsa.digicert.url").as_deref(),
         Some("http://timestamp.digicert.com")
+    );
+}
+
+/// A configured custom row is a row like any other: it opens ticked, an empty
+/// answer keeps it, a dry run says what it would keep, and the real run keeps it
+/// without fetching a chain it does not have.
+#[test]
+fn a_configured_custom_row_is_ticked_and_kept() {
+    let repo = Repo::new();
+    repo.init();
+    git(
+        repo.path(),
+        &[
+            "config",
+            "time.tsa.zz-acme.url",
+            "https://tsa.acme.example/tsr",
+        ],
+    );
+    git(
+        repo.path(),
+        &["config", "time.tsa.zz-acme.anchor", "acme.pem"],
+    );
+
+    let plan =
+        repo.run_time_with_stdin(&["tsa", "select", "--interactive", "--dry-run"], &[], "\n");
+    assert_eq!(plan.status.code(), Some(0), "{}", text(&plan.stderr));
+    let stdout = text(&plan.stdout);
+    assert!(
+        stdout.contains("[x] zz-acme"),
+        "the custom row opens ticked: {stdout}"
+    );
+    assert!(
+        stdout.contains("zz-acme https://tsa.acme.example/tsr custom "),
+        "a custom row says its own scope: {stdout}"
+    );
+    assert!(
+        stdout.contains("would keep zz-acme (https://tsa.acme.example/tsr)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("would enable zz-acme"), "{stdout}");
+    assert_eq!(
+        repo.config("time.tsa.zz-acme.url").as_deref(),
+        Some("https://tsa.acme.example/tsr"),
+        "nothing written"
+    );
+
+    // The other answer is a removal: the plan says so and still writes nothing.
+    let removal = repo.run_time_with_stdin(
+        &["tsa", "select", "--interactive", "--dry-run"],
+        &[],
+        "none\n",
+    );
+    assert_eq!(removal.status.code(), Some(0), "{}", text(&removal.stderr));
+    assert!(
+        text(&removal.stdout).contains("would disable zz-acme"),
+        "{}",
+        text(&removal.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.zz-acme.anchor").as_deref(),
+        Some("acme.pem"),
+        "still configured"
+    );
+
+    let kept = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "\n");
+    assert_eq!(kept.status.code(), Some(0), "{}", text(&kept.stderr));
+    assert!(
+        text(&kept.stdout).contains("kept zz-acme (https://tsa.acme.example/tsr)"),
+        "{}",
+        text(&kept.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.zz-acme.anchor").as_deref(),
+        Some("acme.pem"),
+        "the section still names its bundle"
+    );
+}
+
+/// Unticking a custom row removes its section, as it does for a preset, but the
+/// bundle it names was the user's to keep and stays on disk.
+#[test]
+fn an_unticked_custom_row_is_disabled_but_keeps_its_anchor() {
+    let repo = Repo::new();
+    repo.init();
+    let anchor = repo.path().join("acme.pem");
+    std::fs::write(&anchor, std::fs::read(freetsa_root()).expect("the fixture"))
+        .expect("write the bundle");
+    git(
+        repo.path(),
+        &[
+            "config",
+            "time.tsa.zz-acme.url",
+            "https://tsa.acme.example/tsr",
+        ],
+    );
+    git(
+        repo.path(),
+        &["config", "time.tsa.zz-acme.anchor", "acme.pem"],
+    );
+
+    let output = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "none\n");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stdout).contains("disabled zz-acme"),
+        "{}",
+        text(&output.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.zz-acme.url"),
+        None,
+        "the section is gone"
+    );
+    assert_eq!(repo.config("time.tsa.zz-acme.anchor"), None);
+    assert!(anchor.exists(), "the bundle itself stays");
+}
+
+/// A url with no anchor still makes a row, so unticking it removes the section
+/// too; there is no bundle file to leave behind.
+#[test]
+fn an_unticked_url_only_custom_row_is_disabled() {
+    let repo = Repo::new();
+    repo.init();
+    git(
+        repo.path(),
+        &["config", "time.tsa.zz-nopin.url", "https://tsa.example/tsr"],
+    );
+
+    let output = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "none\n");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stdout).contains("disabled zz-nopin"),
+        "{}",
+        text(&output.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.zz-nopin.url"),
+        None,
+        "the section is gone"
+    );
+}
+
+/// An unknown section with an anchor but no url is no row, so a save that knows
+/// nothing about it leaves it exactly as it was.
+#[test]
+fn an_anchor_only_unknown_section_survives_a_save() {
+    let repo = Repo::new();
+    repo.init();
+    git(
+        repo.path(),
+        &["config", "time.tsa.zz-noauth.anchor", "noauth.pem"],
+    );
+
+    let output = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &[], "none\n");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        !text(&output.stdout).contains("zz-noauth"),
+        "no row means no line: {}",
+        text(&output.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.zz-noauth.anchor").as_deref(),
+        Some("noauth.pem"),
+        "the anchor-only section survives"
+    );
+}
+
+/// A chosen preset is pinned through `install::pin`, which reads the configured
+/// bundle path itself: the pin lands there and the section still names it.
+#[test]
+fn a_chosen_preset_keeps_its_configured_anchor_path() {
+    let repo = Repo::new();
+    repo.init();
+    git(
+        repo.path(),
+        &["config", "time.tsa.freetsa.anchor", "my/freetsa.pem"],
+    );
+    let bundle = repo.path().join("my/freetsa.pem");
+    let fetch = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {}", pstr(&freetsa_root())),
+    )];
+
+    let output = repo.run_time_with_stdin(&["tsa", "select", "--interactive"], &fetch, "1\n");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(bundle.exists(), "the bundle went to the configured path");
+    assert_eq!(
+        repo.config("time.tsa.freetsa.anchor").as_deref(),
+        Some("my/freetsa.pem"),
+        "the section still names it"
     );
 }
 

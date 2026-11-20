@@ -15,11 +15,12 @@
 //! `[a-z0-9-]`: it ends up in a config key, a trailer value and a file name, so
 //! anything else would need quoting somewhere.
 //!
-//! `select` is the cursor UI over the preset table: the configured authorities
-//! start ticked, tick what this repository should use, save, and only then are
-//! anchors pinned and preset sections missing from the answer removed. It needs
-//! a terminal unless `--interactive` says an answer is being piped; a script
-//! otherwise uses `preset add` or `add`.
+//! `select` is the cursor UI over the row table — the built-in presets plus
+//! every configured id that has a url: the configured rows start ticked, tick
+//! what this repository should use, save, and only then are anchors pinned and
+//! row sections missing from the answer removed. A custom row is kept rather
+//! than re-pinned. It needs a terminal unless `--interactive` says an answer is
+//! being piped; a script otherwise uses `preset add` or `add`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
@@ -896,9 +897,10 @@ fn needs_a_terminal() -> Exit {
 
 /// Run `git time tsa select`: show the table, take a selection, pin it.
 ///
-/// The selection decides what is enabled *and* what is not: a preset section
-/// that is not chosen is removed, so the command can narrow a configuration as
-/// well as widen it. Sections whose id is not a preset are never touched.
+/// The selection decides what is enabled *and* what is not: a row that is not
+/// chosen has its section removed, so the command can narrow a configuration as
+/// well as widen it. A section that is no row — an unknown id without a url —
+/// cannot be enabled and is never touched.
 ///
 /// It starts from what is configured, so an authority left out of the answer
 /// was unticked on purpose rather than forgotten by the start state.
@@ -908,8 +910,8 @@ fn needs_a_terminal() -> Exit {
 /// where an answer is expected.
 ///
 /// `accept` is forwarded from `install`, whose own `--accept` would otherwise be
-/// dropped by the handover: the ids it can name are the chosen ones, because
-/// those are the only ids this run fetches.
+/// dropped by the handover: the ids it can name are the chosen preset rows,
+/// because those are the only ids this run fetches.
 pub(crate) async fn select(
     repo: &Repo,
     accept: &[String],
@@ -917,11 +919,15 @@ pub(crate) async fn select(
     _interactive: bool,
     dry_run: bool,
 ) -> Exit {
-    // The answer is the whole set: every preset section missing from it is
-    // removed. An empty start would therefore drop every authority the user did
-    // not mean to touch, and neither surface would show what is configured. The
-    // ticks begin at the configuration; the answer stays authoritative over it.
-    let seed = match already_enabled(repo) {
+    let rows = match rows(repo) {
+        Ok(rows) => rows,
+        Err(exit) => return exit,
+    };
+    // The answer is the whole set: every row missing from it is removed. An
+    // empty start would therefore drop every authority the user did not mean to
+    // touch, and neither surface would show what is configured. The ticks begin
+    // at the configuration; the answer stays authoritative over it.
+    let seed = match already_enabled(repo, rows) {
         Ok(seed) => seed,
         Err(exit) => return exit,
     };
@@ -930,8 +936,8 @@ pub(crate) async fn select(
         // Nothing asked yet, so the line-prompt fallback keeps `pin -` and the
         // picker path replaces this table with the cache seed once it owns the
         // terminal.
-        let mut probes = picker::Probes::idle(presets::PRESETS.len());
-        if let Some(outcome) = picker::run(&mut selection, &presets::PRESETS, &mut probes) {
+        let mut probes = picker::Probes::idle(rows.len());
+        if let Some(outcome) = picker::run(&mut selection, rows, &mut probes) {
             match outcome {
                 picker::Outcome::Save(chosen) => chosen,
                 picker::Outcome::Abort => {
@@ -942,37 +948,40 @@ pub(crate) async fn select(
             }
         } else {
             // A terminal, but no raw mode to be had: the line prompt still asks.
-            match ask(&seed, command) {
+            match ask(&seed, rows, command) {
                 Ok(chosen) => chosen,
                 Err(exit) => return exit,
             }
         }
     } else {
         // A piped answer: the line prompt reads it, one line.
-        match ask(&seed, command) {
+        match ask(&seed, rows, command) {
             Ok(chosen) => chosen,
             Err(exit) => return exit,
         }
     };
-    let accept = match accepted(accept, &chosen, command) {
+    let accept = match accepted(accept, &chosen, rows, command) {
         Ok(accept) => accept,
         Err(exit) => return exit,
     };
-    apply(repo, &chosen, &accept, dry_run).await
+    apply(repo, &chosen, rows, &accept, dry_run).await
 }
 
 /// Resolve `--accept` values for a selection against the rows it chose.
 ///
 /// A bare fingerprint is unambiguous only when one row was chosen, so the ids in
-/// play are the chosen ones and nothing else.
+/// play are the chosen ones and nothing else. A custom row contributes no id:
+/// there is no anchor url to fetch, so its bundle is never reviewed by this run.
 fn accepted(
     accept: &[String],
     chosen: &[usize],
+    rows: &[presets::Preset],
     command: &str,
 ) -> Result<std::collections::BTreeMap<String, String>, Exit> {
     let ids: Vec<&str> = chosen
         .iter()
-        .filter_map(|index| presets::PRESETS.get(*index))
+        .filter_map(|index| rows.get(*index))
+        .filter(|preset| presets::find(preset.name).is_some())
         .map(|preset| preset.name)
         .collect();
     crate::cmd::accept::one_or_id(accept, &ids)
@@ -1086,17 +1095,17 @@ pub(crate) fn rows(repo: &Repo) -> Result<&'static [presets::Preset], Exit> {
     Ok(Box::leak(rows.into_boxed_slice()))
 }
 
-/// The preset indices the configuration already enables, for the seed.
+/// The row indices the configuration already enables, for the seed.
 ///
-/// A hand-added section has a row now, but the seeding is still preset-only: it
-/// matches table ids, and a later task widens it to every configured row. The
-/// result is in table order, like the picker's own state, so a piped answer
-/// enables in the order shown.
-fn already_enabled(repo: &Repo) -> Result<Vec<usize>, Exit> {
+/// Every configured id that is a row is ticked — a custom row included, whose
+/// section is exactly why it is here. An anchor-only section is no row and so
+/// stays unticked, as it is left alone by [`apply`]. The result is in row order,
+/// like the picker's own state, so a piped answer enables in the order shown.
+fn already_enabled(repo: &Repo, rows: &[presets::Preset]) -> Result<Vec<usize>, Exit> {
     let ids = anchors::tsa_ids(repo)?;
     let mut seed: Vec<usize> = ids
         .iter()
-        .filter_map(|id| presets::PRESETS.iter().position(|preset| preset.name == id))
+        .filter_map(|id| rows.iter().position(|preset| preset.name == *id))
         .collect();
     seed.sort_unstable();
     Ok(seed)
@@ -1110,20 +1119,27 @@ fn initial(seed: &[usize]) -> picker::Selection {
     picker::Selection::ticked(seed)
 }
 
-/// Print the preset table and take the selection, re-asking on nonsense.
+/// Print the row table and take the selection, re-asking on nonsense.
 ///
 /// `seed` marks the rows the configuration already enables. The table is the
 /// tick state the empty answer accepts; a typed answer overrides it, exactly as
-/// the picker's buffer does.
-fn ask(seed: &[usize], command: &str) -> Result<Vec<usize>, Exit> {
-    for (index, preset) in presets::PRESETS.iter().enumerate() {
+/// the picker's buffer does. A custom row has no tier of its own and says
+/// `custom` in the scope column.
+fn ask(seed: &[usize], rows: &[presets::Preset], command: &str) -> Result<Vec<usize>, Exit> {
+    for (index, preset) in rows.iter().enumerate() {
         println!(
             "{}) [{}] {} {} {} {}{}",
             index + 1,
             if seed.contains(&index) { 'x' } else { ' ' },
             preset.name,
             preset.url,
-            if preset.curated { "default" } else { "opt-in" },
+            if presets::find(preset.name).is_none() {
+                "custom"
+            } else if preset.curated {
+                "default"
+            } else {
+                "opt-in"
+            },
             match preset.fingerprints.last().copied() {
                 Some(fingerprint) => format!("pinned {fingerprint}"),
                 None => "tofu".to_owned(),
@@ -1158,7 +1174,7 @@ fn ask(seed: &[usize], command: &str) -> Result<Vec<usize>, Exit> {
         if line.trim().is_empty() {
             return Ok(seed.to_vec());
         }
-        match parse_choice(&line, presets::PRESETS.len()) {
+        match parse_choice(&line, rows.len()) {
             Ok(chosen) => return Ok(chosen),
             Err(message) => eprintln!("{command}: {message}"),
         }
@@ -1214,22 +1230,27 @@ fn index(text: &str, count: usize) -> Option<usize> {
 async fn apply(
     repo: &Repo,
     chosen: &[usize],
+    rows: &[presets::Preset],
     accept: &std::collections::BTreeMap<String, String>,
     dry_run: bool,
 ) -> Exit {
-    let configured = match anchors::configured(repo) {
-        Ok(configured) => configured,
+    let configured_ids: BTreeSet<String> = match anchors::tsa_ids(repo) {
+        Ok(ids) => ids.into_iter().collect(),
         Err(exit) => return exit,
     };
-    // Only preset ids are managed here; a hand-added section stays.
-    let unwanted: Vec<&str> = presets::names()
-        .filter(|name| {
-            !chosen
-                .iter()
-                .filter_map(|index| presets::PRESETS.get(*index))
-                .any(|preset| preset.name == *name)
-                && configured.iter().any(|anchor| anchor.id == *name)
+    // Every configured row that is not chosen is unwanted; a section that is no
+    // row is absent from `rows` and therefore survives.
+    let chosen_names: BTreeSet<&str> = chosen
+        .iter()
+        .filter_map(|index| rows.get(*index))
+        .map(|preset| preset.name)
+        .collect();
+    let unwanted: Vec<&str> = rows
+        .iter()
+        .filter(|preset| {
+            !chosen_names.contains(preset.name) && configured_ids.contains(preset.name)
         })
+        .map(|preset| preset.name)
         .collect();
 
     if dry_run {
@@ -1246,9 +1267,20 @@ async fn apply(
 
     let mut failed = false;
     for index in chosen {
-        let Some(preset) = presets::PRESETS.get(*index) else {
+        let Some(preset) = rows.get(*index) else {
             continue;
         };
+        // A custom row has no chain to fetch and is configured already: keeping
+        // it is the whole action, and re-pinning it would fail on the empty
+        // chain.
+        if presets::find(preset.name).is_none() {
+            if dry_run {
+                println!("would keep {} ({})", preset.name, preset.url);
+            } else {
+                println!("kept {} ({})", preset.name, preset.url);
+            }
+            continue;
+        }
         if dry_run {
             println!(
                 "would enable {} ({}) fingerprint {}",
@@ -1338,7 +1370,7 @@ async fn apply(
     }
 }
 
-/// Delete one preset's whole section, saying so.
+/// Delete one authority's whole section, saying so.
 fn disable(repo: &Repo, id: &str) -> Result<(), Exit> {
     git_stdout(
         repo,
@@ -1595,12 +1627,12 @@ mod tests {
         (dir, repo)
     }
 
-    /// The seed holds the configured preset rows in table order, not in the
-    /// alphabetical order `tsa_ids` answers in, and a hand-added id is no row.
+    /// The seed holds every configured row in row order, not in the
+    /// alphabetical order `tsa_ids` answers in: a custom row is seeded too, last.
     #[test]
-    fn the_seed_is_the_configured_presets_in_table_order() {
+    fn the_seed_is_the_configured_rows_in_row_order() {
         let (dir, repo) = repository();
-        // Reverse of the table, and a hand-added id with no row.
+        // Reverse of the table, and a custom id that is a row.
         configure(
             dir.path(),
             "digicert",
@@ -1615,7 +1647,11 @@ mod tests {
         );
         configure(dir.path(), "acme", Some("https://tsa.example/acme"), None);
 
-        assert_eq!(already_enabled(&repo).expect("the seed"), [0, 1]);
+        let rows = super::rows(&repo).expect("rows");
+        assert_eq!(
+            already_enabled(&repo, rows).expect("the seed"),
+            [0, 1, presets::PRESETS.len()]
+        );
     }
 
     /// A configured unknown id joins the table as a last, custom, TOFU row that
@@ -1760,21 +1796,45 @@ mod tests {
         assert!(selection.is_chosen(1));
     }
 
-    /// A bare accept is unambiguous only for a selection of one row; two rows
-    /// need the id, since only the chosen rows can be fetched.
+    /// A bare accept is unambiguous only for a selection of one preset row; two
+    /// rows need the id, and a custom row counts for nothing because the run
+    /// fetches no id for it.
     #[test]
-    fn a_bare_accept_is_read_against_the_chosen_row() {
+    fn a_bare_accept_ignores_a_chosen_custom_row() {
+        let (dir, repo) = repository();
+        configure(
+            dir.path(),
+            "zz-acme",
+            Some("https://tsa.acme.example/tsr"),
+            None,
+        );
+        let rows = super::rows(&repo).expect("rows");
+        let custom = rows
+            .iter()
+            .position(|row| row.name == "zz-acme")
+            .expect("a custom row");
+        let freetsa = rows
+            .iter()
+            .position(|row| row.name == "freetsa")
+            .expect("a preset row");
+
         let bare = ["AA:BB".to_owned()];
-        let one =
-            accepted(&bare, &[0], "git time tsa select").expect("one chosen row names the id");
-        assert_eq!(one[presets::PRESETS[0].name], "AA:BB");
+        let one = accepted(&bare, &[freetsa, custom], rows, "git time tsa select")
+            .expect("the preset row is the only id in play");
+        assert_eq!(one.len(), 1, "{one:?}");
+        assert_eq!(one["freetsa"], "AA:BB");
 
-        let two =
-            accepted(&bare, &[0, 1], "git time tsa select").expect_err("two rows are ambiguous");
-        assert!(two.message().contains(presets::PRESETS[0].name), "{two:?}");
+        let two = accepted(&bare, &[freetsa, 1], rows, "git time tsa select")
+            .expect_err("two preset rows are ambiguous");
+        assert!(two.message().contains("freetsa"), "{two:?}");
 
-        let by_id = accepted(&["digicert=AA:BB".to_owned()], &[1], "git time tsa select")
-            .expect("the id is taken as given");
+        let by_id = accepted(
+            &["digicert=AA:BB".to_owned()],
+            &[1],
+            rows,
+            "git time tsa select",
+        )
+        .expect("the id is taken as given");
         assert_eq!(by_id["digicert"], "AA:BB");
     }
 

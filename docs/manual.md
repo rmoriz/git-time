@@ -291,15 +291,18 @@ endpoint actually chains to. Without that, a pinned preset would refuse its own 
 
 ### `git time tsa select [--interactive] [--dry-run]`
 
-Choose which preset authorities this repository uses, then pin the chosen anchors and remove the
-preset sections that were not chosen. A section whose id is not a preset is untouched, and saving
-with nothing selected is therefore the removal path.
+Choose which authorities this repository uses, then pin the chosen anchors and remove the sections
+that were not chosen. Every configured authority that carries a url is a row, so an unticked
+hand-added one loses its section too, though the bundle it names stays on disk; a section with no
+url cannot be enabled and is left untouched. Saving with nothing selected is therefore the removal
+path.
 
 The rows of the authorities already configured start ticked, so a change keeps the others that the
-user did not mean to touch; an unconfigured row starts clear. `n` clears every tick, and saving that
-empty selection is how the preset sections are removed.
+user did not mean to touch; an unconfigured row starts clear. A hand-added row is kept, not pinned
+again, because there is no anchor url to fetch for it. `n` clears every tick, and saving that empty
+selection is how the row sections are removed.
 
-The list is a cursor UI on the alternate screen. `a` really is all 21.
+The list is a cursor UI on the alternate screen. `a` really is every row.
 
 ```
  > [x]  1  freetsa            pin 2041-03-07 
@@ -320,7 +323,7 @@ space toggle  a all  n none  j/k or arrows move  r refresh  enter save  q abort
 | `Home`, `End`, `[H`, `[F` | Jump to the first, the last row |
 | `space` | Tick or untick the row under the cursor |
 | `a` | Tick every row |
-| `n` | Untick every row; saving then removes the preset sections |
+| `n` | Untick every row; saving then removes the row sections |
 | `r` | Drop the cached dates, ask every publishing authority again, repaint |
 | `enter` | Save and pin the ticks |
 | `q`, `esc`, `ctrl-c` | Leave without writing |
