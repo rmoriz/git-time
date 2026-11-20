@@ -179,7 +179,7 @@ Update the doc: a line whose fingerprint is not 64 lowercase hex, or whose day i
 
 - [ ] **Step 4: Drop the read-time normalizer in `still_published`**
 
-Delete the `bare` closure; compare `cached.fingerprint` directly, and filter preset values by `fingerprint.len() == cached.fingerprint.len()`. Adjust the doc: the cache only holds the bare lowercase spelling now, so only the width differs between a SHA-1 preset value and the SHA-256 entry.
+Delete the `bare` closure for the cached value: compare `cached.fingerprint` directly, and filter preset values by `fingerprint.len() == cached.fingerprint.len()`. The published side still needs normalizing — the table spells values uppercase and colon-separated — so strip and lowercase each published value before the width filter. Adjust the doc: the cache only holds the bare lowercase spelling now, while the width differs between a SHA-1 preset value and the SHA-256 entry and the spelling is still the table's.
 
 - [ ] **Step 5: Run the suite**
 
@@ -262,7 +262,8 @@ git commit -m "refactor: render a served date from one function and one instant"
 
 **Files:**
 - Modify: `crates/git-time-cli/src/cmd/tsa.rs:513-525` (`rotated`), `:596-608` (call site)
-- Test: `crates/git-time-cli/src/cmd/tsa.rs` (`mod tests`, `a_rotated_authority_is_marked`)
+- Modify: `crates/git-time-cli/src/cmd/picker.rs:527-568` (`trust`, the same fallback)
+- Test: `crates/git-time-cli/src/cmd/tsa.rs` (`mod tests`, `a_rotated_authority_is_marked`), `crates/git-time-cli/src/cmd/picker.rs` (`mod tests`, `a_failed_probe_keeps_a_rotation_already_cached`)
 - Docs: `docs/manual.md:216-224`, `docs/git-time.1` (the `--refresh` paragraph), `docs/superpowers/specs/2026-11-19-tsa-probe-dates-design.md:95` (rendering bullet)
 
 **Interfaces:**
@@ -319,7 +320,7 @@ fn rotated(
 }
 ```
 
-Update its doc to say the comparison falls back to the cache and why. Pass `preset` and `now` at the call site. Update the `preset_list`/`refresh` docs: a failed or unpublished reply leaves the marker standing for this run while the cell shows `?`.
+Update its doc to say the comparison falls back to the cache and why. Pass `preset` and `now` at the call site. Apply the same fallback to `picker::trust` (which already has both) and update its doc sentence "a failed or unpublished probe marks nothing" — cover it with `a_failed_probe_keeps_a_rotation_already_cached`, built by storing a foreign entry and rendering a `Cell::Failed` row over a pinned fixture. Update the `preset_list`/`refresh` docs: a failed or unpublished reply leaves the marker standing for this run while the cell shows `?`.
 
 - [ ] **Step 4: Run the tests**
 

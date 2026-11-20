@@ -205,8 +205,8 @@ compare the fetched value out of band and repeat with `--accept` — bare, since
 exactly one id, or as `<id>=<fingerprint>` under that same id (any other id matches nothing and is
 not an error).
 
-`preset list` prints one row per preset: name, endpoint, algorithm, scope, the pinned fingerprint,
-the newest root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
+`preset list` prints one row per preset: name, endpoint, algorithm, scope, the newest fingerprint the
+authority publishes, the newest root's expiry date, and `anchored` or `missing`. The date carries `(expires soon)` in its
 last 90 days and `expired` past it; where no certificate is pinned here the column shows a cached
 probe answer in the picker's words (`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-`
 for a row the cache cannot answer. A pinned row whose authority serves a root the local bundle does
@@ -362,7 +362,9 @@ An answer is kept for seven days in `$XDG_CONFIG_HOME/git-time/probe/<id>` (or `
 second run paints the rows that answered from the cache and opens no socket for them; a row that
 failed or served no published root and has no entry is asked again. A date can be up to a week old;
 `r` asks again without dropping anything first, so a failed refresh keeps the previous answer until
-it ages out. `git time tsa preset list` reads the same cache — a plain run still fetches nothing —
+it ages out. A row with no answer of its own — failed, or still waiting — keeps the ` !` marker of
+that cached answer, so a network blip does not hide a rotation either. `git time tsa preset list`
+reads the same cache — a plain run still fetches nothing —
 and its `--refresh` is the one option that asks instead.
 
 A probe is a display aid, never evidence: a date is worth exactly what the publication behind it is,
