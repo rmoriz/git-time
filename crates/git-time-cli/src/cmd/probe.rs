@@ -315,9 +315,9 @@ impl Prober {
 
     /// The rows still queued or in flight.
     //
-    // The picker repaints on delivered answers and only waits on the queue once,
-    // at the deadline-bounded leave; that wait reads the counter, and so do the
-    // tests that want the finished answer.
+    // The picker repaints on delivered answers and, at the deadline-bounded
+    // leave, waits on the channel rather than this counter; the tests that want
+    // a finished run read it.
     #[allow(dead_code)]
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -891,11 +891,17 @@ pub(crate) mod tests {
     fn settling_gives_up_on_a_parked_fetch_at_the_deadline() {
         let _guard = xdg_lock();
         xdg();
-        // The gate is never opened, so only the deadline can end the settle.
+        // The gate is never opened, so only the deadline can end the settle. The
+        // URL is logged before the park so the test can see a worker has taken a
+        // row: `settle` refunds an untaken row, and a refunded queue closes the
+        // channel at once instead of waiting.
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let urls = urls();
+        let log = Arc::clone(&urls);
         let fetch: super::Fetch = {
             let gate = Arc::clone(&gate);
-            Arc::new(move |_, _| {
+            Arc::new(move |url, _| {
+                log.lock().unwrap().push(url.to_owned());
                 let (open, wake) = &*gate;
                 let mut ready = open.lock().unwrap();
                 while !*ready {
@@ -905,6 +911,13 @@ pub(crate) mod tests {
             })
         };
         let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
+        for _ in 0..200 {
+            if !urls.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!urls.lock().unwrap().is_empty(), "a worker took a row");
         let started = std::time::Instant::now();
         let results = prober.settle();
         let waited = started.elapsed();

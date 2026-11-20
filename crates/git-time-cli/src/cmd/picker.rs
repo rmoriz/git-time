@@ -744,8 +744,8 @@ pub(crate) fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
 /// A refresh can make a row answer twice, so the index is the key and the last
 /// answer is the one left in the table. Every surface that puts answers into a
 /// table goes through [`take`], so the cell vocabulary cannot drift between
-/// them — between keys through [`absorb`], and once at the end through
-/// [`probe::Prober::settle`].
+/// them — between keys it is fed by [`absorb`], and once at the end by
+/// [`probe::Prober::settle`]'s returned results.
 pub(crate) fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
     take(probes, prober.drain())
 }
