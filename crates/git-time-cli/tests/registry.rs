@@ -2495,10 +2495,13 @@ fn select_probes_the_open_rows_and_answers_from_the_cache_offline() {
         pstr(&log),
         pstr(&freetsa_root())
     );
+    // Two spaces toggle and repaint before the quit, which gives a worker the
+    // time to pick the row up: a row `settle` refunds from the queue never
+    // answers, so without them the window would be one key read wide.
     let Some(first) = repo.run_time_pty(
         &["tsa", "select"],
         &[("GIT_TIME_ANCHOR_FETCH_CMD", served)],
-        "q\n",
+        "  q\n",
     ) else {
         eprintln!("no script(1) here: the probing picker was not exercised");
         return;

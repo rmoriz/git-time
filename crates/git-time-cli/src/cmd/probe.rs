@@ -12,12 +12,22 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use der::Encode as _;
 use git_time_core::presets::Preset;
 
 /// How long a probed answer is shown: one week.
 pub const TTL: i64 = 7 * 86_400;
+
+/// How long a leaving picker waits for the rows already in flight.
+///
+/// Neither fetch path bounds a quit: a stub runs through `Command::output()`
+/// with no timeout at all, and the network path times each request — one bundle
+/// plus every chain member — not the probe. Two seconds is long enough for a git
+/// call that is already exiting to hand over what it has, and short enough that
+/// `q`, Esc and Ctrl-C still feel immediate.
+pub const SETTLE: Duration = Duration::from_secs(2);
 
 /// One answered probe: the root's `notAfter` day and the fingerprint of the
 /// root it names.
@@ -275,8 +285,10 @@ impl Prober {
     /// The queue closes first, so a row no worker has taken up is given back
     /// instead of being fetched into a screen that is already leaving. The
     /// workers then finish what they hold and drop their senders, which is what
-    /// ends the receive: nothing is joined, and a hung fetch is still bounded by
-    /// its own timeout. A refunded row therefore never answers.
+    /// ends the receive: nothing is joined, and [`SETTLE`] bounds the whole wait
+    /// against one instant, because neither fetch path bounds a quit. Whatever
+    /// has not arrived by then is dropped; the cache write happens before the
+    /// send, so a dropped answer is still cached for the next run.
     ///
     /// This is the last drain: [`Prober::drain`] would no longer see the queue's
     /// late answers because the receiver is consumed here.
@@ -287,17 +299,25 @@ impl Prober {
             queue.closed = true;
         }
         self.shared.wake.notify_all();
+        let deadline = Instant::now() + SETTLE;
         let mut results = self.drain();
-        while let Ok(result) = self.results.recv() {
-            results.push(result);
+        // `checked_duration_since` also ends the loop once the deadline has
+        // passed during the previous receive.
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            // Either error (the deadline, or every sender gone) ends the drain.
+            match self.results.recv_timeout(left) {
+                Ok(result) => results.push(result),
+                Err(_) => break,
+            }
         }
         results
     }
 
     /// The rows still queued or in flight.
     //
-    // The picker repaints on delivered answers and never waits on the queue, so
-    // only tests read this; anything that has to wait for a whole run needs it.
+    // The picker repaints on delivered answers and only waits on the queue once,
+    // at the deadline-bounded leave; that wait reads the counter, and so do the
+    // tests that want the finished answer.
     #[allow(dead_code)]
     #[must_use]
     pub fn pending(&self) -> usize {
@@ -864,6 +884,35 @@ pub(crate) mod tests {
         assert!(
             asked < presets::PRESETS.len(),
             "the queue was not drained: {asked}"
+        );
+    }
+
+    #[test]
+    fn settling_gives_up_on_a_parked_fetch_at_the_deadline() {
+        let _guard = xdg_lock();
+        xdg();
+        // The gate is never opened, so only the deadline can end the settle.
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let fetch: super::Fetch = {
+            let gate = Arc::clone(&gate);
+            Arc::new(move |_, _| {
+                let (open, wake) = &*gate;
+                let mut ready = open.lock().unwrap();
+                while !*ready {
+                    ready = wake.wait(ready).unwrap();
+                }
+                std::fs::read(FREETSA_ROOT).map_err(|error| error.to_string())
+            })
+        };
+        let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
+        let started = std::time::Instant::now();
+        let results = prober.settle();
+        let waited = started.elapsed();
+        assert!(results.is_empty(), "nothing can answer: {}", results.len());
+        assert!(waited >= super::SETTLE, "waited the deadline: {waited:?}");
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "and not much past it: {waited:?}"
         );
     }
 

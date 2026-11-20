@@ -742,8 +742,10 @@ pub(crate) fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
 /// Take every finished answer into `probes`, answering whether one arrived.
 ///
 /// A refresh can make a row answer twice, so the index is the key and the last
-/// answer is the one left in the table. Both surfaces that drain a prober go
-/// through here, so the cell vocabulary cannot drift between them.
+/// answer is the one left in the table. Every surface that puts answers into a
+/// table goes through [`take`], so the cell vocabulary cannot drift between
+/// them — between keys through [`absorb`], and once at the end through
+/// [`probe::Prober::settle`].
 pub(crate) fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
     take(probes, prober.drain())
 }
@@ -796,8 +798,10 @@ fn refresh(presets: &[Preset], probes: &mut Probes, prober: &probe::Prober) {
 /// The first frame is painted from the cache before any fetch is started, and
 /// answers are drained between key reads; a slow or dead authority costs a
 /// repaint and never the screen. A silent decisecond repaints only when an
-/// answer arrived or the terminal was resized. The key that leaves waits for the
-/// rows already in flight, so a quit does not throw an answer away unseen.
+/// answer arrived or the terminal was resized. The key that leaves waits
+/// [`probe::SETTLE`] for the rows already in flight: that last frame is wiped by
+/// the alternate-screen teardown moments later, so what really outlives the run
+/// is the cache the workers wrote.
 pub fn run(
     selection: &mut Selection,
     presets: &'static [Preset],
@@ -839,10 +843,11 @@ pub fn run(
         match selection.apply_key(key, presets.len()) {
             Outcome::Stay => terminal.paint(&frame(selection, presets, probes, rows, cols)),
             outcome => {
-                // The key is the last one: nothing new is fetched, but the rows
-                // already in flight are waited for, so their answer is on the
-                // last frame and the cache keeps it for the next run. Painting
-                // has to happen before `Raw` drops and the alternate screen goes.
+                // The key is the last one: nothing new is fetched, and the rows
+                // already in flight get `SETTLE` to answer. The frame they reach
+                // is wiped with the alternate screen right after, but the worker
+                // wrote the cache before sending, so the next run reads it.
+                // Painting has to happen before `Raw` drops and the screen goes.
                 if take(probes, prober.settle()) {
                     terminal.paint(&frame(selection, presets, probes, rows, cols));
                 }
