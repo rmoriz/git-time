@@ -517,11 +517,10 @@ Print the built\-in presets with their endpoint, algorithm, scope
 .B ( default
 or
 .BR "opt\-in" ),
-their
-.B pinned
-fingerprint or
-.BR tofu ,
-the newest root's expiry date, and
+the newest fingerprint they publish
+.RB ( tofu
+only for a hand\-added row that publishes none), the newest root's expiry
+date, and
 .B anchored
 or
 .BR missing .
@@ -532,7 +531,7 @@ in its last 90 days and
 past it; a published root that is not pinned here has no certificate to read
 and shows a cached probe answer instead, in the words
 .B tsa select
-uses and judged when it is printed, or
+uses and judged against the one instant the listing took, or
 .B \-
 for a row the cache cannot answer.
 A pinned row whose authority serves a root the local bundle does not hold
@@ -559,7 +558,8 @@ A row that failed or served no published root and has no entry keeps
 .B \-
 here; the next
 .B \-\-refresh
-asks it again.
+asks it again, and a marker is read from the cache whenever the reply names no
+root.
 The cache is shared with
 .BR "tsa select" .
 Either way the cache is the only write: a probe pins nothing and writes no
@@ -570,7 +570,9 @@ Exits 0.
 Ask every authority that publishes a root and wait for the queue to drain
 before printing.
 Nothing is dropped first, so a refresh that fails leaves the previous date in
-place until it ages out.
+place until it ages out, and the
+.B !\&
+marker already read from that entry stays with it.
 A row with no local pin that cannot answer prints
 .BR ? ;
 a pinned row keeps its pin date.
@@ -682,7 +684,10 @@ is asked again.
 A date can be up to a week old.
 .B r
 asks again without dropping anything first, so a failed refresh keeps the
-previous answer until it ages out.
+previous answer until it ages out, and a row with no answer of its own keeps
+that answer's
+.B !\&
+marker, so a network blip does not hide a rotation.
 .B tsa preset list
 reads the same cache and
 .B \-\-refresh

@@ -39,16 +39,22 @@ use crate::cmd::Exit;
 /// How long one anchor fetch may take.
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The config directory itself, `$XDG_CONFIG_HOME` or `~/.config`, with no
+/// leaf. Both state directories join it, so they cannot drift apart.
+#[must_use]
+pub fn config_home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from(".config"))
+}
+
 /// The directory anchor bundles are pinned in: `$XDG_CONFIG_HOME` when set,
 /// `~/.config` otherwise.
 #[must_use]
 pub fn dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-        .unwrap_or_else(|| PathBuf::from(".config"));
-    base.join("git-time").join("anchors")
+    config_home().join("git-time").join("anchors")
 }
 
 /// The lowercase hex SHA-256 fingerprint of `bytes`.

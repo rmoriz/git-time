@@ -508,7 +508,8 @@ fn row(
 /// A pin always wins over the probe, because the local bundle is what a seal is
 /// checked against. What the probe found is then a second fact: a served root
 /// the bundle does not hold appends ` !`, the rotation signal, instead of
-/// replacing the pinned date. A failed or unpublished probe marks nothing.
+/// replacing the pinned date. A failed or unpublished probe marks nothing of its
+/// own, but a marker the last cached answer recorded stands while it fails.
 ///
 /// Only a row with no root in the bundle shows the cell: `fetch [expires ]
 /// <date>`, `fetch EXPIRED`, `?` for a failed or unpublished probe, and `…`
@@ -546,7 +547,13 @@ fn trust(
                 None => "EXPIRED".to_owned(),
             }
         };
-        if let Cell::Known(cached) = cell
+        let cached = match cell {
+            Cell::Known(cached) => Some(cached),
+            // A failed refresh, or a row still waiting, has no root of its own;
+            // the marker comes from the last cached answer so it cannot blink.
+            _ => probe::cached(preset.name, now),
+        };
+        if let Some(cached) = cached
             && !roots
                 .iter()
                 .any(|root| root.fingerprint == cached.fingerprint)
@@ -571,7 +578,9 @@ fn trust(
 }
 
 /// A served date, in the same verdict-leads-the-day shape as a pin.
-fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
+///
+/// Both surfaces render through here, so the vocabulary cannot drift.
+pub(crate) fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
     if anchors::expired(&cached.not_after, now) {
         return "fetch EXPIRED".to_owned();
     }
@@ -684,11 +693,12 @@ fn stty(args: &[&str]) -> Option<String> {
 
 /// Whether `cached` still names a root `preset` publishes.
 ///
-/// The comparison is by digest width: the cache always holds the SHA-256 that
-/// [`anchors::fingerprint`] wrote, while most presets publish only a SHA-1, and
-/// a 64-character digest can never equal a 40-character one. The cached value is
-/// normalized first (colons stripped, lowercased) because a hand-edited or older
-/// entry need not be in the bare lowercase form the cache itself writes.
+/// The comparison is by digest width: the cache only holds the 64-character
+/// lowercase SHA-256 that [`anchors::fingerprint`] wrote, while most presets
+/// publish only a SHA-1, and a 64-character digest can never equal a
+/// 40-character one. The cached value needs no normalization — [`probe::cached`]
+/// rejects any other spelling — but the published values still do, since the
+/// table spells them uppercase and colon-separated.
 ///
 /// A preset that publishes nothing at the cached width cannot be checked at all,
 /// so the entry is accepted and the week-long [`probe::TTL`] is what bounds an
@@ -696,18 +706,17 @@ fn stty(args: &[&str]) -> Option<String> {
 /// else: a rotation inside the TTL would otherwise show a date for a root the
 /// row no longer claims, and an unpinned row has no `!` to say so.
 fn still_published(preset: &Preset, cached: &probe::Cached) -> bool {
-    let bare = |value: &str| value.replace(':', "").to_ascii_lowercase();
-    let served = bare(&cached.fingerprint);
-    let at_width: Vec<String> = preset
+    let served = cached.fingerprint.as_str();
+    let mut at_width = preset
         .fingerprints
         .iter()
-        .map(|fingerprint| bare(fingerprint))
+        .map(|fingerprint| fingerprint.replace(':', "").to_ascii_lowercase())
         .filter(|fingerprint| fingerprint.len() == served.len())
-        .collect();
-    if at_width.is_empty() {
+        .peekable();
+    if at_width.peek().is_none() {
         return true;
     }
-    at_width.contains(&served)
+    at_width.any(|fingerprint| fingerprint == served)
 }
 
 /// The opening snapshot and the indices a worker still has to fetch.
@@ -782,7 +791,7 @@ fn take(probes: &mut Probes, results: Vec<(usize, probe::Served)>) -> bool {
 /// with its old fetch time, and the TTL ages it out on its own — a refresh run
 /// into a network blip does not cost the dates the next run would show. The cell
 /// still goes [`Cell::Pending`] so the frame shows the work; after a failure it
-/// stays `?` for this run.
+/// stays `?` for this run, and a rotation marker reads from the entry.
 ///
 /// `presets` is the table the prober was started on, so its indices are the
 /// queue's. An idle row publishes nothing, so it is skipped rather than being
@@ -943,19 +952,24 @@ mod tests {
         super::anchors::fingerprint(&BASE64.decode(body).expect("base64"))
     }
 
-    /// Pin the FreeTSA fixture here, probe freetsa with `cell` and return its
-    /// row. The caller holds the `XDG_CONFIG_HOME` lock across the frame.
-    fn pinned_and_probed(cell: Cell) -> String {
+    /// Hold a temp home with the FreeTSA fixture pinned, so `XDG_CONFIG_HOME`
+    /// does not outlive the directory it names. The caller holds the lock
+    /// across the frame and keeps the directory alive.
+    fn pinned_home() -> tempfile::TempDir {
         let xdg = tempfile::TempDir::new().expect("xdg dir");
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let anchors = xdg.path().join("git-time/anchors");
         std::fs::create_dir_all(&anchors).expect("anchors dir");
         std::fs::write(anchors.join("freetsa.pem"), FREETSA_ROOT).expect("pin a root");
-        let index = presets::PRESETS
-            .iter()
-            .position(|preset| preset.name == "freetsa")
-            .expect("the freetsa row");
-        rendered(&probes_with(&[(index, cell)]), index)
+        xdg
+    }
+
+    /// Pin the FreeTSA fixture here, probe freetsa with `cell` and return its
+    /// row with the temp home.
+    fn pinned_and_probed(cell: Cell) -> (String, tempfile::TempDir) {
+        let xdg = pinned_home();
+        let index = index_of("freetsa");
+        (rendered(&probes_with(&[(index, cell)]), index), xdg)
     }
 
     /// An empty `XDG_CONFIG_HOME` held for the test, so a row that has a bundle
@@ -1151,6 +1165,7 @@ mod tests {
 
     #[test]
     fn the_frame_shows_the_trust_tier_and_the_help() {
+        let _home = empty_home();
         let rendered = frame(
             &picked(),
             &presets::PRESETS,
@@ -1302,8 +1317,32 @@ mod tests {
         assert!(!tight.contains("enter save"), "{tight:?}");
     }
 
+    /// Under seven rows the footer wins and the frame may reach past the bottom,
+    /// but the cursor row leads and the prompt and URL stay: the mark cannot
+    /// take the line the user is typing on.
+    #[test]
+    fn under_seven_rows_the_cursor_row_and_the_prompt_survive() {
+        let probes = probes_with(&[(0, Cell::Failed), (6, Cell::Unpublished)]);
+        let mut selection = picked();
+        press(&mut selection, Key::End);
+        press(&mut selection, Key::Typed('9'));
+        press(&mut selection, Key::Typed('9'));
+        let _ = press(&mut selection, Key::Enter);
+        for rows in 1..=6 {
+            let rendered = frame(&selection, &presets::PRESETS, &probes, rows, 80);
+            let first = rendered.split("\r\n").next().expect("a first line");
+            assert!(
+                first.starts_with(" > ["),
+                "the cursor row leads at {rows}: {first:?}"
+            );
+            assert!(rendered.contains("> 99_"), "the prompt survives at {rows}");
+            assert!(rendered.contains("url: "), "the URL survives at {rows}");
+        }
+    }
+
     #[test]
     fn the_cursor_row_and_the_footer_are_always_rendered() {
+        let _home = empty_home();
         // At the top nothing is cut above.
         let rendered = frame(
             &picked(),
@@ -1505,6 +1544,7 @@ mod tests {
 
     #[test]
     fn the_trust_column_says_the_pin_and_its_date() {
+        let _home = empty_home();
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(
             super::trust(
@@ -1529,6 +1569,7 @@ mod tests {
 
     #[test]
     fn an_authority_without_a_live_root_says_expired() {
+        let _home = empty_home();
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(
             super::trust(
@@ -1698,27 +1739,45 @@ mod tests {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
         // FreeTSA's root is pinned (2041-03-07); the probe names a root the
         // bundle does not hold, so the pin is marked.
-        let line = pinned_and_probed(Cell::Known(cached_of("2035-02-09", "cc".repeat(32))));
+        let (line, _home) =
+            pinned_and_probed(Cell::Known(cached_of("2035-02-09", "cc".repeat(32))));
         assert!(line.contains("pin 2041-03-07 !"), "{line:?}");
     }
 
     #[test]
     fn a_served_root_the_bundle_holds_stays_quiet() {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
-        let line = pinned_and_probed(Cell::Known(cached_of("2041-03-07", freetsa_fp())));
+        let (line, _home) = pinned_and_probed(Cell::Known(cached_of("2041-03-07", freetsa_fp())));
         assert!(!line.contains('!'), "{line:?}");
     }
 
     #[test]
     fn a_failed_probe_does_not_mark_a_pin() {
         let _xdg = crate::cmd::probe::tests::xdg_lock();
-        let line = pinned_and_probed(Cell::Failed);
+        let (line, _home) = pinned_and_probed(Cell::Failed);
         assert!(line.contains("pin 2041-03-07"), "{line:?}");
         assert!(!line.contains('!'), "{line:?}");
     }
 
+    /// A failed refresh loses the served root but not the rotation the last
+    /// cached answer recorded: the row would show that marker again next run.
+    #[test]
+    fn a_failed_probe_keeps_a_rotation_already_cached() {
+        let _xdg = crate::cmd::probe::tests::xdg_lock();
+        let _home = pinned_home();
+        let _ = super::probe::store(
+            "freetsa",
+            &cached_of("2035-02-09", "cc".repeat(32)),
+            jiff::Timestamp::now(),
+        );
+        let index = index_of("freetsa");
+        let line = rendered(&probes_with(&[(index, Cell::Failed)]), index);
+        assert!(line.contains("pin 2041-03-07 !"), "{line:?}");
+    }
+
     #[test]
     fn the_footer_counts_failures_and_names_unpublished_rows() {
+        let _home = empty_home();
         let probes = probes_with(&[(3, Cell::Failed), (6, Cell::Unpublished)]);
         let out = frame(&picked(), &presets::PRESETS, &probes, 24, 80);
         assert!(out.contains("probe failed: 1"), "{out}");
@@ -1761,6 +1820,7 @@ mod tests {
     /// included, without a test noticing.
     #[test]
     fn the_help_line_is_not_cut() {
+        let _home = empty_home();
         let rendered = frame(
             &picked(),
             &presets::PRESETS,
@@ -1833,6 +1893,24 @@ mod tests {
         assert!(matches!(probes.cell(freetsa), Cell::Known(_)));
         assert!(!missing.contains(&freetsa));
         assert!(missing.contains(&index_of("aped")));
+    }
+
+    #[test]
+    fn a_malformed_entry_is_a_miss_not_a_date() {
+        let _cache = empty_cache();
+        std::fs::create_dir_all(super::probe::dir()).expect("probe dir");
+        std::fs::write(
+            super::probe::dir().join("certum"),
+            format!(
+                "2041-03-07\t{}\tCC:{}\n",
+                jiff::Timestamp::now().as_second(),
+                "cc".repeat(32)
+            ),
+        )
+        .expect("entry");
+        let (probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
+        assert!(missing.contains(&index_of("certum")));
+        assert!(matches!(probes.cell(index_of("certum")), Cell::Pending));
     }
 
     /// A SHA-1-only preset can never validate the SHA-256 the cache holds, so
@@ -2039,5 +2117,10 @@ mod tests {
         super::refresh(tofu, &mut tofu_probes, &tofu_prober);
         assert!(matches!(tofu_probes.cell(0), Cell::Idle), "tofu stays tofu");
         assert_eq!(tofu_prober.pending(), 0, "nothing was queued");
+
+        // Let the first prober's workers out of the gate; the drop alone would
+        // close the queue but they are parked inside the fetch.
+        *gate.0.lock().expect("gate") = true;
+        gate.1.notify_all();
     }
 }

@@ -81,7 +81,9 @@ answer "which of these is about to expire".
   with its existing 10 s timeout. Detached; the process exit ends them. Results
   go over one `mpsc` channel that the key loop drains between keys.
 - **Rendering.** Pinned rows keep `pin <date>` unchanged, plus `!` when a
-  matching probe names a root the local bundle does not hold. Unpinned rows:
+  matching probe names a root the local bundle does not hold. When the row holds
+  no served root — failed, still waiting, or never asked — `!` is read from the
+  cached answer, so a failed refresh keeps the marker. Unpinned rows:
   `fetch <date>`, `fetch expires <date>` within 90 days, `fetch EXPIRED` past,
   `…` while queued or in flight, `?` when the probe failed. `TRUST_WIDTH` grows
   to 24 to fit `fetch expires <date>`.
@@ -113,7 +115,7 @@ answer "which of these is about to expire".
 | stub serves a foreign root | `?` and `served root not published` |
 | stub fails | `?`, the picker still saves |
 | pinned row, stub serves another published root | `pin <date> !` |
-| pinned row, one probe fails | `pin <date>`, no `!` |
+| pinned row, one probe fails | `pin <date> !` when the last answer rotated, else `pin <date>` |
 | no raw terminal | no fetch at all, `pin -` as today |
 | `GIT_TIME_ANCHOR_FETCH_CMD` set | no socket, the stub answers |
 | after a probe | the cache holds a date and a timestamp, no certificate |
