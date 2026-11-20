@@ -1832,6 +1832,44 @@ fn preset_list_reads_the_date_from_a_pinned_bundle() {
     assert!(sectigo.contains("(anchored)"), "{listing}");
 }
 
+/// The rotation `!` reaches the printed line: the pinned bundle holds a root
+/// nothing publishes, the probe answers the published one. The flag is the join
+/// between `anchors::roots`, the cell and `pin_state`, so this is the wiring the
+/// unit test cannot see. A control run without the bundle has nothing to compare
+/// and no `!`.
+#[test]
+fn preset_list_marks_a_pinned_row_whose_served_root_the_bundle_lacks() {
+    let repo = Repo::new();
+    repo.init();
+    let env = vec![(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat '{}'", pstr(&freetsa_root())),
+    )];
+    let freetsa = |listing: &str| -> String {
+        listing
+            .lines()
+            .find(|line| line.starts_with("freetsa "))
+            .unwrap_or_else(|| panic!("the freetsa line: {listing}"))
+            .to_owned()
+    };
+
+    // Control: no bundle, so the served date stands in and nothing is compared.
+    let control = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    let line = freetsa(&control);
+    assert!(line.contains("fetch 2041-03-07"), "{line}");
+    assert!(!line.contains('!'), "{line}");
+
+    // The bundle is the one throwaway root, which the stub never answers: the
+    // date stays the pin's, and the foreign answer is marked.
+    let stale = stale_ca(repo.path());
+    std::fs::create_dir_all(repo.anchors()).expect("anchors dir");
+    std::fs::copy(&stale, repo.anchors().join("freetsa.pem")).expect("pin the stale CA");
+    let listing = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    let line = freetsa(&listing);
+    assert!(line.contains("2020-02-01 expired !"), "{line}");
+    assert!(line.contains("(anchored)"), "{line}");
+}
+
 /// A bundle is append-ordered, not date-ordered: a retired root left in front
 /// must not hide the live one's later date behind it.
 #[test]
@@ -1851,6 +1889,104 @@ fn preset_list_shows_the_newest_live_root_of_a_mixed_bundle() {
         .unwrap_or_else(|| panic!("the preset line: {listing}"));
     assert!(sectigo.contains("2041-03-07"), "{listing}");
     assert!(!sectigo.contains("2020-02-01"), "{listing}");
+}
+
+/// The table stays offline: a plain run only reads the cache, and a row the
+/// cache cannot answer keeps today's `-`. `--refresh` asks the stub and rewrites
+/// the cache, so the plain run after it shows the date it found — and a further
+/// `--refresh` asks again rather than trusting the entry it just wrote.
+#[test]
+fn preset_list_reads_the_probe_cache_and_only_refreshes_on_demand() {
+    let repo = Repo::new();
+    repo.init();
+    // Every fetch is counted, so a run that opens one is visible.
+    let calls_file = repo.path().join("probe-calls");
+    let env = vec![(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!(
+            "echo x >> '{}'; cat '{}'",
+            pstr(&calls_file),
+            pstr(&freetsa_root())
+        ),
+    )];
+    let entry = repo.xdg.path().join("git-time/probe/freetsa");
+    let calls = || {
+        std::fs::read_to_string(&calls_file)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    let freetsa = |listing: &str| -> Vec<String> {
+        listing
+            .lines()
+            .find(|line| line.starts_with("freetsa "))
+            .unwrap_or_else(|| panic!("the freetsa line: {listing}"))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    };
+
+    // (a) No socket, no entry, and the `-` a published root without a local
+    // certificate already says.
+    let plain = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
+    assert_eq!(freetsa(&plain)[5], "-", "nothing was asked: {plain}");
+    assert_eq!(calls(), 0, "a plain run fetches nothing: {plain}");
+    assert!(!entry.exists(), "a plain run writes no cache entry");
+
+    // (b) A refresh asks, caches what it found, and prints it.
+    let refreshed = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    assert!(
+        freetsa(&refreshed)
+            .iter()
+            .any(|field| field == "2041-03-07"),
+        "{refreshed}"
+    );
+    assert!(entry.exists(), "the served date is cached");
+    let asked = calls();
+    assert!(asked > 0, "the stub was asked: {refreshed}");
+
+    // The next plain run serves the entry and opens nothing.
+    let cached = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
+    assert!(
+        freetsa(&cached).iter().any(|field| field == "2041-03-07"),
+        "{cached}"
+    );
+    assert_eq!(calls(), asked, "a plain run reuses the cache: {cached}");
+
+    // A second refresh drops the entry instead of trusting it for a week.
+    let again = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    assert!(calls() > asked, "a second refresh asks again: {again}");
+    assert!(
+        freetsa(&again).iter().any(|field| field == "2041-03-07"),
+        "{again}"
+    );
+
+    // (c) A refresh whose fetch fails keeps the date the last successful one
+    // cached: nothing is dropped up front, so a transient blip does not cost a
+    // later run the answer. The row itself is `?` for this run — the refresh did
+    // fail — but the entry is still there.
+    let failing = vec![(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        "echo x >> '${calls_file}'; exit 1".replace("${calls_file}", &pstr(&calls_file)),
+    )];
+    let broken = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &failing));
+    assert!(
+        entry.exists(),
+        "the failed refresh left the entry: {broken}"
+    );
+    assert!(
+        freetsa(&broken).iter().any(|field| field == "?"),
+        "the failed refresh says so: {broken}"
+    );
+    // The next plain run reads the surviving entry, not `-`.
+    let survivor = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
+    assert!(
+        freetsa(&survivor).iter().any(|field| field == "2041-03-07"),
+        "the cached date survives: {survivor}"
+    );
+    assert!(
+        !freetsa(&survivor).iter().any(|field| field == "-"),
+        "{survivor}"
+    );
 }
 
 #[test]
@@ -2408,6 +2544,82 @@ fn select_checks_the_terminal_before_it_reads_the_config() {
 
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o644))
         .expect("restore the config");
+}
+
+/// The picker on the terminal a user actually has: the served date reaches the
+/// frame while the probe is still in flight, and quitting with it in flight
+/// still keeps the answer on the screen and in the cache. A second run whose
+/// stub fails shows the cached date, so the cache is what an offline run reads.
+#[test]
+fn select_probes_the_open_rows_and_answers_from_the_cache_offline() {
+    let repo = Repo::new();
+    repo.init();
+    // The log names what was asked, so a socket cannot pass for the stub.
+    let log = repo.path().join("probe-urls");
+    let served = format!(
+        "printf '%s\\n' \"$GIT_TIME_ANCHOR_URL\" >> '{}'; cat '{}'",
+        pstr(&log),
+        pstr(&freetsa_root())
+    );
+    // Two spaces toggle and repaint before the quit, which gives a worker the
+    // time to pick the row up: a row `settle` refunds from the queue never
+    // answers, so without them the window would be one key read wide.
+    let Some(first) = repo.run_time_pty(
+        &["tsa", "select"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", served)],
+        "  q\n",
+    ) else {
+        eprintln!("no script(1) here: the probing picker was not exercised");
+        return;
+    };
+    let stdout = text(&first.stdout);
+    assert!(first.status.success(), "{stdout}{}", text(&first.stderr));
+    assert!(
+        stdout.contains("fetch 2041-03-07"),
+        "the served date is on the frame: {stdout}"
+    );
+    // Other rows were in flight as well, so the log holds more than this URL;
+    // FreeTSA is the one the run must have asked.
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        asked.lines().any(|url| url == "https://freetsa.org/tsr"),
+        "the freetsa URL was fetched: {asked}{stdout}"
+    );
+    let entry = repo.xdg.path().join("git-time/probe/freetsa");
+    let cache = std::fs::read_to_string(&entry).expect("the cached date");
+    assert!(!cache.contains("BEGIN CERTIFICATE"), "{cache}");
+    assert_eq!(cache.lines().count(), 1, "one line: {cache}");
+
+    // The stub now fails. Pressing `r` requeues every row while nothing can
+    // answer: the rows go `?` for that run, but no entry is dropped first, so the
+    // date already cached survives and the next open shows it instead of `-`.
+    let Some(broken) = repo.run_time_pty(
+        &["tsa", "select"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", "exit 1".to_owned())],
+        "r q\n",
+    ) else {
+        eprintln!("no script(1) here: the offline refresh was not exercised");
+        return;
+    };
+    assert!(broken.status.success(), "{}", text(&broken.stderr));
+    let survived = std::fs::read_to_string(&entry).expect("the cache survived the refresh");
+    assert!(survived.contains("2041-03-07"), "{survived}");
+    // A further open, still offline, seeds the row from that entry.
+    let Some(reopened) = repo.run_time_pty(
+        &["tsa", "select"],
+        &[("GIT_TIME_ANCHOR_FETCH_CMD", "exit 1".to_owned())],
+        "q\n",
+    ) else {
+        eprintln!("no script(1) here: the offline reopen was not exercised");
+        return;
+    };
+    let stdout = text(&reopened.stdout);
+    assert!(
+        reopened.status.success(),
+        "{stdout}{}",
+        text(&reopened.stderr)
+    );
+    assert!(stdout.contains("fetch 2041-03-07"), "{stdout}");
 }
 
 #[test]

@@ -511,7 +511,7 @@ section. The anchor file is not removed.
 .PP
 Exits 0, 1 for an unknown id, and 2 for a bad id or configuration error.
 .SS "tsa preset"
-.B git time tsa preset list
+.B git time tsa preset list [ \-\-refresh ]
 .PP
 Print the built\-in presets with their endpoint, algorithm, scope
 .B ( default
@@ -530,12 +530,50 @@ The date carries
 in its last 90 days and
 .B expired
 past it; a published root that is not pinned here has no certificate to read
-and reads
-.BR \- .
+and shows a cached probe answer instead, in the words
+.B tsa select
+uses and judged when it is printed, or
+.B \-
+for a row the cache cannot answer.
+A pinned row whose authority serves a root the local bundle does not hold
+appends
+.BR ! :
+that authority has rotated, and the answer is a review.
+A plain run only ever reads, so it never prints
+.BR ? ;
+\fB?\fR and
+.B …
+come from
+.BR \-\-refresh ,
+the latter only when an answer arrives too late to be read, and both only
+among the rows with no local pin.
+A pinned row keeps its pin date throughout and never trades it for the served
+one; an answer naming a foreign root marks it as above.
 No current row is in the
 .B tofu
 position.
+.PP
+A plain run opens no socket at all: it paints the rows that answered from the
+cache and nothing is queued.
+A row that failed or served no published root and has no entry keeps
+.B \-
+here; the next
+.B \-\-refresh
+asks it again.
+The cache is shared with
+.BR "tsa select" .
+Either way the cache is the only write: a probe pins nothing and writes no
+anchor.
 Exits 0.
+.TP
+.B \-\-refresh
+Ask every authority that publishes a root and wait for the queue to drain
+before printing.
+Nothing is dropped first, so a refresh that fails leaves the previous date in
+place until it ages out.
+A row with no local pin that cannot answer prints
+.BR ? ;
+a pinned row keeps its pin date.
 .PP
 .B git time tsa preset add \fIname\fR [ \-\-accept \fIid\fR=\fIFINGERPRINT\fR ]
 .PP
@@ -579,6 +617,8 @@ take or clear all,
 and
 .B k
 or the arrow keys move,
+.B r
+refreshes,
 .B enter
 saves,
 .B q
@@ -600,6 +640,53 @@ and a published root not pinned on this machine reads
 .BR "pin \-" ;
 .B enter
 pins it. A root that disagrees with the table is a mismatch and a refusal.
+A live terminal replaces that wording with
+.B …
+and then the served date, so
+.B pin \-
+is what the line prompt keeps.
+.PP
+Every authority that publishes a root is also probed in the background, four at
+a time, and the column fills itself in; a row that publishes nothing is never
+probed, because no reply could match it, and keeps
+.BR tofu .
+Where nothing is pinned here the answer stands in for a pin: the newest root
+the authority served, being
+.BR "fetch \fIdate\fR" ,
+.BR "fetch expires \fIdate\fR"
+inside its last 90 days, or
+.BR "fetch EXPIRED"
+past it.
+.B fetch
+is a word of its own, so a served date is never read as a pin; a probe pins
+nothing and writes no anchor, and its cache entry is all it leaves behind.
+A queued or in\-flight row reads
+.BR … ;
+\fB?\fR marks a probe that failed or a reply holding no root the preset publishes,
+and the footer counts the first kind
+.BR "probe failed: \fIn\fR"
+and names the rows behind the second as
+.BR "served root not published: \fIids\fR" .
+A pin always keeps the date, and a served root the local bundle does not hold
+appends
+.BR ! :
+that authority has rotated, and the answer is a review, not a replacement.
+.PP
+An answer is kept for seven days at
+.B $XDG_CONFIG_HOME/git\-time/probe/<id>
+(or
+.BR ~/.config/git\-time/probe/<id> ),
+so a second run paints the rows that answered from the cache and opens no
+socket for them; a row that failed or served no published root and has no entry
+is asked again.
+A date can be up to a week old.
+.B r
+asks again without dropping anything first, so a failed refresh keeps the
+previous answer until it ages out.
+.B tsa preset list
+reads the same cache and
+.B \-\-refresh
+is its one fetching path.
 .PP
 Without a terminal the command refuses rather than hanging.
 .TP
@@ -889,6 +976,17 @@ Self\-signed certificates are the anchors.
 An older reader takes the first certificate as the only anchor; the block's
 .B X\-RFC3161\-Anchor
 line narrows which root is used.
+.TP
+.I probe\-dir
+The probe cache, by default
+.B $XDG_CONFIG_HOME/git\-time/probe
+or
+.BR ~/.config/git\-time/probe ,
+one
+.I id
+file per authority.
+A line of day, fetch second and fingerprint, dropped after seven days; not a
+trust store, and deleting it only means asking again.
 .TP
 .B time.anchors\-lock
 In the repository root, written by

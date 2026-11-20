@@ -119,6 +119,7 @@ operator section.
 | `doctor` names `no root valid now` and a HEAD-named root that is not pinned | `doctor` | shipped |
 | `verify --openssl` embeds the roots the block names plus all pinned intermediates, judged with `-attime` | `verify --openssl` | shipped |
 | the expiry column marks past and near dates and reads them from the local bundle | `tsa list`, `tsa select`, `tsa preset list` | shipped |
+| a served date is probed, cached for a week, and shown apart from a pin | probe, tsa select, tsa preset list | shipped |
 | a preset keeps a list of published roots, so an accepted rotation is recorded at release time | `presets` | shipped |
 | the refusal vocabulary and the anchor line are specified | `docs/format.md` | shipped |
 
