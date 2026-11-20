@@ -2333,7 +2333,7 @@ fn select_none_removes_every_configured_row() {
 /// the chosen set is still disabled and pinned, and the global section stays
 /// where a `--local` write cannot reach it. `--dry-run` promises the same.
 #[test]
-fn select_untickes_a_global_only_row_without_aborting() {
+fn select_unticked_global_only_row_does_not_abort() {
     let repo = Repo::new();
     repo.init();
     let pinned = repo.run_time_with_stdin(

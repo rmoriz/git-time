@@ -1338,8 +1338,7 @@ async fn apply(
                     }
                     continue;
                 }
-                let anchor = anchors::target(repo, preset.name)
-                    .unwrap_or_else(|_| anchors::dir().join(format!("{}.pem", preset.name)));
+                let anchor = anchors::bundle_path(preset);
                 // The root the pin just wrote, with its own date: the newly
                 // pinned root leads the bundle, so it is the first root — and a
                 // leaf never stands in for it. The digest keeps the spelling the
