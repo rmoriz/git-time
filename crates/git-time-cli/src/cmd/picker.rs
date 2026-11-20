@@ -1310,6 +1310,29 @@ mod tests {
         assert!(!tight.contains("enter save"), "{tight:?}");
     }
 
+    /// Under seven rows the footer wins and the frame may reach past the bottom,
+    /// but the cursor row leads and the prompt and URL stay: the mark cannot
+    /// take the line the user is typing on.
+    #[test]
+    fn under_seven_rows_the_cursor_row_and_the_prompt_survive() {
+        let probes = probes_with(&[(0, Cell::Failed), (6, Cell::Unpublished)]);
+        let mut selection = picked();
+        press(&mut selection, Key::End);
+        press(&mut selection, Key::Typed('9'));
+        press(&mut selection, Key::Typed('9'));
+        let _ = press(&mut selection, Key::Enter);
+        for rows in 1..=6 {
+            let rendered = frame(&selection, &presets::PRESETS, &probes, rows, 80);
+            let first = rendered.split("\r\n").next().expect("a first line");
+            assert!(
+                first.starts_with(" > ["),
+                "the cursor row leads at {rows}: {first:?}"
+            );
+            assert!(rendered.contains("> 99_"), "the prompt survives at {rows}");
+            assert!(rendered.contains("url: "), "the URL survives at {rows}");
+        }
+    }
+
     #[test]
     fn the_cursor_row_and_the_footer_are_always_rendered() {
         // At the top nothing is cut above.
