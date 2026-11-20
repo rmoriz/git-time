@@ -733,7 +733,7 @@ pub fn seed(presets: &[Preset], now: jiff::Timestamp) -> (Probes, Vec<usize>) {
 ///
 /// [`seed`] names what to fetch, while [`probe::Prober::start`] takes what to
 /// leave alone — the two are easy to hand over the wrong way round.
-fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
+pub(crate) fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
     (0..count)
         .filter(|index| !missing.contains(index))
         .collect()
@@ -742,8 +742,9 @@ fn skip_of(missing: &[usize], count: usize) -> Vec<usize> {
 /// Take every finished answer into `probes`, answering whether one arrived.
 ///
 /// A refresh can make a row answer twice, so the index is the key and the last
-/// answer is the one left in the table.
-fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
+/// answer is the one left in the table. Both surfaces that drain a prober go
+/// through here, so the cell vocabulary cannot drift between them.
+pub(crate) fn absorb(prober: &probe::Prober, probes: &mut Probes) -> bool {
     let results = prober.drain();
     if results.is_empty() {
         return false;

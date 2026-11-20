@@ -2,8 +2,8 @@
 //!
 //! An authority is a `time.tsa.<id>` section of the **local** repository
 //! config; `add` writes it, `list` reads it, `remove` deletes it whole. Nothing
-//! here talks to the network — `preset add` is the one exception and goes
-//! through the same fetch path `install` uses.
+//! here talks to the network unless it is asked to — `preset add` and
+//! `preset list --refresh` go through the same fetch path `install` uses.
 //!
 //! A value is validated before the first key is written, so a refused `add`
 //! leaves no half section behind. The policy OID is checked by
@@ -34,7 +34,7 @@ use git_time_core::trust::AnchorStore;
 use git_time_core::tsa::StampRequest;
 use serde_json::{Value, json};
 
-use crate::cmd::{Exit, anchors, git_stdout, install, open, picker};
+use crate::cmd::{Exit, anchors, git_stdout, install, open, picker, probe};
 
 /// The subcommands of `git time tsa`.
 #[derive(Debug, Subcommand)]
@@ -104,7 +104,11 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum PresetCommand {
     /// Print the built-in presets.
-    List,
+    List {
+        /// Ask every authority again and rewrite the cache before printing.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Configure one built-in preset, anchor included.
     Add {
         /// The preset name.
@@ -175,7 +179,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
         Command::List { json } => list(&repo, json),
         Command::Remove { id } => remove(&repo, &id),
         Command::Preset { command } => match command {
-            PresetCommand::List => preset_list(&repo),
+            PresetCommand::List { refresh } => preset_list(&repo, refresh).await,
             PresetCommand::Add { name, accept } => preset_add(&repo, &name, &accept).await,
         },
         Command::Select {
@@ -453,44 +457,114 @@ fn remove(repo: &Repo, id: &str) -> Exit {
     Exit::ok()
 }
 
-/// What the listing says about a preset whose date is `expiry`.
+/// What the listing says about a preset whose date is `expiry`, with `cell` the
+/// probe's answer for it.
 ///
-/// A published root with no local certificate says `-`; `not pinned` is the
-/// message for a preset that publishes no root either, so the missing date reads
-/// as the preset's shape and not as a broken pin. No built-in row is in that
-/// position any more, and a hand-added one is not in this table, so the branch
-/// keeps a unit test instead of a row.
-fn pin_state(preset: &presets::Preset, expiry: Option<String>) -> String {
-    expiry.unwrap_or_else(|| {
-        if preset.fingerprints.is_empty() {
-            "not pinned".to_owned()
-        } else {
-            "-".to_owned()
+/// A local certificate is the date a seal is checked against, so it comes first
+/// and is printed as it is. Without one the cell speaks in the picker's words:
+/// a served root reads `fetch <date>` (or the near-expiry and expired forms), a
+/// pending row `…`, and a failed or unpublished reply `?`. Nothing was asked
+/// (`Cell::Idle`) falls back to today's `-`; `not pinned` is the message for a
+/// preset that publishes no root either, so the missing date reads as the
+/// preset's shape and not as a broken pin. No built-in row is in that position
+/// any more, and a hand-added one is not in this table, so the branch keeps a
+/// unit test instead of a row.
+///
+/// A served date carries no certificate of its own, so its verdict is judged
+/// against the clock here rather than against a caller's instant.
+fn pin_state(preset: &presets::Preset, cell: picker::Cell, expiry: Option<String>) -> String {
+    if let Some(expiry) = expiry {
+        return expiry;
+    }
+    match cell {
+        picker::Cell::Known(cached) => served(&cached, jiff::Timestamp::now()),
+        picker::Cell::Pending => "…".to_owned(),
+        picker::Cell::Unpublished | picker::Cell::Failed => "?".to_owned(),
+        picker::Cell::Idle => {
+            if preset.fingerprints.is_empty() {
+                "not pinned".to_owned()
+            } else {
+                "-".to_owned()
+            }
         }
-    })
+    }
+}
+
+/// A served date, in the picker's verdict-leads-the-day shape.
+///
+/// The same wording [`picker`] shows: `fetch <date>`, `fetch expires <date>`
+/// within the warning window, `fetch EXPIRED` once the day is past.
+fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
+    if anchors::expired(&cached.not_after, now) {
+        return "fetch EXPIRED".to_owned();
+    }
+    match anchors::expiry_label(&cached.not_after, now) {
+        "(expires soon)" => format!("fetch expires {}", cached.not_after),
+        _ => format!("fetch {date}", date = cached.not_after),
+    }
 }
 
 /// Print the built-in presets and whether their anchor is pinned here.
 ///
 /// The date comes from the local bundle where there is one, newest live root
 /// first: for a preset that publishes no fingerprint that bundle is the only
-/// place the date exists at all. A published root that is not pinned here has no
-/// certificate to read and says `-`; `not pinned` is for a preset with neither.
-fn preset_list(_repo: &Repo) -> Exit {
-    // One instant for the whole listing: every date is judged as of one moment.
+/// place the date exists at all. Otherwise the probe cache is read — it is what
+/// a plain run shows, and nothing is fetched for it, so the table stays offline.
+/// `--refresh` is the one path that opens sockets: it drops every entry, asks
+/// each authority through the picker's worker and waits for the queue to drain
+/// before printing, because this is the surface a timer or a CI job reads. The
+/// cache is the only write either way; a probe pins nothing.
+async fn preset_list(_repo: &Repo, refresh: bool) -> Exit {
+    // One instant for the local dates, so every pinned one is judged as of one
+    // moment (a served date is judged when it is printed).
     let now = jiff::Timestamp::now();
-    for preset in &presets::PRESETS {
+    let (mut probes, missing) = picker::seed(&presets::PRESETS, now);
+    // A plain run asks nothing, so its queue is empty and the loop below exits
+    // at once; a row the cache cannot answer keeps today's `-` rather than a `…`
+    // that would never clear.
+    let queue: Vec<usize> = if refresh {
+        let published: Vec<usize> = presets::PRESETS
+            .iter()
+            .enumerate()
+            .filter(|(_, preset)| !preset.fingerprints.is_empty())
+            .map(|(index, _)| index)
+            .collect();
+        for index in &published {
+            let _ = probe::forget(presets::PRESETS[*index].name);
+            probes.set(*index, picker::Cell::Pending);
+        }
+        published
+    } else {
+        for index in &missing {
+            probes.set(*index, picker::Cell::Idle);
+        }
+        Vec::new()
+    };
+    let skip = picker::skip_of(&queue, presets::PRESETS.len());
+    let prober = probe::Prober::start(&presets::PRESETS, probe::network_fetch(), &skip);
+    // Blocks until the whole queue drains: this is the headless surface, so a
+    // caller wants the finished answer and the fetch timeout bounds a dead
+    // authority on its own. Drain before the check, so the last replies are
+    // already in the table when `pending` reaches zero.
+    loop {
+        let _ = picker::absorb(&prober, &mut probes);
+        if prober.pending() == 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    for (index, preset) in presets::PRESETS.iter().enumerate() {
         let anchor = anchors::dir().join(format!("{}.pem", preset.name));
-        // Only a local certificate can say when it expires, so nothing is
-        // fetched here. Bundle order is not date order after an append, so the
-        // newest root that is still valid is the one shown.
+        // Only a local certificate can say when it expires. Bundle order is not
+        // date order after an append, so the newest root that is still valid is
+        // the one shown.
         let expiry = match anchors::roots(&anchor) {
             Some(roots) => {
                 looming(&roots, now).map(|root| anchors::expiry_text(&root.not_after, now))
             }
             None => None,
         };
-        let state = pin_state(preset, expiry);
+        let state = pin_state(preset, probes.cell(index), expiry);
         println!(
             "{} {} {} {} {} {} ({})",
             preset.name,
@@ -1373,6 +1447,8 @@ mod tests {
     /// first position any more, which is why this is constructed.
     #[test]
     fn the_listing_says_why_a_date_is_missing() {
+        use crate::cmd::picker::Cell;
+
         let mut preset = presets::Preset {
             name: "unpublished",
             url: "http://tsa.example/tsr",
@@ -1384,13 +1460,28 @@ mod tests {
             insecure_http: true,
             curated: false,
         };
-        assert_eq!(pin_state(&preset, None), "not pinned");
+        // Nothing was asked, which is the only no-date wording a plain run has.
+        assert_eq!(pin_state(&preset, Cell::Idle, None), "not pinned");
 
         preset.fingerprints = &["AA:BB"];
-        assert_eq!(pin_state(&preset, None), "-");
+        assert_eq!(pin_state(&preset, Cell::Idle, None), "-");
 
-        // The shape `expiry_text` returns at the caller, short form included.
+        // The shape `expiry_text` returns at the caller, short form included,
+        // and the local bundle wins over any probe.
         let expiry = Some("2026-12-02 (expires soon)".to_owned());
-        assert_eq!(pin_state(&preset, expiry), "2026-12-02 (expires soon)");
+        assert_eq!(
+            pin_state(&preset, Cell::Failed, expiry),
+            "2026-12-02 (expires soon)"
+        );
+
+        // Without a pin the cell speaks in the picker's words.
+        let served = Cell::Known(crate::cmd::probe::Cached {
+            not_after: "2041-03-07".to_owned(),
+            fingerprint: "aa".repeat(32),
+        });
+        assert_eq!(pin_state(&preset, served, None), "fetch 2041-03-07");
+        assert_eq!(pin_state(&preset, Cell::Pending, None), "…");
+        assert_eq!(pin_state(&preset, Cell::Failed, None), "?");
+        assert_eq!(pin_state(&preset, Cell::Unpublished, None), "?");
     }
 }

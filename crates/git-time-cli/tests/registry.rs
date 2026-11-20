@@ -1853,6 +1853,76 @@ fn preset_list_shows_the_newest_live_root_of_a_mixed_bundle() {
     assert!(!sectigo.contains("2020-02-01"), "{listing}");
 }
 
+/// The table stays offline: a plain run only reads the cache, and a row the
+/// cache cannot answer keeps today's `-`. `--refresh` asks the stub and rewrites
+/// the cache, so the plain run after it shows the date it found — and a further
+/// `--refresh` asks again rather than trusting the entry it just wrote.
+#[test]
+fn preset_list_reads_the_probe_cache_and_only_refreshes_on_demand() {
+    let repo = Repo::new();
+    repo.init();
+    // Every fetch is counted, so a run that opens one is visible.
+    let calls_file = repo.path().join("probe-calls");
+    let env = vec![(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!(
+            "echo x >> '{}'; cat '{}'",
+            pstr(&calls_file),
+            pstr(&freetsa_root())
+        ),
+    )];
+    let entry = repo.xdg.path().join("git-time/probe/freetsa");
+    let calls = || {
+        std::fs::read_to_string(&calls_file)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    let freetsa = |listing: &str| -> Vec<String> {
+        listing
+            .lines()
+            .find(|line| line.starts_with("freetsa "))
+            .unwrap_or_else(|| panic!("the freetsa line: {listing}"))
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect()
+    };
+
+    // (a) No socket, no entry, and the `-` a published root without a local
+    // certificate already says.
+    let plain = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
+    assert_eq!(freetsa(&plain)[5], "-", "nothing was asked: {plain}");
+    assert_eq!(calls(), 0, "a plain run fetches nothing: {plain}");
+    assert!(!entry.exists(), "a plain run writes no cache entry");
+
+    // (b) A refresh asks, caches what it found, and prints it.
+    let refreshed = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    assert!(
+        freetsa(&refreshed)
+            .iter()
+            .any(|field| field == "2041-03-07"),
+        "{refreshed}"
+    );
+    assert!(entry.exists(), "the served date is cached");
+    let asked = calls();
+    assert!(asked > 0, "the stub was asked: {refreshed}");
+
+    // The next plain run serves the entry and opens nothing.
+    let cached = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
+    assert!(
+        freetsa(&cached).iter().any(|field| field == "2041-03-07"),
+        "{cached}"
+    );
+    assert_eq!(calls(), asked, "a plain run reuses the cache: {cached}");
+
+    // A second refresh drops the entry instead of trusting it for a week.
+    let again = ok(&repo.run_time_env(&["tsa", "preset", "list", "--refresh"], &env));
+    assert!(calls() > asked, "a second refresh asks again: {again}");
+    assert!(
+        freetsa(&again).iter().any(|field| field == "2041-03-07"),
+        "{again}"
+    );
+}
+
 #[test]
 fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
     let repo = Repo::new();
