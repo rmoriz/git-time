@@ -50,13 +50,6 @@ fn marker(repo: &Repo, id: &str) -> Result<bool, Exit> {
     crate::cmd::tsa::marked(repo, id)
 }
 
-/// The command that pins `fingerprint` for `id`, runnable as printed.
-///
-/// `restore` can only fetch a preset (the evidence does not carry a URL) and its
-/// positional is a commit, so the accept is the only argument it takes. Any
-/// other configured id is fetched by its own URL — the same one a fetch reads,
-/// which the tests can stub — with `--insecure-http` when it is plain HTTP, and
-/// an id the config has lost is configured first.
 /// The command that re-fetches `id` from its configured URL, runnable as
 /// printed, or `None` when the config carries no URL.
 fn fetch_cmd(repo: &Repo, id: &str) -> Option<String> {
@@ -74,6 +67,13 @@ fn fetch_cmd(repo: &Repo, id: &str) -> Option<String> {
     ))
 }
 
+/// The command that pins `fingerprint` for `id`, runnable as printed.
+///
+/// `restore` can only fetch a preset (the evidence does not carry a URL) and its
+/// positional is a commit, so the accept is the only argument it takes. Any
+/// other configured id is fetched by its own URL — the same one a fetch reads,
+/// which the tests can stub — with `--insecure-http` when it is plain HTTP, and
+/// an id the config has lost is configured first.
 fn remedy(repo: &Repo, id: &str, fingerprint: &str) -> String {
     let url = repo
         .config_non_empty(&format!("time.tsa.{id}.url"))

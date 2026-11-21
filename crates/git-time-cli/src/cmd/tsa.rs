@@ -348,10 +348,14 @@ fn list(repo: &Repo, json: bool) -> Exit {
             Ok(alg) => alg.unwrap_or_else(|| "sha256".to_owned()),
             Err(exit) => return exit,
         };
-        let insecure_http = match local_get(repo, &format!("time.tsa.{id}.insecure-http")) {
-            Ok(Some(value)) => reads_true(&value),
+        let insecure_key = format!("time.tsa.{id}.insecure-http");
+        let insecure_http = match repo.config_non_empty(&insecure_key) {
+            Ok(Some(value)) => match git_time_core::policy::parse_bool(&value, &insecure_key) {
+                Ok(value) => value,
+                Err(error) => return Exit::config(error.to_string()),
+            },
             Ok(None) => false,
-            Err(exit) => return exit,
+            Err(error) => return Exit::config(error.to_string()),
         };
         // The configured key wins, as it does in `Policy::load`; the default is
         // only what `add` would have written.
@@ -521,9 +525,10 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 ///
 /// Nothing was asked (`Cell::Idle`) has no probe date: a row no table knows is
 /// hand-added and reads `tofu`, the picker's word, because it publishes nothing
-/// to pin; an undated built-in reads `listed <date>` from the table, and
-/// `not pinned` is the message for one that publishes no root at all (none does
-/// today, so a unit test keeps that branch alive rather than a row).
+/// to pin; a built-in with a table date reads `listed <date>`, one without a
+/// date reads `-`, and `not pinned` is the message for one that publishes no
+/// root at all (none does today, so a unit test keeps that branch alive rather
+/// than a row).
 ///
 /// A served date carries no certificate of its own, so `now` judges it against
 /// the caller's instant rather than a second clock read.
@@ -1668,15 +1673,6 @@ fn validate_policy(alg: Alg, policy: &str) -> Result<(), Exit> {
         .and_then(|request| request.with_policy(Some(policy.to_owned())))
         .map_err(|error| Exit::usage(format!("git time tsa: {error}")))?;
     Ok(())
-}
-
-/// Whether a config value is one of the git spellings of true.
-///
-/// The parser is the policy's own, so a spelling that loads can never read as
-/// `false` here. An invalid value is `false`, which is all a bare `bool` can
-/// say; the section itself is still refused at seal time.
-fn reads_true(value: &str) -> bool {
-    git_time_core::policy::parse_bool(value, "").unwrap_or(false)
 }
 
 /// One local config value, `None` when the key is unset.

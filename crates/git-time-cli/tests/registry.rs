@@ -2551,6 +2551,25 @@ fn an_added_fingerprint_makes_the_fetch_a_check() {
     assert_eq!(repo.config("time.tsa.acme.tofu"), None);
 }
 
+/// `tsa list` reads `insecure-http` the way the seal does: a junk value is a
+/// configuration error that names the key, not a silent `false`.
+#[test]
+fn tsa_list_refuses_an_unparseable_insecure_http_value() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    git(
+        repo.path(),
+        &["config", "--local", "time.tsa.acme.insecure-http", "maybe"],
+    );
+
+    let listing = repo.run_time(&["tsa", "list"]);
+    assert_eq!(listing.status.code(), Some(2), "{}", text(&listing.stderr));
+    let stderr = text(&listing.stderr);
+    assert!(stderr.contains("time.tsa.acme.insecure-http"), "{stderr}");
+}
+
 /// A cached probe answer is a stronger fact than the table, so a plain `tsa
 /// list` shows the served date over the measured one, and says where it came
 /// from in the JSON. Nothing is asked: the cache is read.
