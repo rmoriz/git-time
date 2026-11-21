@@ -425,6 +425,16 @@ an anchor pinned without a comparison, a gate mismatch, an unknown gate value,
 a shim or preserved hook without its execute bit, and a dangling symlink all
 exit 1.
 A foreign or absent hook alone does not.
+An anchor pinned without a comparison is reported with the command that records
+the comparison; where its bundle is gone, the command names the fetch that pins
+it again first.
+A
+.B tofu
+value outside
+.B true
+or
+.B false
+is a configuration error.
 .TP
 .B \-\-json
 Print the report as one JSON object. Its

@@ -180,8 +180,9 @@ it twice succeeds. Exits `0` or `2`.
 Report what is wired and pinned: the binary, the hooks directory, one state per hook (`ours`,
 `chained`, `foreign`, `absent`, `not-executable`, `dangling`), whether the gate agrees with the
 `pre-*` hooks, how many authorities are configured, each anchor's path and fingerprint, and
-whether sealing is enabled. Each problem is repeated as a `problem:` line. Exits `0` healthy, `1`
-on any problem, `2` on usage or config.
+whether sealing is enabled. Each problem is repeated as a `problem:` line. A `tofu` pin is
+reported with the command that compares it, and a `tofu` value outside `true`/`false` is a
+configuration error. Exits `0` healthy, `1` on any problem, `2` on usage or config.
 
 ### `git time tsa add <url> [--id ID] [--anchor PATH] [--alg sha256|sha512] [--policy OID] [--fingerprint FP] [--timeout DURATION] [--insecure-http]`
 
@@ -565,10 +566,12 @@ Read the fields top to bottom. `binary: missing` means the shims cannot seal —
 `PATH`. `hook <name>: not-executable` names the file to `chmod +x`. `hook <name>: dangling` is a
 symlink to a gone target. `hook <name>: foreign` means a shim is not ours. `gate: … (mismatch)`
 means `time.gate` disagrees with the installed `pre-*` hooks; rerun `git time install`. `tsa: 0
-configured` means no authority. `anchor <id>: … missing` or `unparseable` is the bundle to restore.
-`enabled: false` explains a silent hook, and `problems: N` is the count that decides the exit code.
+configured` means no authority. `anchor <id>: … missing` or `unparseable` is the bundle to restore;
+with the pin marked, that problem names the fetch that pins it again first. `enabled: false`
+explains a silent hook, and `problems: N` is the count that decides the exit code.
 `anchor <id>: tofu …` is a pin that was never compared: check the printed value against the
-authority's own publication and run the `anchor confirm` command the `problem:` line names.
+authority's own publication and run the command the `problem:` line names. A `tofu` value outside
+`true`/`false` is a configuration error and exits `2` rather than reading as unmarked.
 
 `doctor --json` carries the same facts for a script; `problems` is the list that decides the exit
 code.
