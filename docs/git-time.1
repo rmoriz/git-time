@@ -880,6 +880,14 @@ expectation or a publication, or an
 clears it.
 .BR "git time anchor confirm \fIid\fR"
 records the out\-of\-band comparison the mark is waiting for.
+The mark changes no verdict: it fails
+.B doctor
+and warns at seal time only.
+To have an unconfirmed pin count, raise
+.B time.required
+so the authority's answer is needed for the quorum and set
+.BR "time.on\-failure = fail" ,
+which turns a short seal into exit 3 where a wrapper, not git, sees it.
 .SS "anchor confirm"
 .B git time anchor confirm \fIid\fR [ \fIFINGERPRINT\fR ]
 .PP

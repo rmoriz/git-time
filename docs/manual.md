@@ -460,7 +460,10 @@ prints both fingerprints and changes nothing. `--accept` takes the fetched root'
 
 A first pin with nothing to compare — no preset, no `tsa add --fingerprint` value — is marked in
 `time.tsa.<id>.tofu` and `doctor` reports it. A re-fetch of the same root keeps the mark, and any
-`--accept` or a match against a stored expectation or a publication clears it.
+`--accept` or a match against a stored expectation or a publication clears it. The mark changes no
+verdict: it only makes `doctor` fail and the seal warn. To make it bite, raise `time.required` to 2
+so the authority's own answer is needed for the quorum, and set `time.on-failure = fail` so a short
+seal exits `3` where a wrapper (not git) sees it.
 
 ### `git time anchor confirm <id> [<fingerprint>]`
 
