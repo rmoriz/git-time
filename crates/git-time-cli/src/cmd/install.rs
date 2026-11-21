@@ -293,12 +293,28 @@ pub(crate) async fn pin(
         .get(authority.name)
         .map(Vec::as_slice)
         .unwrap_or_default();
+    // The value a person stored with `tsa add --fingerprint`: an expectation like
+    // any other, and a hand-edited value is refused rather than compared.
+    let configured_key = format!("{base}.fingerprint");
+    let configured = match repo.config_non_empty(&configured_key) {
+        Ok(Some(value)) => match crate::cmd::tsa::validate_fingerprint(&value) {
+            Ok(value) => Some(value),
+            Err(reason) => {
+                return Err(Exit::config(format!(
+                    "git time {command}: `{configured_key}` holds {reason}"
+                )));
+            }
+        },
+        Ok(None) => None,
+        Err(error) => return Err(Exit::config(format!("git time {command}: {error}"))),
+    };
     match anchors::fetch_chain(authority.anchor_url, authority.chain).await {
         Ok(bytes) => match install_anchor(
             authority,
             &path,
             &bytes,
             named_roots,
+            configured.as_deref(),
             accept.get(authority.name).map(String::as_str),
         ) {
             crate::cmd::accept::Applied::Replaced {
@@ -502,6 +518,7 @@ fn install_anchor(
     path: &Path,
     bytes: &[u8],
     named: &[String],
+    configured: Option<&str>,
     accept: Option<&str>,
 ) -> crate::cmd::accept::Applied {
     crate::cmd::accept::apply(
@@ -510,6 +527,7 @@ fn install_anchor(
         bytes,
         authority.fingerprints,
         named,
+        configured,
         accept,
         false,
     )

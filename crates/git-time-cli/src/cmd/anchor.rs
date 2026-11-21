@@ -149,6 +149,22 @@ async fn fetch(
     }
     let pinned_before = target.exists();
 
+    // The expectation a person stored when the section was written. A hand-edited
+    // value that is not a fingerprint would compare as garbage, so it is refused
+    // with the key named instead.
+    let configured = match repo.config_non_empty(&format!("time.tsa.{id}.fingerprint")) {
+        Ok(Some(value)) => match crate::cmd::tsa::validate_fingerprint(&value) {
+            Ok(value) => Some(value),
+            Err(reason) => {
+                return Exit::config(format!(
+                    "git time anchor: `time.tsa.{id}.fingerprint` holds {reason}"
+                ));
+            }
+        },
+        Ok(None) => None,
+        Err(error) => return Exit::config(format!("git time anchor: {error}")),
+    };
+
     // A preset's issuers belong to its bundle: without them a reply that stops
     // below the root (`cartaodecidadao`) could never be chained.
     let preset = git_time_core::presets::find(id);
@@ -168,6 +184,7 @@ async fn fetch(
         &bytes,
         published,
         &[],
+        configured.as_deref(),
         accept.as_deref(),
         true,
     ) {

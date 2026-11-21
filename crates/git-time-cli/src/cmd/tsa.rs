@@ -56,6 +56,10 @@ pub enum Command {
         /// The TSA policy OID to request.
         #[arg(long, value_name = "OID")]
         policy: Option<String>,
+        /// The expected root fingerprint. Stored here and checked by the next
+        /// fetch, which is what pins; `add` itself fetches nothing.
+        #[arg(long, value_name = "FINGERPRINT")]
+        fingerprint: Option<String>,
         /// Per-attempt timeout.
         #[arg(long, value_name = "DURATION", default_value = "6s")]
         timeout: String,
@@ -163,6 +167,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
             anchor,
             alg,
             policy,
+            fingerprint,
             timeout,
             insecure_http,
         } => add(
@@ -173,6 +178,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
                 anchor,
                 alg: alg.alg(),
                 policy,
+                fingerprint: fingerprint.as_deref(),
                 timeout: &timeout,
                 insecure_http,
             },
@@ -202,6 +208,7 @@ struct NewTsa<'a> {
     anchor: Option<PathBuf>,
     alg: Alg,
     policy: Option<String>,
+    fingerprint: Option<&'a str>,
     timeout: &'a str,
     insecure_http: bool,
 }
@@ -214,6 +221,7 @@ fn add(repo: &Repo, new: NewTsa<'_>) -> Exit {
         anchor,
         alg,
         policy,
+        fingerprint,
         timeout,
         insecure_http,
     } = new;
@@ -238,6 +246,13 @@ fn add(repo: &Repo, new: NewTsa<'_>) -> Exit {
             Ok(()) => Some(policy),
             Err(exit) => return exit,
         },
+        None => None,
+    };
+    let fingerprint = match fingerprint.map(validate_fingerprint) {
+        Some(Ok(fingerprint)) => Some(fingerprint),
+        Some(Err(reason)) => {
+            return Exit::usage(format!("git time tsa: {reason}"));
+        }
         None => None,
     };
     let base = format!("time.tsa.{id}");
@@ -274,6 +289,9 @@ fn add(repo: &Repo, new: NewTsa<'_>) -> Exit {
     ];
     if let Some(policy) = policy {
         fields.push(("policy", policy));
+    }
+    if let Some(fingerprint) = fingerprint {
+        fields.push(("fingerprint", fingerprint));
     }
     if insecure_http && url.starts_with("http://") {
         fields.push(("insecure-http", "true".to_owned()));
@@ -1587,6 +1605,28 @@ pub(crate) fn validate_id(command: &str, id: &str) -> Result<(), Exit> {
     Err(Exit::usage(format!(
         "git time {command}: id `{id}` may only hold a-z, 0-9 and `-`"
     )))
+}
+
+/// Check a stored expectation and spell it the way the preset table does.
+///
+/// A fingerprint a fetch could compare is 20 or 32 colon-separated hex octets:
+/// the SHA-1 and SHA-256 lengths authorities publish. Case is not part of a
+/// fingerprint, so a lower-case value is accepted and upper-cased here rather
+/// than in every reader.
+pub(crate) fn validate_fingerprint(fingerprint: &str) -> Result<String, String> {
+    let fingerprint = fingerprint.trim().to_ascii_uppercase();
+    let octets: Vec<&str> = fingerprint.split(':').collect();
+    let shaped = octets.len() == 20 || octets.len() == 32;
+    let hex = octets
+        .iter()
+        .all(|octet| octet.len() == 2 && octet.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if shaped && hex {
+        Ok(fingerprint)
+    } else {
+        Err(format!(
+            "`{fingerprint}` is not a fingerprint; write 20 or 32 colon-separated hex octets"
+        ))
+    }
 }
 
 /// Accept the durations `Policy::load` accepts, so a typo is caught here.

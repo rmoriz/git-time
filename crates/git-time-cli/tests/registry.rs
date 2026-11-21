@@ -872,6 +872,86 @@ fn a_duplicate_id_exits_one_and_leaves_the_config_alone() {
     assert_eq!(repo.config_bytes(), before, "the config is unchanged");
 }
 
+/// A custom authority publishes nothing, so `add` takes the expectation a
+/// person copied out of band and stores it in the preset table's spelling.
+#[test]
+fn add_stores_an_expected_fingerprint_upper_cased() {
+    let repo = Repo::new();
+    repo.init();
+    let added = repo.run_time(&[
+        "tsa",
+        "add",
+        "https://acme.example/tsr",
+        "--id",
+        "acme",
+        "--fingerprint",
+        "0b:93:07:6c:81:39:fa:2b:83:38:5f:78:28:d7:be:75:73:40:d2:41",
+    ]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    assert_eq!(
+        repo.config("time.tsa.acme.fingerprint").as_deref(),
+        Some("0B:93:07:6C:81:39:FA:2B:83:38:5F:78:28:D7:BE:75:73:40:D2:41")
+    );
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu"),
+        None,
+        "a stored expectation is not a marker"
+    );
+}
+
+/// A value no fetch could compare is a usage error, and it is caught before any
+/// key is written.
+#[test]
+fn add_refuses_a_fingerprint_that_is_not_one() {
+    let repo = Repo::new();
+    repo.init();
+    for value in ["dead:beef", "", "0B:93:07:6C"] {
+        let refused = repo.run_time(&[
+            "tsa",
+            "add",
+            "https://acme.example/tsr",
+            "--id",
+            "acme",
+            "--fingerprint",
+            value,
+        ]);
+        assert_eq!(refused.status.code(), Some(2), "{value:?}");
+        assert!(
+            text(&refused.stderr).contains("fingerprint"),
+            "{value:?}: {}",
+            text(&refused.stderr)
+        );
+        assert_eq!(
+            repo.config("time.tsa.acme.url"),
+            None,
+            "{value:?} wrote nothing"
+        );
+    }
+}
+
+/// The flag does not loosen the duplicate refusal.
+#[test]
+fn add_with_a_fingerprint_still_refuses_a_duplicate() {
+    let repo = Repo::new();
+    repo.init();
+    assert!(
+        repo.run_time(&["tsa", "add", "https://a.example/tsr", "--id", "twin"])
+            .status
+            .success()
+    );
+    let duplicate = repo.run_time(&[
+        "tsa",
+        "add",
+        "https://b.example/tsr",
+        "--id",
+        "twin",
+        "--fingerprint",
+        "0b:93:07:6c:81:39:fa:2b:83:38:5f:78:28:d7:be:75:73:40:d2:41",
+    ]);
+    assert_eq!(duplicate.status.code(), Some(1));
+    assert_eq!(repo.config("time.tsa.twin.fingerprint"), None);
+}
+
 #[test]
 fn a_section_without_url_is_still_a_duplicate() {
     let repo = Repo::new();
@@ -2156,6 +2236,60 @@ fn preset_add_writes_the_install_config_and_prints_the_matched_fingerprint() {
             .last()
             .expect("the newest value"),
         "both spellings describe the same root"
+    );
+}
+
+/// A configured expectation is checked by the fetch: a different root is
+/// refused, both values are named, and nothing is pinned or marked.
+#[test]
+fn a_configured_fingerprint_mismatch_is_refused() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    let served = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let expected = "00:".repeat(19) + "00";
+    git(
+        repo.path(),
+        &["config", "--local", "time.tsa.acme.fingerprint", &expected],
+    );
+
+    let refused = repo.fetch_anchor("acme");
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains(&expected), "the expectation: {stderr}");
+    assert!(stderr.contains(&served), "the fetched root: {stderr}");
+    assert!(
+        !repo.anchors().join("acme.pem").exists(),
+        "nothing is pinned"
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// A configured value that matches is a checked first pin: the bundle is pinned
+/// with no `--accept` and the match is printed.
+#[test]
+fn a_configured_fingerprint_match_pins() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    let served = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    git(
+        repo.path(),
+        &["config", "--local", "time.tsa.acme.fingerprint", &served],
+    );
+
+    let fetched = repo.fetch_anchor("acme");
+    assert!(fetched.status.success(), "{}", text(&fetched.stderr));
+    assert!(
+        repo.anchors().join("acme.pem").exists(),
+        "the root is pinned"
+    );
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu"),
+        None,
+        "a checked pin is not marked"
     );
 }
 

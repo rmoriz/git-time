@@ -178,6 +178,9 @@ struct Matched {
     named: bool,
     /// A root is already pinned.
     pinned: bool,
+    /// A root matches the value a person stored with
+    /// `tsa add --fingerprint`.
+    configured: bool,
 }
 
 /// What every report line says about the root a run is about: the value in the
@@ -213,8 +216,9 @@ pub(crate) fn root_label(fingerprint: &str, expires: Option<&str>) -> String {
 /// Parse the fetched `bytes` as `id`'s bundle and place them at `path`.
 ///
 /// `published` are the fingerprints the authority publishes, `named` the roots
-/// a trailer block says the tokens were verified with, and `accept` the value a
-/// human passed. A root matching any of them is taken without asking.
+/// a trailer block says the tokens were verified with, `configured` the value a
+/// person stored with `tsa add --fingerprint`, and `accept` the value a human
+/// passed. A root matching any of them is taken without asking.
 ///
 /// A match against a root already in `path` is a match too: the retired root was
 /// served again, and the fetch is only new chain material. Whatever matched, a
@@ -234,12 +238,14 @@ pub(crate) fn root_label(fingerprint: &str, expires: Option<&str>) -> String {
 ///
 /// Nothing is written unless the whole bundle parsed, so a broken fetch leaves
 /// the previous bundle untouched.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply(
     id: &str,
     path: &Path,
     bytes: &[u8],
     published: &[&'static str],
     named: &[String],
+    configured: Option<&str>,
     accept: Option<&str>,
     tofu: bool,
 ) -> Applied {
@@ -287,20 +293,25 @@ pub(crate) fn apply(
         .unwrap_or_default();
 
     // The evidence of a block is the most specific expectation there is, the
-    // publication of the authority the most general; a root already pinned is
-    // expected again. The display names the most specific source that exists,
-    // and the found value is spelled in that source's length. Only a bundle no
-    // source describes is spelled in the SHA-1 form, the one every authority
-    // publishes.
+    // publication of the authority the most general, then the value a person
+    // stored; a root already pinned is expected again. The display names the most
+    // specific source that exists, and the found value is spelled in that
+    // source's length. Only a bundle no source describes is spelled in the SHA-1
+    // form, the one every authority publishes.
     let display: Vec<String> = if !named.is_empty() {
         named.to_vec()
     } else if !published.is_empty() {
         published.iter().map(|value| (*value).to_owned()).collect()
+    } else if let Some(configured) = configured {
+        vec![configured.to_owned()]
     } else {
         pinned_roots
             .iter()
             .map(|root| git_time_core::trust::fingerprint(root))
             .collect()
+    };
+    let matches_configured = |configured: Option<&str>, root: &[u8]| {
+        configured.is_some_and(|value| matches(value, root))
     };
     let matched = Matched {
         published: served
@@ -309,8 +320,15 @@ pub(crate) fn apply(
         named: served
             .iter()
             .any(|root| named.iter().any(|value| matches(value, root))),
+        configured: served
+            .iter()
+            .any(|root| matches_configured(configured, root)),
         pinned: served.iter().any(|root| pinned_roots.contains(root)),
     };
+    // Anything the fetch could be checked against. A stored value counts, so a
+    // first pin that had one is a comparison and an unmatched root is a refusal.
+    let expected =
+        matched.named || matched.published.is_some() || matched.configured || matched.pinned;
     let accepted = accept.is_some_and(|value| served.iter().any(|root| matches(value, root)));
     // The root the run is about: the accepted one if `--accept` named one, else a
     // served root that is **not** pinned yet, else the first root any expectation
@@ -327,6 +345,7 @@ pub(crate) fn apply(
                 let root = root.as_slice();
                 named.iter().any(|value| matches(value, root))
                     || fingerprint_matches(published, root).is_some()
+                    || matches_configured(configured, root)
             })
         })
         .cloned()
@@ -338,13 +357,13 @@ pub(crate) fn apply(
     };
 
     // Something the fetch brought is accounted for: a root already pinned, one a
-    // publication names, one a block names, or one a human accepted. A pinned
-    // bundle is then merged, so the retired root survives even when the served
-    // bundle no longer carries it.
-    if pinned && (matched.named || matched.published.is_some() || matched.pinned || accepted) {
+    // publication names, one a block names, one a stored value names, or one a
+    // human accepted. A pinned bundle is then merged, so the retired root
+    // survives even when the served bundle no longer carries it.
+    if pinned && (expected || accepted) {
         return append(&mut store, id, path, &staging, &found, matched.published);
     }
-    if !pinned && (matched.named || matched.published.is_some() || matched.pinned) {
+    if !pinned && expected {
         return match replace(&staging, path) {
             Ok(()) => Applied::Replaced {
                 matched: matched.published,
@@ -356,8 +375,9 @@ pub(crate) fn apply(
         };
     }
     if !accepted {
-        // Nothing is expected and nothing was pinned: trust on first use.
-        if !pinned && (tofu || display.is_empty()) {
+        // Nothing is expected and nothing was pinned: trust on first use. A
+        // stored value is an expectation, so it is not one of these.
+        if !pinned && configured.is_none() && (tofu || display.is_empty()) {
             return match replace(&staging, path) {
                 Ok(()) => Applied::FirstPin {
                     fingerprint: found.fingerprint,
@@ -489,7 +509,21 @@ fn bundle(anchor: &Anchor, pinned: &[Vec<u8>]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{one_or_id, parse};
+    use std::path::PathBuf;
+
+    use super::{Applied, apply, one_or_id, parse};
+
+    /// The FreeTSA fixture root and its published SHA-1, which is the spelling a
+    /// first pin is put in: the payload `apply` is about does not matter here.
+    const ROOT: &[u8] = include_bytes!("../../../git-time-core/tests/fixtures/freetsa_root.pem");
+    const ROOT_SHA1: &str = "0B:93:07:6C:81:39:FA:2B:83:38:5F:78:28:D7:BE:75:73:40:D2:41";
+
+    fn scratch(name: &str) -> PathBuf {
+        tempfile::TempDir::new()
+            .expect("temp dir")
+            .keep()
+            .join(name)
+    }
 
     #[test]
     fn a_value_is_id_and_fingerprint_or_bare() {
@@ -530,5 +564,61 @@ mod tests {
             one_or_id(&named, &["freetsa"]),
             Ok([("digicert".to_owned(), "0B:93".to_owned())].into())
         );
+    }
+
+    /// A configured expectation is an expectation: the first pin is a check, not
+    /// trust on first use.
+    #[test]
+    fn a_configured_value_pins_a_matching_root() {
+        let path = scratch("acme.pem");
+        let applied = apply("acme", &path, ROOT, &[], &[], Some(ROOT_SHA1), None, true);
+        assert!(
+            matches!(applied, Applied::Replaced { matched: None, .. }),
+            "{:?}",
+            std::mem::discriminant(&applied)
+        );
+        assert!(path.exists(), "the bundle was written");
+    }
+
+    /// A configured value nothing served matches is the ordinary refusal, and it
+    /// names the value that was expected in the configured spelling.
+    #[test]
+    fn a_configured_value_that_matches_nothing_is_a_mismatch() {
+        let path = scratch("acme.pem");
+        let expected = "00:".repeat(19) + "00";
+        let applied = apply("acme", &path, ROOT, &[], &[], Some(&expected), None, true);
+        match applied {
+            Applied::Mismatch {
+                expected: field,
+                found,
+            } => {
+                assert_eq!(field, expected, "{field}");
+                assert_eq!(found.len(), 59, "a SHA-1, the configured length: {found}");
+            }
+            _ => panic!("expected a mismatch"),
+        }
+        assert!(!path.exists(), "nothing was pinned");
+    }
+
+    /// An accept still decides, even with a configured value that does not match.
+    #[test]
+    fn an_accept_overrides_a_configured_value() {
+        let path = scratch("acme.pem");
+        let expected = "00:".repeat(19) + "00";
+        let applied = apply(
+            "acme",
+            &path,
+            ROOT,
+            &[],
+            &[],
+            Some(&expected),
+            Some(ROOT_SHA1),
+            true,
+        );
+        assert!(
+            matches!(applied, Applied::FirstPin { accepted: true, .. }),
+            "the accept pins it"
+        );
+        assert!(path.exists(), "the bundle was written");
     }
 }
