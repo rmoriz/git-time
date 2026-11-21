@@ -515,7 +515,7 @@ fn work(shared: &Shared, sender: &Sender<(usize, Served)>) {
 
         let preset = &shared.presets[index];
         let now = jiff::Timestamp::now();
-        let served = match (shared.fetch)(preset.url, preset.chain) {
+        let served = match (shared.fetch)(preset.anchor_url, preset.chain) {
             Ok(bundle) => {
                 let served = probed_from(preset, &bundle, now);
                 if let Served::Known(cached) = &served {
@@ -998,7 +998,22 @@ pub(crate) mod tests {
         wait(&prober);
         let urls = urls.lock().unwrap();
         assert_eq!(urls.len(), presets::PRESETS.len() - 1, "the rest fetched");
-        assert!(!urls.contains(&presets::PRESETS[1].url.to_owned()));
+        assert!(!urls.contains(&presets::PRESETS[1].anchor_url.to_owned()));
+    }
+
+    /// The probe reads where the root is published, not the token endpoint: a
+    /// GET of `actalis`'s endpoint leaves its next POST at 503, and
+    /// `cartaodecidadao`'s endpoint never carries the root at all.
+    #[test]
+    fn the_published_anchor_url_is_probed_not_the_endpoint() {
+        let _guard = xdg_lock();
+        xdg();
+        let urls = urls();
+        let prober = super::Prober::start(&presets::PRESETS[..1], answering(FREETSA_ROOT), &[]);
+        wait(&prober);
+        let urls = urls.lock().unwrap();
+        assert_eq!(*urls, [presets::PRESETS[0].anchor_url.to_owned()]);
+        assert_ne!(presets::PRESETS[0].anchor_url, presets::PRESETS[0].url);
     }
 
     #[test]
@@ -1097,7 +1112,7 @@ pub(crate) mod tests {
         // One row panics inside the fetch; that worker dies, but the rest of
         // the table still has to come back and `pending` still has to reach
         // zero, or a caller waiting on it would hang for good.
-        let panicky = presets::PRESETS[freetsa_index()].url;
+        let panicky = presets::PRESETS[freetsa_index()].anchor_url;
         let fetch: super::Fetch = Arc::new(move |url, _| {
             if url == panicky {
                 panic!("the fixture panics here");

@@ -286,6 +286,7 @@ records the bundle in `time.anchors-lock` afterwards so a later change is visibl
 | `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `lex-persona` | `http://tsa.lex-persona.com/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `accv` | `http://tss.accv.es:8318/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `actalis` | `http://timestamp.actalis.it` | opt-in | pinned SHA-1 fingerprint, plain http, anchor at the Actalis PKI |
 
 A `http://` authority is recorded with `time.tsa.<id>.insecure-http = true`. At seal time, where the
 policy is loaded, all of them share **one** warning line: five ids are named, the rest counted
@@ -296,9 +297,11 @@ An anchor URL is fetched with a GET; a body carrying a certificate — PEM, DER 
 collection — is the bundle. Everything else — a timestamp endpoint answers a GET with prose or with
 `405`/`403` because it wants a POST — falls through to asking the URL for a token and taking the
 self-signed root of the reply, walking the top certificate's AIA `caIssuers` where the reply stops
-short of the root. `freetsa` and `dfn` publish a PEM; `cartaodecidadao` publishes its root at the Portuguese state PKI
-and its two issuers beside it, which the preset names as a chain because its own reply carries the
-signing leaf alone and no `caIssuers`; every other preset keeps its endpoint. A chain member is
+short of the root. `freetsa` and `dfn` publish a PEM; `cartaodecidadao` publishes its root at the
+Portuguese state PKI and its two issuers beside it, which the preset names as a chain because its
+own reply carries the signing leaf alone and no `caIssuers`; `actalis` publishes root and
+intermediate as separate downloads, so its anchor URL and one chain member are those downloads and
+its endpoint is not probed at all. Every other preset keeps its endpoint. A chain member is
 appended behind the root and is only a path — trust still comes from the pinned root.
 
 Each endpoint appears once. An authority that answers on several URLs keeps one row: `cesnet` is
@@ -312,7 +315,13 @@ one exception: its value is supplied, and the walk now reaches the same root, so
 compares against it. Every built-in row is pinned today, so trust on first use is all a custom row
 gets. Two earlier values were wrong for their endpoint and are replaced by the measured ones —
 `sectigo` and `certum` now carry the fingerprint of the root their endpoint actually chains to.
-Without that, a pinned preset would refuse its own authority forever.
+Without that, a pinned preset would refuse its own authority forever. `actalis` is the same trap
+from the other side: its legal repository advertises a dedicated TSA root (`40:95:73:77:…`), but
+the free endpoint chains to the general Actalis Authentication Root CA (`F3:73:B3:87:…`, CCADB
+A000073), so that is the measured pin — comparing the advertised TSA root would read as a
+mismatch. The endpoint serves no TLS at all, so `https://timestamp.actalis.it` times out and the
+row is plain http; a GET of it also leaves the next POST at 503, so its published root and
+intermediate are the anchor URL and chain and the endpoint is not probed.
 
 ### `git time tsa select [--interactive] [--dry-run]`
 
@@ -388,9 +397,9 @@ stability is not confirmation, and `git time anchor pin` records the pinned bund
 row reads its date like any other, and `EXPIRED` once every root in it is past. `http` marks a
 plain-`http` endpoint; the endpoint of the cursor row is printed in full below the list.
 
-Every authority that publishes a root is also probed in the background, four at a time, and the
-column fills itself in; a row that publishes nothing is never probed, because no reply could match
-it, and keeps its `tofu`. Where nothing is pinned here the answer stands in for a pin: `fetch <date>`
+Every authority that publishes a root is also probed in the background, four at a time, at the URL
+it publishes that root on, and the column fills itself in; a row that publishes nothing is never
+probed, because no reply could match it, and keeps its `tofu`. Where nothing is pinned here the answer stands in for a pin: `fetch <date>`
 is the newest root the authority served, `fetch expires <date>` inside its last 90 days and
 `fetch EXPIRED` past it. `fetch` is a word of its own, so a served date is never read as a pin. A
 probe pins nothing and writes no anchor — the only thing it leaves behind is the cache entry — and

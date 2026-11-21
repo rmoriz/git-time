@@ -3274,9 +3274,12 @@ fn select_probes_the_open_rows_and_answers_from_the_cache_offline() {
     // Other rows were in flight as well, so the log holds more than this URL;
     // FreeTSA is the one the run must have asked.
     let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    let anchor = git_time_core::presets::find("freetsa")
+        .expect("the preset")
+        .anchor_url;
     assert!(
-        asked.lines().any(|url| url == "https://freetsa.org/tsr"),
-        "the freetsa URL was fetched: {asked}{stdout}"
+        asked.lines().any(|url| url == anchor),
+        "the freetsa anchor URL was fetched: {asked}{stdout}"
     );
     let entry = repo.xdg.path().join("git-time/probe/freetsa");
     let cache = std::fs::read_to_string(&entry).expect("the cached date");

@@ -1410,10 +1410,11 @@ mod tests {
         );
         let lines = shards(&rendered);
         assert_eq!(lines[0].trim(), "…", "the top cut is marked: {rendered}");
+        let last = presets::PRESETS.last().expect("a last preset").name;
         assert!(
             lines
                 .iter()
-                .any(|line| line.trim_start().starts_with("> [") && line.contains("accv")),
+                .any(|line| line.trim_start().starts_with("> [") && line.contains(last)),
             "{rendered}"
         );
 
@@ -2185,7 +2186,7 @@ mod tests {
         // for that same index.
         let (mut probes, missing) = super::seed(&presets::PRESETS, jiff::Timestamp::now());
         let skip = super::skip_of(&missing, presets::PRESETS.len());
-        let freetsa = presets::PRESETS[index].url;
+        let freetsa = presets::PRESETS[index].anchor_url;
         let known = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let fetch: super::probe::Fetch = {
             let known = Arc::clone(&known);

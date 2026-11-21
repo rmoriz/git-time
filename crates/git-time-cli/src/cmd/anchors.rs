@@ -30,6 +30,7 @@ use der::{Decode, Encode};
 use git_time_core::imprint::{Alg, Digest};
 use git_time_core::presets::Preset;
 use git_time_core::repo::Repo;
+use git_time_core::tsa::backend::USER_AGENT;
 use git_time_core::tsa::{StampRequest, encode, parse_response};
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::AuthorityInfoAccessSyntax;
@@ -196,6 +197,7 @@ pub async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     }
 
     let client = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
         .timeout(FETCH_TIMEOUT)
         .build()
         .map_err(|error| format!("cannot build the HTTP client: {error}"))?;
@@ -1160,6 +1162,15 @@ mod tests {
             "{}",
             requests[1]
         );
+        // An authority's front proxy may refuse a request without one.
+        for request in &requests {
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains(&format!("user-agent: {USER_AGENT}").to_ascii_lowercase()),
+                "{request}"
+            );
+        }
     }
 
     /// A certificate answer is the bundle itself: no token request follows.

@@ -1858,7 +1858,7 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     let stdout = text(&install.stdout);
     assert_eq!(
         stdout.matches("enabled ").count() + stdout.matches("failed ").count(),
-        21,
+        22,
         "every preset is written: {stdout}"
     );
     // The only matching root is FreeTSA's, so only it pins. Every other
@@ -1870,7 +1870,7 @@ fn selecting_every_preset_fetches_and_prints_their_fingerprints() {
     );
     assert_eq!(
         stdout.matches("failed ").count(),
-        20,
+        21,
         "every mismatched root is refused: {stdout}"
     );
 

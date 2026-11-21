@@ -16,12 +16,13 @@ use axum::body::{Body, Bytes};
 use axum::extract::State;
 use axum::http::{
     HeaderMap, HeaderValue, StatusCode, header::CONTENT_LENGTH, header::CONTENT_TYPE,
+    header::USER_AGENT,
 };
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use futures::stream;
 use git_time_core::imprint::{Alg, Digest, digest};
-use git_time_core::tsa::backend::MAX_RESPONSE_BYTES;
+use git_time_core::tsa::backend::{MAX_RESPONSE_BYTES, USER_AGENT as AGENT};
 use git_time_core::tsa::{
     HttpBackend, PoolPolicy, RawResponse, StampRequest, TsaBackend, encode, parse_response,
     pool::run,
@@ -175,6 +176,14 @@ async fn handle(State(state): State<StubState>, headers: HeaderMap, body: Bytes)
         .and_then(|value| value.to_str().ok());
     if content_type != Some(CONTENT_TYPE_QUERY) {
         return (StatusCode::BAD_REQUEST, b"bad content-type".to_vec()).into_response();
+    }
+    // Actalis's front proxy answers 503 without one, so a missing header is a
+    // request regression, not a stub nicety.
+    let agent = headers
+        .get(USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    if agent != Some(AGENT) {
+        return (StatusCode::BAD_REQUEST, b"bad user-agent".to_vec()).into_response();
     }
     if body.first() != Some(&0x30) {
         return (StatusCode::BAD_REQUEST, b"not a DER sequence".to_vec()).into_response();

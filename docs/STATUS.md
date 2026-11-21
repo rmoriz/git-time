@@ -38,6 +38,12 @@ A later release adds its own heading above this one.
   `git time anchor fetch <url> --id <id> [--insecure-http]`. An unknown section with no url is no
   row and survives a save.
 
+- The preset table gains `actalis`. Its free endpoint re-dates the token to 2030-09-22 and answers
+  on plain http only (port 443 times out), so the row is opt-in. It chains to the general Actalis
+  Authentication Root CA, not to the TSA root the legal repository advertises; the measured
+  Authentication Root is pinned. A probe now reads a preset's anchor URL rather than its endpoint,
+  because a GET of Actalis's endpoint leaves the next POST at 503.
+
 ## What works today
 
 `git commit` seals itself with RFC 3161 tokens from one or more authorities, verified locally

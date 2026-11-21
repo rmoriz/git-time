@@ -24,6 +24,13 @@ use crate::store::MAX_TOKEN_BYTES;
 /// The media type RFC 3161 assigns to a request body.
 pub const MEDIA_TYPE: &str = "application/timestamp-query";
 
+/// The `User-Agent` every request carries.
+///
+/// reqwest sends none by default, and at least one authority's front proxy
+/// (`timestamp.actalis.it`) answers `503` without one. The value is also what a
+/// server operator gets to see in their logs.
+pub const USER_AGENT: &str = concat!("git-time/", env!("CARGO_PKG_VERSION"));
+
 /// Room [`MAX_RESPONSE_BYTES`] gives a response around the token itself.
 const RESPONSE_SLACK_BYTES: usize = 64 * 1024;
 
@@ -65,6 +72,7 @@ impl TsaBackend for HttpBackend {
 
     async fn stamp(&self, request: &StampRequest) -> Result<Vec<u8>, TsaError> {
         let client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             .build()
             .map_err(|error| TsaError::Transport(error.to_string()))?;
         let body = encode(request);

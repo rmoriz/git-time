@@ -73,7 +73,7 @@ is how sections are removed. The `pin` dates are the roots' expiry; a root in it
 reads `pin expires <date>`, a bundle all past reads `EXPIRED`. `git time install` on a repository
 with no authority hands over to the same UI, so installing and choosing can be one step.
 
-The picker also asks each authority for its root in the background and fills the column in while
+The picker also asks each authority's published root URL in the background and fills the column in while
 nothing is pinned here: `fetch <date>` is the newest root the authority served, `…` means the
 answer is still out, and `?` means it failed or served no published root; a row that publishes
 nothing — every custom one — is never asked and keeps `tofu`. `fetch` is not a pin — a probe pins
@@ -198,6 +198,7 @@ ticks nothing — only an already configured section starts ticked.
 | `cra-ge` | `http://tsa.cra.ge/signserver/tsa?workerName=qtsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `lex-persona` | `http://tsa.lex-persona.com/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
 | `accv` | `http://tss.accv.es:8318/tsa` | opt-in | pinned SHA-1 fingerprint, plain http |
+| `actalis` | `http://timestamp.actalis.it` | opt-in | pinned SHA-1 fingerprint, plain http, anchor at the Actalis PKI |
 
 Root fingerprints were measured by querying each endpoint and walking its chain — the reply's
 certificates plus the top certificate's AIA `caIssuers` where the root is not embedded. izenpe's
@@ -205,6 +206,11 @@ value was supplied and is confirmed by that walk. Every built-in row is pinned t
 first use is what a hand-added, unpublished authority gets. Two earlier values were wrong for
 their endpoint and were replaced by measured ones: `sectigo` belongs to a different Sectigo root
 than the one the endpoint chains to, and `certum` too (`07:E0:32:E0:…`, Certum Trusted Network CA).
+`actalis` is the same trap from the other side: its legal repository advertises a dedicated TSA
+root (`40:95:73:77:…`), but the free endpoint chains to the general Actalis Authentication Root CA
+(`F3:73:B3:87:…`, CCADB A000073), so that is the measured pin. The endpoint serves no TLS at all,
+and a GET of it leaves the next POST at 503, so the anchor comes from Actalis's own root and
+intermediate downloads instead.
 
 A pinned fingerprint makes the *first* fetch verifiable: a bundle whose root hashes to anything
 else is refused and an existing pin is left alone. Where no fingerprint is published the fetch is

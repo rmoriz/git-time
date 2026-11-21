@@ -20,6 +20,10 @@
 //! fingerprint checked against the measured pin — that is the Portuguese state
 //! PKI's publication of `ECRaizEstado 002` for `cartaodecidadao`, whose own reply
 //! stops at the signing leaf. A download is read in PEM, DER or PKCS#7.
+//! `actalis` is the other case: a GET of its endpoint leaves the next POST at
+//! `503`, so its published root (`cacert.actalis.it`, named by the signing
+//! certificate's AIA) is the anchor URL and the endpoint is not probed. Its root
+//! download holds no intermediate, so the intermediate is named as a chain.
 //!
 //! # Why expected fingerprints
 //!
@@ -75,6 +79,12 @@
 //! and `certum` had `5C:58:46:8D:…` where the endpoint chains to
 //! `07:E0:32:E0:…` (`Certum Trusted Network CA`).
 //!
+//! `actalis` is the same trap from the other side: Actalis's legal repository
+//! advertises a dedicated TSA root (`40:95:73:77:…`), but the free endpoint
+//! chains to the general `Actalis Authentication Root CA` (`F3:73:B3:87:…`,
+//! CCADB record A000073). The measured value is the pin; the advertised TSA root
+//! is for the qualified service on another CA.
+//!
 //! # When the roots expire
 //!
 //! Each row also carries the `notAfter` of its newest published root. It is a
@@ -117,7 +127,9 @@ pub struct Preset {
     ///
     /// Empty for every authority whose reply or `caIssuers` already reaches the
     /// root. `cartaodecidadao` embeds the signing leaf alone and publishes no
-    /// `caIssuers` at all, so its whole path has to be named.
+    /// `caIssuers` at all, so its whole path has to be named; `actalis`
+    /// publishes root and intermediate as separate downloads, so its one
+    /// intermediate is named here.
     pub chain: &'static [&'static str],
     /// The imprint algorithm and the algorithm requests ask for.
     pub alg: &'static str,
@@ -179,7 +191,7 @@ pub struct Preset {
 
 /// The built-in presets, in the order they are written: the two originals, then
 /// the rest in the order they were measured.
-pub const PRESETS: [Preset; 21] = [
+pub const PRESETS: [Preset; 22] = [
     Preset {
         name: "freetsa",
         url: "https://freetsa.org/tsr",
@@ -480,6 +492,30 @@ pub const PRESETS: [Preset; 21] = [
         anchor_path: None,
         curated: false,
     },
+    Preset {
+        // The endpoint has no TLS port at all: `https://timestamp.actalis.it`
+        // times out, so http is the only transport. Its token re-dates the
+        // leaf and intermediate to 2030-09-22 and chains, through the AIA
+        // `caIssuers` walk, to the general `Actalis Authentication Root CA` —
+        // not to the dedicated TSA root the legal repository advertises.
+        // A GET of the endpoint is not harmless: the 400 it answers leaves the
+        // next POST at 503, so the anchor comes from the root and intermediate
+        // Actalis publishes (the leaf's AIA names the intermediate), not from a
+        // token probe.
+        // The measured Authentication Root is the pin; an explicit policy
+        // names the published BSTP OID so the answer cannot drift silently.
+        name: "actalis",
+        url: "http://timestamp.actalis.it",
+        anchor_url: "http://cacert.actalis.it/certs/actalis-autroot",
+        chain: &["http://cacert.actalis.it/certs/actalis-authtsg1"],
+        alg: "sha256",
+        policy: Some("1.3.159.8.2.1"),
+        fingerprints: &["F3:73:B3:87:06:5A:28:84:8A:F2:F3:4A:CE:19:2B:DD:C7:8E:9C:AC"],
+        not_after: Some("2030-09-22"),
+        insecure_http: true,
+        anchor_path: None,
+        curated: false,
+    },
 ];
 
 /// The preset called `name`.
@@ -575,16 +611,45 @@ mod tests {
         assert_eq!(find("nope"), None);
     }
 
-    /// Only `cartaodecidadao` names a chain, because only its reply neither
-    /// embeds the path nor publishes `caIssuers`; every other preset must fetch
-    /// without one.
+    /// Actalis serves no TLS endpoint at all, so the row is plain http and
+    /// opt-in. Its endpoint chains to the general `Actalis Authentication Root
+    /// CA`, not to the dedicated TSA root its legal repository advertises
+    /// (`40:95:73:77:…`), so the pin is the measured Authentication Root and a
+    /// reviewer comparing the two values must not read it as a mismatch. The
+    /// policy is the published BSTP OID, and the served root ends 2030-09-22.
     #[test]
-    fn only_cartaodecidadao_names_a_chain() {
+    fn actalis_pins_the_root_its_endpoint_actually_chains_to() {
+        let actalis = find("actalis").expect("the preset");
+        assert_eq!(actalis.url, "http://timestamp.actalis.it");
+        assert_eq!(
+            actalis.anchor_url,
+            "http://cacert.actalis.it/certs/actalis-autroot"
+        );
+        assert_eq!(actalis.policy, Some("1.3.159.8.2.1"));
+        assert_eq!(actalis.not_after, Some("2030-09-22"));
+        assert!(actalis.insecure_http);
+        assert!(!actalis.curated);
+        assert_eq!(
+            actalis.chain,
+            ["http://cacert.actalis.it/certs/actalis-authtsg1"]
+        );
+        assert_eq!(
+            actalis.fingerprints,
+            ["F3:73:B3:87:06:5A:28:84:8A:F2:F3:4A:CE:19:2B:DD:C7:8E:9C:AC"]
+        );
+    }
+
+    /// Only `cartaodecidadao` and `actalis` name a chain, because both publish
+    /// their path as separate downloads: `cartaodecidadao`'s reply carries the
+    /// signing leaf alone and no `caIssuers`, and `actalis`'s root download
+    /// holds no intermediate either. Every other preset must fetch without one.
+    #[test]
+    fn only_the_path_publishers_name_a_chain() {
         for preset in &PRESETS {
-            let expected = if preset.name == "cartaodecidadao" {
-                2
-            } else {
-                0
+            let expected = match preset.name {
+                "cartaodecidadao" => 2,
+                "actalis" => 1,
+                _ => 0,
             };
             assert_eq!(preset.chain.len(), expected, "{}", preset.name);
         }
@@ -745,6 +810,7 @@ mod tests {
                 "cra-ge",
                 "lex-persona",
                 "accv",
+                "actalis",
             ]
         );
     }
