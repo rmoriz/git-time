@@ -502,8 +502,9 @@ fn row(
 
 /// The trust column: `pin <YYYY-MM-DD>` for a pinned root, `pin expires
 /// <YYYY-MM-DD>` when that day is close, `EXPIRED` once none of the bundle's
-/// roots is valid at `now`, `tofu` without a published root, and `pin -` for one
-/// that is not pinned here.
+/// roots is valid at `now`, `tofu` without a published root, and for a
+/// published root that is not pinned here the table's own `listed` date (or
+/// `pin -` when the table measured none).
 ///
 /// A pin always wins over the probe, because the local bundle is what a seal is
 /// checked against. What the probe found is then a second fact: a served root
@@ -586,12 +587,17 @@ pub(crate) fn trust(
 ///
 /// Both surfaces render through here, so the vocabulary cannot drift.
 pub(crate) fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
-    if anchors::expired(&cached.not_after, now) {
+    served_date(&cached.not_after, now)
+}
+
+/// [`served`] from the date alone, for a caller that already holds it.
+pub(crate) fn served_date(not_after: &str, now: jiff::Timestamp) -> String {
+    if anchors::expired(not_after, now) {
         return "fetch EXPIRED".to_owned();
     }
-    match anchors::expiry_label(&cached.not_after, now) {
-        "(expires soon)" => format!("fetch expires {}", cached.not_after),
-        _ => format!("fetch {date}", date = cached.not_after),
+    match anchors::expiry_label(not_after, now) {
+        "(expires soon)" => format!("fetch expires {not_after}"),
+        _ => format!("fetch {not_after}"),
     }
 }
 
@@ -724,7 +730,9 @@ fn stty(args: &[&str]) -> Option<String> {
 /// unchecked date. A preset that does publish at that width rejects anything
 /// else: a rotation inside the TTL would otherwise show a date for a root the
 /// row no longer claims, and an unpinned row has no `!` to say so.
-fn still_published(preset: &Preset, cached: &probe::Cached) -> bool {
+///
+/// Shared with `tsa list`, which reads the same cache for a row nothing pinned.
+pub(crate) fn still_published(preset: &Preset, cached: &probe::Cached) -> bool {
     let served = cached.fingerprint.as_str();
     let mut at_width = preset
         .fingerprints
@@ -1437,10 +1445,10 @@ mod tests {
                 .to_owned()
         };
 
-        // A 40-character name, cut. The trust column holds `pin <day>`,
-        // `EXPIRED`, `pin -` or `tofu`; a verdict is cut inside its own column,
-        // so with no bundle pinned here only the name needs the ellipsis. The
-        // long name is no preset, so its tier is `tofu`.
+        // A 40-character name, cut. The trust column holds `pin <day>`, a
+        // `listed` date, a word such as `EXPIRED` or `tofu`; a verdict is cut
+        // inside its own column, so with no bundle pinned here only the name
+        // needs the ellipsis. The long name is no preset, so its tier is `tofu`.
         let long = row_of(&[long_preset()]);
         assert!(long.chars().count() < 60, "{long:?}");
         assert_eq!(long.matches('…').count(), 1, "the name is cut: {long:?}");
@@ -1562,9 +1570,9 @@ mod tests {
     }
 
     /// A preset that publishes a root but has none pinned locally: a *real*
-    /// preset reads `pin -` there. The name is its own so `frame()` cannot find
-    /// a stray bundle of a reader; a name no table knows is `tofu` on both
-    /// surfaces however its publication list reads, which
+    /// preset reads its table date there. The name is its own so `frame()`
+    /// cannot find a stray bundle of a reader; a name no table knows is `tofu`
+    /// on both surfaces however its publication list reads, which
     /// [`both_surfaces_agree_on_an_unpinned_tier`] pins.
     fn published_without_bundle() -> presets::Preset {
         presets::Preset {
@@ -1636,6 +1644,9 @@ mod tests {
     /// `tofu` on both whatever its publication list says, and a built-in with
     /// nothing pinned falls back to the published date, or to `pin -` and the
     /// listing's `not pinned` when the table has no date either.
+    ///
+    /// `listed` is the table date's own word: it keeps a measurement apart from
+    /// a local fact, and `pin -` only stands where the table has nothing.
     #[test]
     fn both_surfaces_agree_on_an_unpinned_tier() {
         let _home = empty_home();

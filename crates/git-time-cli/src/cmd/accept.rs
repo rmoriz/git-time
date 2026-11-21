@@ -153,6 +153,10 @@ pub(crate) enum Applied {
         added: usize,
         /// How many roots the bundle holds now.
         roots: usize,
+        /// Whether something the fetch is checked against names the appended
+        /// root — a publication, a block, a stored value or an accept. When
+        /// only an older root carried the match, the new one is unconfirmed.
+        compared: bool,
     },
     /// A new root nobody confirmed; nothing was written.
     Mismatch {
@@ -361,7 +365,22 @@ pub(crate) fn apply(
     // human accepted. A pinned bundle is then merged, so the retired root
     // survives even when the served bundle no longer carries it.
     if pinned && (expected || accepted) {
-        return append(&mut store, id, path, &staging, &found, matched.published);
+        // Whether the *appended* root is itself named by something. A reply
+        // carrying the old root plus a new one appends the new one, and the
+        // old root's match says nothing about it.
+        let compared = accepted
+            || named.iter().any(|value| matches(value, &found_root))
+            || fingerprint_matches(published, &found_root).is_some()
+            || matches_configured(configured, &found_root);
+        return append(
+            &mut store,
+            id,
+            path,
+            &staging,
+            &found,
+            matched.published,
+            compared,
+        );
     }
     if !pinned && expected {
         return match replace(&staging, path) {
@@ -420,6 +439,7 @@ fn append(
     staging: &Path,
     found: &Found,
     published: Option<&'static str>,
+    compared: bool,
 ) -> Applied {
     let pinned_roots: Vec<Vec<u8>> = store
         .anchor(id)
@@ -459,6 +479,7 @@ fn append(
             expires: found.expires.clone(),
             added,
             roots,
+            compared,
         }
     };
     if let Err(error) = std::fs::write(staging, bundle(anchor, &pinned_roots)) {

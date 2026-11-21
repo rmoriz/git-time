@@ -369,12 +369,22 @@ fn list(repo: &Repo, json: bool) -> Exit {
         // certificate, and neither depends on where append order put it.
         let first = roots.as_deref().and_then(|roots| looming(roots, now));
         let fingerprint = first.map(|root| root.fingerprint.clone());
-        // The bundle is the strongest date source; the table is the weakest one
-        // and only answers where the bundle does not, for an id a preset knows.
+        // The bundle is the strongest date source, a cached probe answer the
+        // next one, the table the weakest. Only an id a preset knows can have
+        // either of the last two; the cache is read, not refreshed, so a plain
+        // listing still opens no socket.
         let (not_after, not_after_source) = match first {
             Some(root) => (Some(root.not_after.clone()), Some("bundle")),
-            None => match presets::find(&id).and_then(|preset| preset.not_after) {
-                Some(date) => (Some(date.to_owned()), Some("preset")),
+            None => match presets::find(&id) {
+                Some(preset) => match probe::cached(&id, now)
+                    .filter(|cached| picker::still_published(preset, cached))
+                {
+                    Some(cached) => (Some(cached.not_after), Some("probe")),
+                    None => match preset.not_after {
+                        Some(date) => (Some(date.to_owned()), Some("preset")),
+                        None => (None, None),
+                    },
+                },
                 None => (None, None),
             },
         };
@@ -433,11 +443,13 @@ fn list(repo: &Repo, json: bool) -> Exit {
     } else {
         for row in &rows {
             // The bundle leads whenever it answered, so its `EXPIRED` always
-            // shows; the table's own word keeps a measurement apart from a fact.
+            // shows; a served answer and the table's own word keep them apart
+            // from a fact and from each other.
             let date = match row.not_after_source {
                 Some("bundle") => {
                     anchors::expiry_text(row.not_after.as_deref().unwrap_or("-"), now)
                 }
+                Some("probe") => picker::served_date(row.not_after.as_deref().unwrap_or("-"), now),
                 Some(_) => picker::listed(row.not_after.as_deref().unwrap_or("-"), now),
                 None => "-".to_owned(),
             };
@@ -975,9 +987,9 @@ pub(crate) async fn select(
     };
     let chosen = if std::io::stdin().is_terminal() {
         let mut selection = initial(&seed);
-        // Nothing asked yet, so the line-prompt fallback keeps `pin -` and the
-        // picker path replaces this table with the cache seed once it owns the
-        // terminal.
+        // Nothing asked yet, so the line-prompt fallback keeps the row's table
+        // date (or `pin -` when there is none) and the picker path replaces
+        // this table with the cache seed once it owns the terminal.
         let mut probes = picker::Probes::idle(rows.len());
         if let Some(outcome) = picker::run(&mut selection, rows, &mut probes) {
             match outcome {
@@ -1685,15 +1697,37 @@ fn local_set(repo: &Repo, key: &str, value: &str) -> Result<(), Exit> {
     git_stdout(repo, &["config", "--local", key, value]).map(|_| ())
 }
 
-/// Remove one local config key, tolerating a key that is not there.
+/// One config value and the scope it was found in, `None` when it is unset.
 ///
-/// `git_stdout` folds every git exit into a usage error, so whether there was a
-/// value to remove is asked first rather than read off the failure.
-fn local_unset(repo: &Repo, key: &str) -> Result<(), Exit> {
-    if local_get(repo, key)?.is_none() {
-        return Ok(());
+/// A marker may live in a wider scope than the repository when the authority
+/// was configured there, and only the scope it actually came from can unset it.
+fn scoped_get(repo: &Repo, key: &str) -> Result<Option<(String, String)>, Exit> {
+    match git_stdout(repo, &["config", "--show-scope", "--get", key]) {
+        Ok(line) => {
+            let line = line.trim();
+            if line.is_empty() {
+                return Ok(None);
+            }
+            let (scope, value) = line.split_once('\t').unwrap_or(("", line));
+            Ok(Some((scope.to_owned(), value.to_owned())))
+        }
+        // git exits 1 for an unset key, which `git_stdout` reports as usage.
+        Err(exit) if exit.code() == 2 => Ok(None),
+        Err(exit) => Err(exit),
     }
-    git_stdout(repo, &["config", "--local", "--unset", key]).map(|_| ())
+}
+
+/// Remove one config key in the scope it is set in, tolerating an unset key.
+fn unset_key(repo: &Repo, key: &str) -> Result<(), Exit> {
+    let Some((scope, _)) = scoped_get(repo, key)? else {
+        return Ok(());
+    };
+    // `command` scope cannot be unset from a file, so it falls back to local.
+    let flag = match scope.as_str() {
+        "global" | "system" | "worktree" => format!("--{scope}"),
+        _ => "--local".to_owned(),
+    };
+    git_stdout(repo, &["config", &flag, "--unset", key]).map(|_| ())
 }
 
 /// Record or clear the trust-on-first-use marker of `id`.
@@ -1705,9 +1739,20 @@ pub(crate) fn mark_tofu(repo: &Repo, id: &str, marked: Option<bool>) -> Result<(
     let key = format!("time.tsa.{id}.tofu");
     match marked {
         Some(true) => local_set(repo, &key, "true"),
-        Some(false) => local_unset(repo, &key),
+        Some(false) => unset_key(repo, &key),
         None => Ok(()),
     }
+}
+
+/// Whether `id`'s pin carries the marker, read in any scope.
+///
+/// Parsed like the policy parses it — only a value that reads true marks — so
+/// `doctor` and the seal warning cannot disagree about whether a row is quiet.
+pub(crate) fn marked(repo: &Repo, id: &str) -> Result<bool, Exit> {
+    Ok(repo
+        .config_non_empty(&format!("time.tsa.{id}.tofu"))
+        .map_err(Exit::config)?
+        .is_some_and(|value| reads_true(&value)))
 }
 
 #[cfg(test)]

@@ -42,6 +42,14 @@ pub fn run(directory: Option<std::path::PathBuf>, json_output: bool) -> Exit {
     }
 }
 
+/// Whether `id`'s pin carries the `tofu` marker.
+///
+/// Read the way the policy reads it — only a value that parses true marks — so
+/// doctor and the seal warning cannot disagree about whether a row is quiet.
+fn marker(repo: &Repo, id: &str) -> Result<bool, Exit> {
+    crate::cmd::tsa::marked(repo, id)
+}
+
 /// The command that pins `fingerprint` for `id`, runnable as printed.
 ///
 /// `restore` can only fetch a preset (the evidence does not carry a URL) and its
@@ -219,6 +227,13 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "missing anchor for `{id}`: {} ({error})",
                     path.display()
                 ));
+                let tofu = marker(repo, id)?;
+                if tofu {
+                    report.problem(format!(
+                        "`anchor {id}` is pinned but was never compared (confirm it: \
+                         git time anchor confirm {id})"
+                    ));
+                }
                 anchor_reports.push(json!({
                     "id": id,
                     "path": path,
@@ -227,7 +242,7 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "unparseable": false,
                     "roots": 0,
                     "expired": 0,
-                    "tofu": false,
+                    "tofu": tofu,
                 }));
             }
             Ok(bytes) => {
@@ -244,10 +259,7 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                 // verifies, so it is a standing finding rather than a failure —
                 // but nothing else in the repository ever disturbs it, so this
                 // is where it has to stay visible.
-                let tofu = repo
-                    .config_non_empty(&format!("time.tsa.{id}.tofu"))
-                    .map_err(Exit::config)?
-                    .is_some();
+                let tofu = marker(repo, id)?;
                 // The same load the policy does, so a bundle that is only
                 // PEM-shaped is a problem here rather than `Untrusted` at
                 // the next commit.

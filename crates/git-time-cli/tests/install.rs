@@ -1239,9 +1239,8 @@ fn doctor_problems_no_root_valid_now() {
     assert_eq!(value["anchors"][0]["expired"], 1, "{value}");
 }
 
-/// The same stale bundle on a *preset* id: the way out is `tsa restore`, and it
-/// only fetches because an all-expired bundle is not covered. A root that is
-/// pinned and named but expired used to make `restore` skip the fetch and exit 0,
+/// A marked pin is a standing finding: `doctor` names the root, the confirming
+/// command and the JSON field, and exits 1 until the comparison is recorded.
 #[test]
 fn doctor_keeps_naming_an_unconfirmed_pin() {
     let repo = Repo::blank();
@@ -1276,12 +1275,13 @@ fn doctor_keeps_naming_an_unconfirmed_pin() {
         serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
     assert_eq!(value["anchors"][0]["tofu"], true, "{value}");
 
-    // Confirming clears the line, the problem and the exit.
-    assert!(
-        repo.run_time(&["anchor", "confirm", "stub"])
-            .status
-            .success()
-    );
+    // The printed command itself clears the line, the problem and the exit.
+    let command = hint
+        .split_once("git time ")
+        .map(|(_, command)| command.trim_end_matches(')').trim())
+        .unwrap_or_else(|| panic!("the command: {hint}"));
+    let args: Vec<&str> = command.split_whitespace().collect();
+    assert!(repo.run_time(&args).status.success(), "{command}");
     let after = repo.run_time(&["doctor"]);
     assert_eq!(after.status.code(), Some(0), "{}", text(&after.stdout));
     let stdout = text(&after.stdout);
@@ -1289,6 +1289,33 @@ fn doctor_keeps_naming_an_unconfirmed_pin() {
     assert!(!stdout.contains("anchor confirm"), "{stdout}");
 }
 
+/// A marker outlives the bundle it was set for: the missing-bundle report still
+/// names the comparison and the JSON still says the pin was unconfirmed.
+#[test]
+fn doctor_names_a_marked_pin_whose_bundle_is_gone() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.config("time.tsa.stub.tofu", "true");
+    let moved = repo.path().join("moved-ca.pem");
+    std::fs::rename(&repo.authority.ca, &moved).expect("move the anchor away");
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    assert!(
+        text(&doctor.stdout).contains("was never compared"),
+        "{}",
+        text(&doctor.stdout)
+    );
+    let json = repo.run_time(&["doctor", "--json"]);
+    let value: serde_json::Value =
+        serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
+    assert_eq!(value["anchors"][0]["missing"], true, "{value}");
+    assert_eq!(value["anchors"][0]["tofu"], true, "{value}");
+}
+
+/// The same stale bundle on a *preset* id: the way out is `tsa restore`, and it
+/// only fetches because an all-expired bundle is not covered. A root that is
+/// pinned and named but expired used to make `restore` skip the fetch and exit 0,
 /// so the hint was inert and doctor kept failing.
 #[test]
 fn doctor_hint_for_a_preset_actually_restores() {
@@ -1299,6 +1326,17 @@ fn doctor_hint_for_a_preset_actually_restores() {
     repo.config("time.tsa.freetsa.anchor", &pstr(&stale));
     repo.commit_naming("freetsa", &stale_fp);
     assert!(repo.install().status.success());
+    // A published root was compared, so no marker is written for it.
+    assert!(
+        !git_output(
+            repo.path(),
+            &["config", "--local", "--get", "time.tsa.freetsa.tofu"],
+            b"",
+            &[]
+        )
+        .status
+        .success()
+    );
 
     let doctor = repo.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));

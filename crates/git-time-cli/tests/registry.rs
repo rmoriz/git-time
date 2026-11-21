@@ -1109,6 +1109,47 @@ fn an_accept_clears_the_marker() {
     assert_eq!(repo.config("time.tsa.acme.tofu"), None);
 }
 
+/// A reply that carries the pinned root plus a new one appends the new root, but
+/// the old root's match says nothing about it: the marker stays.
+#[test]
+fn an_appended_root_nothing_checked_keeps_the_marker() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert_eq!(repo.config("time.tsa.acme.tofu").as_deref(), Some("true"));
+    let old = repo.anchors().join("acme.pem");
+    let new = stale_ca(repo.authority.dir.path());
+
+    let env = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {} {}", pstr(&old), pstr(&new)),
+    )];
+    let together = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "acme",
+            "--insecure-http",
+        ],
+        &env,
+    );
+    assert!(together.status.success(), "{}", text(&together.stderr));
+    assert!(
+        text(&together.stdout).contains("appended"),
+        "{}",
+        text(&together.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu").as_deref(),
+        Some("true"),
+        "the new root was not checked"
+    );
+}
+
 /// `anchor confirm` is where the out-of-band comparison is recorded: it prints
 /// what it confirmed and clears the marker.
 #[test]
@@ -1134,6 +1175,55 @@ fn confirm_clears_the_marker_and_names_the_root() {
     let by_value = repo.run_time(&["anchor", "confirm", "acme", &root]);
     assert!(by_value.status.success(), "{}", text(&by_value.stderr));
     assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// A marker in a wider scope is still a marker: `confirm` finds and clears it
+/// there, since only that scope can unset it.
+#[test]
+fn confirm_clears_a_marker_from_a_wider_scope() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let root = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    // Move the marker where a local `--unset` cannot reach it. The suite pins
+    // the global config at `/dev/null`, so a real file stands in for it.
+    let global = repo.path().join("global-config");
+    let global_file = pstr(&global);
+    let wider: [(&str, String); 1] = [("GIT_CONFIG_GLOBAL", global_file.clone())];
+    let wider_str: [(&str, &str); 1] = [("GIT_CONFIG_GLOBAL", global_file.as_str())];
+    git(
+        repo.path(),
+        &["config", "--local", "--unset", "time.tsa.acme.tofu"],
+    );
+    assert!(
+        git_output_env(
+            repo.path(),
+            &["config", "--global", "time.tsa.acme.tofu", "true"],
+            &wider_str
+        )
+        .status
+        .success()
+    );
+
+    let confirmed = repo.run_time_env(&["anchor", "confirm", "acme", &root], &wider);
+    assert!(confirmed.status.success(), "{}", text(&confirmed.stderr));
+    assert!(
+        text(&confirmed.stdout).contains("marked as compared"),
+        "{}",
+        text(&confirmed.stdout)
+    );
+    assert!(
+        !git_output_env(
+            repo.path(),
+            &["config", "--global", "--get", "time.tsa.acme.tofu"],
+            &wider_str
+        )
+        .status
+        .success(),
+        "the global key is gone"
+    );
 }
 
 /// A value the bundle does not carry confirms nothing, and the marker stays.
@@ -1175,7 +1265,7 @@ fn confirm_on_an_unmarked_pin_says_so() {
     let again = repo.run_time(&["anchor", "confirm", "acme"]);
     assert!(again.status.success(), "{}", text(&again.stderr));
     assert!(
-        text(&again.stdout).contains("not"),
+        text(&again.stdout).contains("nothing to clear"),
         "it says the pin was not marked: {}",
         text(&again.stdout)
     );
@@ -2429,6 +2519,111 @@ fn a_configured_fingerprint_match_pins() {
         None,
         "a checked pin is not marked"
     );
+}
+
+/// The right value given to `add` is checked by the fetch it configures: the
+/// first pin succeeds with no `--accept` and is not marked.
+#[test]
+fn an_added_fingerprint_makes_the_fetch_a_check() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    let served = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let url = repo.stub_url();
+    let added = repo.run_time(&[
+        "tsa",
+        "add",
+        &url,
+        "--id",
+        "acme",
+        "--fingerprint",
+        &served,
+        "--insecure-http",
+    ]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+
+    let fetched = repo.fetch_anchor("acme");
+    assert!(fetched.status.success(), "{}", text(&fetched.stderr));
+    assert!(
+        repo.anchors().join("acme.pem").exists(),
+        "the root is pinned"
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// A cached probe answer is a stronger fact than the table, so a plain `tsa
+/// list` shows the served date over the measured one, and says where it came
+/// from in the JSON. Nothing is asked: the cache is read.
+#[test]
+fn tsa_list_prefers_a_cached_probe_answer_to_the_table() {
+    let repo = Repo::new();
+    repo.init();
+    let anchor = repo.anchors().join("freetsa.pem");
+    let added = repo.run_time(&[
+        "tsa",
+        "add",
+        "https://freetsa.org/tsr",
+        "--id",
+        "freetsa",
+        "--anchor",
+        &pstr(&anchor),
+    ]);
+    assert!(added.status.success(), "{}", text(&added.stderr));
+    // The cache only accepts a published root's SHA-256 at the entry's width.
+    let fingerprint = git_time_core::presets::find("freetsa")
+        .and_then(|preset| preset.fingerprints.last().copied())
+        .expect("a published root")
+        .replace(':', "")
+        .to_ascii_lowercase();
+    let entry = repo.xdg.path().join("git-time/probe/freetsa");
+    std::fs::create_dir_all(entry.parent().expect("the cache dir")).expect("cache dir");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock")
+        .as_secs();
+    std::fs::write(&entry, format!("2030-01-01\t{now}\t{fingerprint}\n")).expect("write the entry");
+
+    let listing = ok(&repo.run_time(&["tsa", "list"]));
+    let line = listing
+        .lines()
+        .find(|line| line.starts_with("freetsa "))
+        .unwrap_or_else(|| panic!("the freetsa line: {listing}"));
+    assert!(line.contains("fetch 2030-01-01"), "the served date: {line}");
+    let json = ok(&repo.run_time(&["tsa", "list", "--json"]));
+    let value: serde_json::Value = serde_json::from_str(&json).expect("JSON");
+    assert_eq!(value[0]["not_after_source"], "probe");
+    assert_eq!(value[0]["not_after"], "2030-01-01");
+}
+
+/// A hand-edited value that is not a fingerprint is refused with the key
+/// named, before anything is fetched.
+#[test]
+fn a_hand_edited_fingerprint_is_refused() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    git(
+        repo.path(),
+        &[
+            "config",
+            "--local",
+            "time.tsa.acme.fingerprint",
+            "DEAD:BEEF",
+        ],
+    );
+
+    let refused = repo.fetch_anchor("acme");
+    assert_eq!(refused.status.code(), Some(2), "{}", text(&refused.stderr));
+    let stderr = text(&refused.stderr);
+    assert!(stderr.contains("time.tsa.acme.fingerprint"), "{stderr}");
+    assert!(stderr.contains("is not a fingerprint"), "{stderr}");
+    assert_eq!(
+        stderr.matches("git time:").count(),
+        1,
+        "one prefix: {stderr}"
+    );
+    assert!(!repo.anchors().join("acme.pem").exists());
 }
 
 /// A published root refuses a different one, leaves no anchor behind, and names

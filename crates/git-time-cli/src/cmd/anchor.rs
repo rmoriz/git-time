@@ -171,13 +171,13 @@ async fn fetch(
         Ok(Some(value)) => match crate::cmd::tsa::validate_fingerprint(&value) {
             Ok(value) => Some(value),
             Err(reason) => {
-                return Exit::config(format!(
-                    "git time anchor: `time.tsa.{id}.fingerprint` holds {reason}"
-                ));
+                return Exit::config(format!("{reason} (in `time.tsa.{id}.fingerprint`)"));
             }
         },
         Ok(None) => None,
-        Err(error) => return Exit::config(format!("git time anchor: {error}")),
+        Err(error) => {
+            return Exit::config(format!("{error} (reading `time.tsa.{id}.fingerprint`)"));
+        }
     };
 
     // A preset's issuers belong to its bundle: without them a reply that stops
@@ -225,10 +225,20 @@ async fn fetch(
             expires,
             added,
             roots,
+            compared,
         } => {
             println!("anchor {id}: {added} root(s) appended, {roots} now pinned");
-            // An appended root was matched by something, so the pin is checked.
-            (sha256, expires, Some(false))
+            // An appended root was matched by something only when `compared`;
+            // one that rode along with an older pinned root was not.
+            (
+                sha256,
+                expires,
+                if accepted_named || compared {
+                    Some(false)
+                } else {
+                    None
+                },
+            )
         }
         super::accept::Applied::FirstPin {
             fingerprint,
@@ -384,10 +394,9 @@ fn confirm(repo: &Repo, id: &str, fingerprint: Option<&str>) -> Exit {
             super::anchors::fingerprint(root)
         );
     }
-    let marked = match repo.config_non_empty(&format!("time.tsa.{id}.tofu")) {
-        Ok(Some(_)) => true,
-        Ok(None) => false,
-        Err(error) => return Exit::config(format!("git time anchor: {error}")),
+    let marked = match crate::cmd::tsa::marked(repo, id) {
+        Ok(marked) => marked,
+        Err(exit) => return exit,
     };
     if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, Some(false)) {
         return exit;

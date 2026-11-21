@@ -306,13 +306,15 @@ pub(crate) async fn pin(
         Ok(Some(value)) => match crate::cmd::tsa::validate_fingerprint(&value) {
             Ok(value) => Some(value),
             Err(reason) => {
-                return Err(Exit::config(format!(
-                    "git time {command}: `{configured_key}` holds {reason}"
-                )));
+                return Err(Exit::config(format!("{reason} (in `{configured_key}`)")));
             }
         },
         Ok(None) => None,
-        Err(error) => return Err(Exit::config(format!("git time {command}: {error}"))),
+        Err(error) => {
+            return Err(Exit::config(format!(
+                "{error} (reading `{configured_key}`)"
+            )));
+        }
     };
     match anchors::fetch_chain(authority.anchor_url, authority.chain).await {
         Ok(bytes) => match install_anchor(
@@ -369,9 +371,16 @@ pub(crate) async fn pin(
                 expires,
                 added,
                 roots,
+                compared,
             } => {
-                // An appended root was matched by something, so it is checked.
-                marked = Some(false);
+                // An appended root was matched by something only when
+                // `compared`; one that rode along with an older pinned root
+                // was not, so the marker then stays.
+                if accepted_named || compared {
+                    marked = Some(false);
+                } else {
+                    marked = None;
+                }
                 println!(
                     "anchor {}: {added} root(s) appended, {roots} now pinned",
                     authority.name
