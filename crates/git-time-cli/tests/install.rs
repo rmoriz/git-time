@@ -1242,6 +1242,53 @@ fn doctor_problems_no_root_valid_now() {
 /// The same stale bundle on a *preset* id: the way out is `tsa restore`, and it
 /// only fetches because an all-expired bundle is not covered. A root that is
 /// pinned and named but expired used to make `restore` skip the fetch and exit 0,
+#[test]
+fn doctor_keeps_naming_an_unconfirmed_pin() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.config("time.tsa.stub.tofu", "true");
+    let root = fingerprint_colon(&first_der(&read(&repo.authority.ca)));
+
+    let doctor = repo.run_time(&["doctor"]);
+    let stdout = text(&doctor.stdout);
+    assert_eq!(doctor.status.code(), Some(1), "{stdout}");
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("anchor stub: tofu "))
+        .unwrap_or_else(|| panic!("the tofu line: {stdout}"));
+    assert!(line.contains(&root), "the root to compare: {line}");
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("anchor confirm stub "))
+        .unwrap_or_else(|| panic!("the hint: {stdout}"));
+    assert_eq!(
+        hint,
+        format!(
+            "problem: `anchor stub` is pinned but was never compared (confirm it: git time \
+             anchor confirm stub {root})"
+        )
+    );
+
+    // The JSON carries the marker as a field of the anchor object.
+    let json = repo.run_time(&["doctor", "--json"]);
+    assert_eq!(json.status.code(), Some(1), "{}", text(&json.stdout));
+    let value: serde_json::Value =
+        serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
+    assert_eq!(value["anchors"][0]["tofu"], true, "{value}");
+
+    // Confirming clears the line, the problem and the exit.
+    assert!(
+        repo.run_time(&["anchor", "confirm", "stub"])
+            .status
+            .success()
+    );
+    let after = repo.run_time(&["doctor"]);
+    assert_eq!(after.status.code(), Some(0), "{}", text(&after.stdout));
+    let stdout = text(&after.stdout);
+    assert!(!stdout.contains("tofu"), "{stdout}");
+    assert!(!stdout.contains("anchor confirm"), "{stdout}");
+}
+
 /// so the hint was inert and doctor kept failing.
 #[test]
 fn doctor_hint_for_a_preset_actually_restores() {

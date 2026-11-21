@@ -871,6 +871,84 @@ fn many_insecure_authorities_warn_on_one_capped_line() {
 }
 
 #[test]
+fn a_tofu_pin_warns_at_seal_time() {
+    let repo = Repo::new();
+    git(repo.path(), &["config", "time.tsa.stub.tofu", "true"]);
+
+    let output = git_output(repo.path(), &["commit", "--allow-empty", "-m", "tofu"], b"");
+    assert!(
+        output.status.success(),
+        "on-failure = warn keeps the commit: {}",
+        text(&output.stderr)
+    );
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains("1 authority is pinned without a comparison (stub)"),
+        "the authority is named: {stderr}"
+    );
+    assert!(
+        stderr.contains("git time anchor confirm stub"),
+        "the way out is named: {stderr}"
+    );
+    // One line for all of them, five named and the rest counted.
+    for extra in 1..=6 {
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("time.tsa.extra{extra}.url"),
+                "http://127.0.0.1:1/tsr",
+            ],
+        );
+        git(
+            repo.path(),
+            &[
+                "config",
+                &format!("time.tsa.extra{extra}.anchor"),
+                &pstr(&repo.authority.bundle()),
+            ],
+        );
+        git(
+            repo.path(),
+            &["config", &format!("time.tsa.extra{extra}.tofu"), "true"],
+        );
+    }
+    let wide = git_output(
+        repo.path(),
+        &["commit", "--allow-empty", "-m", "many tofu"],
+        b"",
+    );
+    assert!(wide.status.success(), "{}", text(&wide.stderr));
+    let stderr = text(&wide.stderr);
+    assert!(
+        stderr.contains("7 authorities are pinned without a comparison ("),
+        "all seven are counted: {stderr}"
+    );
+    assert!(stderr.contains("and 2 more)"), "only five named: {stderr}");
+    assert_eq!(
+        stderr.matches("pinned without a comparison").count(),
+        1,
+        "one line, not one per authority: {stderr}"
+    );
+}
+
+#[test]
+fn an_unmarked_pin_is_quiet_at_seal_time() {
+    let repo = Repo::new();
+    let output = git_output(
+        repo.path(),
+        &["commit", "--allow-empty", "-m", "no tofu"],
+        b"",
+    );
+    assert!(output.status.success(), "{}", text(&output.stderr));
+    assert!(
+        !text(&output.stderr).contains("pinned without a comparison"),
+        "{}",
+        text(&output.stderr)
+    );
+}
+
+#[test]
 fn an_insecure_authority_warns_at_seal_time() {
     let repo = Repo::new();
     git(

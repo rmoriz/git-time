@@ -21,17 +21,22 @@
 //! correctly. Only when *no* configured authority has a usable anchor does the
 //! seal refuse.
 //!
-//! TSA keys are `time.tsa.<id>.url`, `.anchor`, `.alg`, `.policy`, `.timeout`
-//! and `.insecure-http`. The id is the text between `time.tsa.` and the last
-//! dot, so an id cannot contain a dot but may contain any other character git
-//! accepts. An anchor or url *key* that is missing is still an error: a
+//! TSA keys are `time.tsa.<id>.url`, `.anchor`, `.alg`, `.policy`, `.timeout`,
+//! `.insecure-http` and `.tofu`. The id is the text between `time.tsa.` and the
+//! last dot, so an id cannot contain a dot but may contain any other character
+//! git accepts. An anchor or url *key* that is missing is still an error: a
 //! half-configured TSA would otherwise only fail at seal time. `alg` defaults to
-//! `sha256`, `timeout` to six seconds per attempt and `insecure-http` to false.
+//! `sha256`, `timeout` to six seconds per attempt, `insecure-http` and `tofu` to
+//! false.
 //!
 //! `.insecure-http = true` records that a plain `http://` endpoint was accepted
 //! on purpose. The token is verified against the pinned anchor either way, so
 //! this changes no verdict; it only makes the risk visible — one warning per
 //! insecure authority while the policy is loaded, which is seal time.
+//!
+//! `.tofu = true` records that the pin had nothing to compare when it was made
+//! (`git time anchor confirm` clears it). Like `insecure-http` it changes no
+//! verdict, so all of them warn on one capped line at load time instead.
 //!
 //! Durations accept `500ms`, `10s` and bare seconds. Relative anchor paths are
 //! resolved against the repository, because the config holding them is
@@ -127,6 +132,9 @@ pub struct TsaConfig {
     pub policy: Option<String>,
     /// Whether the endpoint was accepted as plain `http://`.
     pub insecure_http: bool,
+    /// Whether the pin was never compared with the authority's own publication
+    /// (`time.tsa.<id>.tofu`).
+    pub tofu: bool,
     /// Per-attempt timeout.
     pub timeout: Duration,
 }
@@ -345,6 +353,39 @@ impl Policy {
                 list
             );
         }
+        // A pin that had nothing to compare still verifies, so the seal is not
+        // the place to fail — but the comparison is the thing a reader may
+        // forget, and here is where a standing one is noticed. Same cap.
+        let unconfirmed: Vec<&TsaConfig> = policy.tsas.iter().filter(|tsa| tsa.tofu).collect();
+        if !unconfirmed.is_empty() {
+            const NAMED: usize = 5;
+            let shown: Vec<&str> = unconfirmed
+                .iter()
+                .take(NAMED)
+                .map(|tsa| tsa.id.as_str())
+                .collect();
+            let mut list = shown.join(", ");
+            if unconfirmed.len() > shown.len() {
+                list.push_str(&format!(", and {} more", unconfirmed.len() - shown.len()));
+            }
+            let first = shown.first().copied().unwrap_or("<id>");
+            eprintln!(
+                "rfc3161: warning: {} {} pinned without a comparison ({}); run \
+                 `git time anchor confirm {first}`{} to record it — the token verifies either way",
+                unconfirmed.len(),
+                if unconfirmed.len() == 1 {
+                    "authority is"
+                } else {
+                    "authorities are"
+                },
+                list,
+                if unconfirmed.len() == 1 {
+                    ""
+                } else {
+                    " and the rest"
+                }
+            );
+        }
         Ok(policy)
     }
 
@@ -381,6 +422,7 @@ struct TsaFields {
     alg: Option<String>,
     policy: Option<String>,
     insecure_http: Option<String>,
+    tofu: Option<String>,
     timeout: Option<String>,
 }
 
@@ -424,6 +466,7 @@ fn read_tsas(entries: &[(String, String)]) -> Result<Vec<TsaConfig>, ConfigError
             "alg" => &mut fields.alg,
             "policy" => &mut fields.policy,
             "insecure-http" => &mut fields.insecure_http,
+            "tofu" => &mut fields.tofu,
             "timeout" => &mut fields.timeout,
             // Unknown fields are left alone, so a newer writer's key does not
             // stop an older reader.
@@ -476,6 +519,10 @@ fn read_tsas(entries: &[(String, String)]) -> Result<Vec<TsaConfig>, ConfigError
             None => false,
             Some(value) => parse_bool(value, &format!("{TSA_PREFIX}{id}.insecure-http"))?,
         };
+        let tofu = match fields.tofu.as_deref().filter(|value| !value.is_empty()) {
+            None => false,
+            Some(value) => parse_bool(value, &format!("{TSA_PREFIX}{id}.tofu"))?,
+        };
         tsas.push(TsaConfig {
             id,
             url,
@@ -483,6 +530,7 @@ fn read_tsas(entries: &[(String, String)]) -> Result<Vec<TsaConfig>, ConfigError
             alg,
             policy,
             insecure_http,
+            tofu,
             timeout,
         });
     }
@@ -654,5 +702,34 @@ mod tests {
             Some(OnFailure::Fail)
         );
         assert!(parse_enum("fial", "k", "`warn` or `fail`", &values).is_err());
+    }
+
+    /// The marker is a plain bool: absent means false, a git spelling is read,
+    /// and junk is refused with the key named.
+    #[test]
+    fn tofu_is_a_defaulted_bool() {
+        let entry = |tofu: &str| {
+            [
+                (
+                    "time.tsa.acme.url".to_owned(),
+                    "https://a.example/tsr".to_owned(),
+                ),
+                ("time.tsa.acme.anchor".to_owned(), "a.pem".to_owned()),
+                ("time.tsa.acme.tofu".to_owned(), tofu.to_owned()),
+            ]
+        };
+        assert!(!read_tsas(&entry("")).expect("unset")[0].tofu);
+        assert!(read_tsas(&entry("yes")).expect("set")[0].tofu);
+        assert!(!read_tsas(&entry("off")).expect("off")[0].tofu);
+        let missing = [
+            (
+                "time.tsa.acme.url".to_owned(),
+                "https://a.example/tsr".to_owned(),
+            ),
+            ("time.tsa.acme.anchor".to_owned(), "a.pem".to_owned()),
+        ];
+        assert!(!read_tsas(&missing).expect("absent")[0].tofu);
+        let error = read_tsas(&entry("maybe")).expect_err("junk");
+        assert!(error.to_string().contains("time.tsa.acme.tofu"), "{error}");
     }
 }

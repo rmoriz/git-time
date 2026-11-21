@@ -4,12 +4,13 @@
 //! binary is, which hooks directory git uses, the state of every hook this tool
 //! owns (`ours`, `chained`, `foreign`, `absent`, `not-executable`, `dangling`),
 //! whether `time.gate` agrees with each installed `pre-*` hook, how many
-//! authorities are configured, and each anchor's path, SHA-256 fingerprint and
-//! first root's expiry.
+//! authorities are configured, and each anchor's path, SHA-256 fingerprint,
+//! first root's expiry and whether the pin was ever compared.
 //!
 //! These things make it exit `1`: no authority at all, an anchor that is missing,
 //! unreadable or not a parseable certificate bundle, an anchor bundle with no
-//! root valid now, a HEAD block naming a root this machine has not pinned, a gate
+//! root valid now, an anchor pinned without a comparison (a `tofu` marker), a
+//! HEAD block naming a root this machine has not pinned, a gate
 //! that disagrees with the hooks name by name, an unknown `time.gate` value, a
 //! shim or preserve that lost its execute bit, and a dangling symlink at a hook
 //! name. A shim that
@@ -226,6 +227,7 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "unparseable": false,
                     "roots": 0,
                     "expired": 0,
+                    "tofu": false,
                 }));
             }
             Ok(bytes) => {
@@ -238,6 +240,14 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                 let url = repo
                     .config_non_empty(&format!("time.tsa.{id}.url"))
                     .map_err(Exit::config)?;
+                // A pin that had nothing to compare when it was made. It still
+                // verifies, so it is a standing finding rather than a failure —
+                // but nothing else in the repository ever disturbs it, so this
+                // is where it has to stay visible.
+                let tofu = repo
+                    .config_non_empty(&format!("time.tsa.{id}.tofu"))
+                    .map_err(Exit::config)?
+                    .is_some();
                 // The same load the policy does, so a bundle that is only
                 // PEM-shaped is a problem here rather than `Untrusted` at
                 // the next commit.
@@ -266,6 +276,27 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                         "anchor {id}: no `time.tsa.{id}.url` configured, so the policy \
                          refuses it (run: git time tsa add <url> --id {id})"
                     ));
+                }
+                if tofu {
+                    // The root the confirmation is about: the first one, so the
+                    // hint carries a value `confirm` accepts rather than the
+                    // SHA-256 of the whole file.
+                    let root = crate::cmd::anchor::root_certificates(&path)
+                        .and_then(|roots| roots.into_iter().next());
+                    match root {
+                        Some(root) => {
+                            let value = trust::fingerprint(&root);
+                            report.say(format!("anchor {id}: tofu {value}"));
+                            report.problem(format!(
+                                "`anchor {id}` is pinned but was never compared (confirm it: \
+                                 git time anchor confirm {id} {value})"
+                            ));
+                        }
+                        None => report.problem(format!(
+                            "`anchor {id}` is pinned but was never compared (confirm it: \
+                             git time anchor confirm {id})"
+                        )),
+                    }
                 }
                 let mut roots = 0;
                 let mut expired = 0;
@@ -356,6 +387,7 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     "unparseable": parse.is_err(),
                     "roots": roots,
                     "expired": expired,
+                    "tofu": tofu,
                 }));
             }
         }
