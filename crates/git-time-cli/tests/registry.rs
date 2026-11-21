@@ -1053,6 +1053,144 @@ fn a_bad_policy_oid_is_refused_at_add_time() {
     );
 }
 
+/// A first pin with nothing to compare is marked, and the marker survives a
+/// re-fetch of the same root: stability is not confirmation.
+#[test]
+fn a_tofu_first_pin_is_marked_and_stays_marked() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+
+    let first = repo.fetch_anchor("acme");
+    assert!(first.status.success(), "{}", text(&first.stderr));
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu").as_deref(),
+        Some("true"),
+        "the pin says it had nothing to compare"
+    );
+    assert!(
+        text(&first.stdout).contains("anchor confirm")
+            || text(&first.stderr).contains("anchor confirm"),
+        "the way out is printed: {}",
+        text(&first.stdout)
+    );
+
+    // The same root served again is still the same unconfirmed pin.
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert_eq!(repo.config("time.tsa.acme.tofu").as_deref(), Some("true"));
+}
+
+/// An accepted root clears the marker: a human named it.
+#[test]
+fn an_accept_clears_the_marker() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert_eq!(repo.config("time.tsa.acme.tofu").as_deref(), Some("true"));
+
+    let served = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let accepted = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "acme",
+            "--insecure-http",
+            "--accept",
+            &served,
+        ],
+        &repo.fetch_ca(),
+    );
+    assert!(accepted.status.success(), "{}", text(&accepted.stderr));
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// `anchor confirm` is where the out-of-band comparison is recorded: it prints
+/// what it confirmed and clears the marker.
+#[test]
+fn confirm_clears_the_marker_and_names_the_root() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let root = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+
+    let confirmed = repo.run_time(&["anchor", "confirm", "acme"]);
+    assert!(confirmed.status.success(), "{}", text(&confirmed.stderr));
+    assert!(
+        text(&confirmed.stdout).contains(&root),
+        "{}",
+        text(&confirmed.stdout)
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+
+    // The value form names the root too, and works on a bundle already confirmed.
+    assert!(repo.fetch_anchor("acme").status.success());
+    let by_value = repo.run_time(&["anchor", "confirm", "acme", &root]);
+    assert!(by_value.status.success(), "{}", text(&by_value.stderr));
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// A value the bundle does not carry confirms nothing, and the marker stays.
+#[test]
+fn confirm_refuses_a_root_the_bundle_lacks() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+
+    let wrong = "00:".repeat(19) + "00";
+    let refused = repo.run_time(&["anchor", "confirm", "acme", &wrong]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains(&wrong),
+        "{}",
+        text(&refused.stderr)
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu").as_deref(), Some("true"));
+}
+
+/// Confirming an unmarked pin is not an error: it says there was nothing to
+/// clear.
+#[test]
+fn confirm_on_an_unmarked_pin_says_so() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert!(
+        repo.run_time(&["anchor", "confirm", "acme"])
+            .status
+            .success()
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+
+    let again = repo.run_time(&["anchor", "confirm", "acme"]);
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert!(
+        text(&again.stdout).contains("not"),
+        "it says the pin was not marked: {}",
+        text(&again.stdout)
+    );
+}
+
+/// Confirming an id with no bundle is a refusal, since there is nothing to read.
+#[test]
+fn confirm_without_a_bundle_exits_one() {
+    let repo = Repo::new();
+    repo.init();
+    repo.add_tsa("acme", "https://acme.example/tsr");
+    let refused = repo.run_time(&["anchor", "confirm", "acme"]);
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+}
+
 #[test]
 fn anchor_fetch_pins_the_bundle_and_flips_the_listing() {
     let mut repo = Repo::new();
@@ -2786,9 +2924,15 @@ fn fetching_a_first_pin_prints_it_in_full() {
         "the whole fingerprint, not an ellipsis: {label}"
     );
     // And the anchor line names the file it was stored in and its SHA-256.
+    let anchor_line = lines
+        .iter()
+        .find(|line| line.contains("/acme.pem"))
+        .expect("the anchor line");
+    assert!(anchor_line.contains("sha256 "), "{stdout}");
+    // The way to record a comparison follows.
     assert!(
-        lines[1].contains("/acme.pem") && lines[1].contains("sha256 "),
-        "{stdout}"
+        stdout.contains("anchor confirm acme "),
+        "the confirmation command: {stdout}"
     );
 }
 

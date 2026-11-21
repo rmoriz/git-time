@@ -1685,6 +1685,31 @@ fn local_set(repo: &Repo, key: &str, value: &str) -> Result<(), Exit> {
     git_stdout(repo, &["config", "--local", key, value]).map(|_| ())
 }
 
+/// Remove one local config key, tolerating a key that is not there.
+///
+/// `git_stdout` folds every git exit into a usage error, so whether there was a
+/// value to remove is asked first rather than read off the failure.
+fn local_unset(repo: &Repo, key: &str) -> Result<(), Exit> {
+    if local_get(repo, key)?.is_none() {
+        return Ok(());
+    }
+    git_stdout(repo, &["config", "--local", "--unset", key]).map(|_| ())
+}
+
+/// Record or clear the trust-on-first-use marker of `id`.
+///
+/// `Some(true)` marks a pin that had nothing to compare, `Some(false)` clears it
+/// on a confirmation, and `None` leaves it alone: a re-fetch of the same root
+/// says nothing about whether anyone ever checked it.
+pub(crate) fn mark_tofu(repo: &Repo, id: &str, marked: Option<bool>) -> Result<(), Exit> {
+    let key = format!("time.tsa.{id}.tofu");
+    match marked {
+        Some(true) => local_set(repo, &key, "true"),
+        Some(false) => local_unset(repo, &key),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{accepted, already_enabled, initial, pin_state, rotated};

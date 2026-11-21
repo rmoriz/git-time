@@ -289,6 +289,12 @@ pub(crate) async fn pin(
     let mut fingerprint_mismatch = false;
     let mut unusable = false;
     let mut missing_anchor = None;
+    // Whether a human named the root in this run.
+    let accepted_named = accept.contains_key(authority.name);
+    // What the marker becomes: `Some(true)` for a first pin with nothing to
+    // compare, `Some(false)` once something confirmed the root, `None` to leave
+    // it as it is.
+    let mut marked: Option<bool> = None;
     let named_roots: &[String] = named
         .get(authority.name)
         .map(Vec::as_slice)
@@ -327,6 +333,7 @@ pub(crate) async fn pin(
                 // visible: the reader has to be able to see that the fetch was
                 // checked, not just that a file appeared. The line names the
                 // published value that matched, so a rotation is visible too.
+                marked = Some(false);
                 println!("{}: root fingerprint matches {expected}", authority.name);
                 println!(
                     "anchor {}: {} fingerprint {}",
@@ -343,7 +350,11 @@ pub(crate) async fn pin(
             } => {
                 // A root the block named, or one already pinned (a rotation a
                 // human accepted earlier): the bundle is the same root with new
-                // chain material.
+                // chain material. An accept in this run is a naming, so it
+                // clears the marker.
+                if accepted_named {
+                    marked = Some(false);
+                }
                 println!("anchor {}: chain material updated", authority.name);
                 println!(
                     "anchor {}: {} fingerprint {}",
@@ -359,6 +370,8 @@ pub(crate) async fn pin(
                 added,
                 roots,
             } => {
+                // An appended root was matched by something, so it is checked.
+                marked = Some(false);
                 println!(
                     "anchor {}: {added} root(s) appended, {roots} now pinned",
                     authority.name
@@ -378,7 +391,8 @@ pub(crate) async fn pin(
             } => {
                 // Trust on first use: the printed value is the only thing that
                 // makes the first pin reviewable, so it is said loudly and in
-                // full.
+                // full, together with the command that records a comparison.
+                marked = Some(true);
                 println!(
                     "{}: no published root fingerprint (trust on first use); the fetched root is \
                      {} — compare it with the authority's own publication",
@@ -398,7 +412,9 @@ pub(crate) async fn pin(
                 expires,
                 accepted: true,
             } => {
-                // The accept overrode a published value that did not match.
+                // The accept overrode a published value that did not match; a
+                // human named the root, so the pin is checked.
+                marked = Some(false);
                 println!(
                     "{}: the accepted root {} was pinned, overriding the published fingerprint",
                     authority.name,
@@ -458,6 +474,7 @@ pub(crate) async fn pin(
     if !path.exists() {
         missing_anchor = Some(path);
     }
+    crate::cmd::tsa::mark_tofu(repo, authority.name, marked)?;
     Ok(Pinned {
         id: authority.name,
         kept,

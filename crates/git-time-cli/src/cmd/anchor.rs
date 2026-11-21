@@ -69,6 +69,13 @@ pub enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Record that a trust-on-first-use pin was compared out of band.
+    Confirm {
+        /// The TSA id the pin belongs to.
+        id: String,
+        /// The root that was compared. Defaults to every root in the bundle.
+        fingerprint: Option<String>,
+    },
 }
 
 /// The name of the lock file, in the repository root.
@@ -95,6 +102,7 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
                 pin(&repo)
             }
         }
+        Command::Confirm { id, fingerprint } => confirm(&repo, &id, fingerprint.as_deref()),
     }
 }
 
@@ -110,6 +118,10 @@ pub async fn run(directory: Option<PathBuf>, command: Command) -> Exit {
 /// first certificate may be a signing leaf, and the pinned bundle plus the served
 /// one are merged rather than overwritten, so a retired root survives a
 /// generation change and the evidence naming it stays readable.
+///
+/// A first pin nothing could be checked against is marked (`time.tsa.<id>.tofu`)
+/// until [`confirm`] records that a person compared it. A re-fetch of the same
+/// root leaves the mark, because stability is not confirmation.
 async fn fetch(
     repo: &Repo,
     url: &str,
@@ -148,6 +160,9 @@ async fn fetch(
         ));
     }
     let pinned_before = target.exists();
+    // Whether a human named the root in this run. A confirmed root clears the
+    // marker even when it is nothing new: the naming is the point.
+    let accepted_named = accept.is_some();
 
     // The expectation a person stored when the section was written. A hand-edited
     // value that is not a fingerprint would compare as garbage, so it is refused
@@ -178,7 +193,7 @@ async fn fetch(
     // The fingerprint every line reports is a **root**: a leaf first in the
     // bundle is not what the pin is checked against, so printing it would call a
     // leaf "the fetched root".
-    let (sha256, expires) = match super::accept::apply(
+    let (sha256, expires, marked) = match super::accept::apply(
         id,
         &target,
         &bytes,
@@ -212,7 +227,8 @@ async fn fetch(
             roots,
         } => {
             println!("anchor {id}: {added} root(s) appended, {roots} now pinned");
-            (sha256, expires)
+            // An appended root was matched by something, so the pin is checked.
+            (sha256, expires, Some(false))
         }
         super::accept::Applied::FirstPin {
             fingerprint,
@@ -225,7 +241,10 @@ async fn fetch(
                  {} — compare it with the authority's own publication",
                 super::accept::root_label(&fingerprint, expires.as_deref())
             );
-            (sha256, expires)
+            println!(
+                "anchor {id}: then record the comparison: git time anchor confirm {id} {fingerprint}"
+            );
+            (sha256, expires, Some(true))
         }
         super::accept::Applied::FirstPin {
             fingerprint,
@@ -238,25 +257,33 @@ async fn fetch(
                  with",
                 super::accept::root_label(&fingerprint, expires.as_deref())
             );
-            (sha256, expires)
+            (sha256, expires, Some(false))
         }
         super::accept::Applied::Replaced {
             fingerprint: _,
             sha256,
             expires,
-            ..
+            matched,
         } => {
             if pinned_before {
                 println!("anchor {id}: chain material updated");
             }
-            (sha256, expires)
+            // A match against a publication clears the marker, and so does an
+            // accepted root; a re-fetch that only matched the root already
+            // pinned says nothing new.
+            (
+                sha256,
+                expires,
+                if accepted_named {
+                    Some(false)
+                } else {
+                    matched.map(|_| false)
+                },
+            )
         }
     };
-    println!(
-        "anchor {id}: {} sha256 {}",
-        target.display(),
-        super::accept::root_label(&sha256, expires.as_deref())
-    );
+    // Before the marker is written: it is itself a `time.tsa.<id>` key, and a
+    // marked orphan is still an orphan.
     match anchors::section_exists(repo, id) {
         Ok(true) => {}
         Ok(false) => eprintln!(
@@ -266,6 +293,14 @@ async fn fetch(
         ),
         Err(exit) => return exit,
     }
+    if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, marked) {
+        return exit;
+    }
+    println!(
+        "anchor {id}: {} sha256 {}",
+        target.display(),
+        super::accept::root_label(&sha256, expires.as_deref())
+    );
     Exit::ok()
 }
 
@@ -293,6 +328,76 @@ struct Row {
     not_after: Option<String>,
     /// Every root of the bundle, in file order.
     roots: Option<Vec<anchors::RootRow>>,
+}
+
+/// Record that the pin of `id` was compared with the authority's publication.
+///
+/// This is the whole point of the marker: the printed fingerprint of a
+/// trust-on-first-use pin is only reviewable by a person, and until now nothing
+/// recorded that the comparison happened. Nothing about trust changes — the
+/// bundle already verifies — so the only work is reading what the pin holds,
+/// naming it, and dropping the marker.
+///
+/// With a fingerprint the bundle must carry that root: a confirmation naming a
+/// root nobody pinned would be a lie. The bare form confirms the whole bundle
+/// and names every root, so the transcript says what was signed off. A pin that
+/// was never marked is not an error, only worth saying.
+fn confirm(repo: &Repo, id: &str, fingerprint: Option<&str>) -> Exit {
+    if let Err(exit) = validate_id("anchor", id) {
+        return exit;
+    }
+    let fingerprint = match fingerprint.map(crate::cmd::tsa::validate_fingerprint) {
+        Some(Ok(fingerprint)) => Some(fingerprint),
+        Some(Err(reason)) => return Exit::usage(format!("git time anchor: {reason}")),
+        None => None,
+    };
+    let target = match anchors::target(repo, id) {
+        Ok(target) => target,
+        Err(exit) => return exit,
+    };
+    let Some(roots) = root_certificates(&target) else {
+        return Exit::seal(format!(
+            "git time anchor: no readable bundle at {}; pin it first with `git time anchor fetch`",
+            target.display()
+        ));
+    };
+    let confirmed: Vec<&Vec<u8>> = match &fingerprint {
+        Some(value) => {
+            let matching: Vec<&Vec<u8>> = roots
+                .iter()
+                .filter(|root| super::accept::matches(value, root))
+                .collect();
+            if matching.is_empty() {
+                return Exit::seal(format!(
+                    "git time anchor: `{value}` is not a root of {}; the marker was left alone",
+                    target.display()
+                ));
+            }
+            matching
+        }
+        None => roots.iter().collect(),
+    };
+    for root in &confirmed {
+        println!(
+            "anchor {id}: confirmed {} sha256 {}",
+            git_time_core::trust::sha1_fingerprint(root),
+            super::anchors::fingerprint(root)
+        );
+    }
+    let marked = match repo.config_non_empty(&format!("time.tsa.{id}.tofu")) {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => return Exit::config(format!("git time anchor: {error}")),
+    };
+    if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, Some(false)) {
+        return exit;
+    }
+    if marked {
+        println!("anchor {id}: the pin is marked as compared");
+    } else {
+        println!("anchor {id}: the pin was not marked as unconfirmed; nothing to clear");
+    }
+    Exit::ok()
 }
 
 /// One line per configured anchor, or the same fields as JSON.
