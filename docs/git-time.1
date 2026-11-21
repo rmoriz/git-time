@@ -543,12 +543,21 @@ The date carries
 .B (expires soon)
 in its last 90 days and
 .B EXPIRED
-past it; a published root that is not pinned here has no certificate to read
-and shows a cached probe answer instead, in the words
+past it; three sources answer it in this order: the pinned bundle, then a
+cached probe answer in the words
 .B tsa select
-uses and judged against the one instant the listing took, or
+uses and judged against the one instant the listing took, then the date the
+preset table measured for the row, in a word of its own,
+.BR "listed \fIdate\fR" ,
+.BR "listed expires \fIdate\fR"
+or
+.BR "listed EXPIRED" .
+The table is only the last word, and
 .B \-
-for a row the cache cannot answer.
+is left where even it has nothing; its dates are re\-measured with
+.B \-\-refresh
+at release, and a row within a year of its date is rotated or dropped before
+the next tag.
 A pinned row whose authority serves a root the local bundle does not hold
 appends
 .BR ! :
@@ -674,10 +683,16 @@ one in its last 90 days reads
 .BR "pin expires \fIdate\fR" ,
 a bundle whose every root is past reads
 .BR EXPIRED ,
-and a published root not pinned on this machine reads
-.BR "pin \-" ;
+and a published root not pinned on this machine reads the date the table
+measured for it, in a word of its own,
+.BR "listed \fIdate\fR" ,
+.BR "listed expires \fIdate\fR"
+or
+.BR "listed EXPIRED" ;
 .B enter
-pins it. A root that disagrees with the table is a mismatch and a refusal.
+pins it. The bundle, then a probe, then the table, so nothing measured ever
+outranks a local fact. A root that disagrees with the table is a mismatch and
+a refusal.
 .B tofu
 is a custom row's tier until its own bundle is pinned: nothing was published
 to compare, so the first pin can only be reviewed through the fingerprint
@@ -688,7 +703,7 @@ once every root in it is past.
 A live terminal replaces that wording with
 .B …
 and then the served date, so
-.B pin \-
+.B listed
 is what the line prompt keeps.
 .PP
 Every authority that publishes a root is also probed in the background, four at

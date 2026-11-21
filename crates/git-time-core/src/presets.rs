@@ -75,6 +75,20 @@
 //! and `certum` had `5C:58:46:8D:…` where the endpoint chains to
 //! `07:E0:32:E0:…` (`Certum Trusted Network CA`).
 //!
+//! # When the roots expire
+//!
+//! Each row also carries the `notAfter` of its newest published root. It is a
+//! measurement of the same kind as the fingerprints, taken at release through
+//! `tsa preset list --refresh`, and the one value here that goes stale on its
+//! own — a test fails once a date passes. A row within a year of its date is
+//! rotated or dropped before the tag; a root that has already expired is a
+//! release that was cut too late.
+//!
+//! The date is display material only and the weakest there is: a pinned bundle
+//! and a probe both win over it, it never decides a matching, and a listing says
+//! `listed <date>` so it cannot be read as a pin. A pin keeps printing the
+//! fetched certificate's own date.
+//!
 //! # Why some presets are plain http
 //!
 //! The token is signed by the authority and verified against the pinned root, so
@@ -213,6 +227,8 @@ pub const PRESETS: [Preset; 21] = [
         curated: false,
     },
     Preset {
+        // The live list also carries `certum-legacy`, naming exactly this
+        // endpoint; an authority keeps one row, so it is not repeated here.
         name: "certum",
         url: "http://time.certum.pl",
         anchor_url: "http://time.certum.pl",
@@ -327,9 +343,6 @@ pub const PRESETS: [Preset; 21] = [
         anchor_path: None,
         curated: false,
     },
-    // The owner's live-TSA list, minus the endpoints already above. Its
-    // `certum-legacy` entry is skipped: it names exactly the `certum` endpoint,
-    // and a second row for one endpoint would be two ids for one authority.
     Preset {
         name: "globalsign-advanced",
         url: "http://rfc3161timestamp.globalsign.com/advanced",

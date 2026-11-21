@@ -1294,6 +1294,41 @@ fn tsa_list_marks_an_expired_root() {
     assert!(authority.contains("2020-02-01 expired"), "{listing}");
 }
 
+/// Where the date came from is a machine field too: a consumer must not take
+/// the table's measurement for a date read off a certificate.
+#[test]
+fn json_names_where_the_not_after_came_from() {
+    let repo = Repo::new();
+    repo.init();
+    repo.add_tsa("freetsa", "https://freetsa.example/tsr");
+    repo.add_tsa("custom", "https://custom.example/tsr");
+
+    let stdout = ok(&repo.run_time(&["tsa", "list", "--json"]));
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    let rows = value.as_array().expect("a list");
+    let row = |id: &str| {
+        rows.iter()
+            .find(|row| row["id"] == id)
+            .unwrap_or_else(|| panic!("`{id}` in {stdout}"))
+    };
+
+    // A preset with no bundle answers from its row, and says so.
+    assert_eq!(row("freetsa")["not_after"], "2041-03-07");
+    assert_eq!(row("freetsa")["not_after_source"], "preset");
+    // A custom authority publishes nothing, so neither field has an answer.
+    assert!(row("custom")["not_after"].is_null(), "{stdout}");
+    assert!(row("custom")["not_after_source"].is_null(), "{stdout}");
+}
+
+/// A pinned bundle outranks the table, and the source makes that visible.
+#[test]
+fn json_names_a_bundle_as_the_date_source() {
+    let repo = Repo::with_pinned_stub();
+    let stdout = ok(&repo.run_time(&["tsa", "list", "--json"]));
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("JSON");
+    assert_eq!(value[0]["not_after_source"], "bundle", "{stdout}");
+}
+
 /// The date is a machine field of its own, day-only, next to the fingerprint.
 #[test]
 fn json_carries_not_after() {

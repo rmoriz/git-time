@@ -299,6 +299,8 @@ struct Row {
     fingerprint: Option<String>,
     /// That root's date as `YYYY-MM-DD`, or the table's when nothing is pinned.
     not_after: Option<String>,
+    /// Where `not_after` came from: `bundle`, `preset`, or nothing.
+    not_after_source: Option<&'static str>,
     insecure_http: bool,
     /// Every root of the bundle, in file order.
     roots: Option<Vec<anchors::RootRow>>,
@@ -347,17 +349,17 @@ fn list(repo: &Repo, json: bool) -> Exit {
         // The authority line speaks about the newest root still valid, the same
         // choice `tsa preset list` makes: fingerprint and date describe the same
         // certificate, and neither depends on where append order put it.
-        let fingerprint = roots
-            .as_deref()
-            .and_then(|roots| looming(roots, now))
-            .map(|root| root.fingerprint.clone());
-        // The table is the weakest date source: it answers where the bundle
-        // does not, and only for an id a preset knows.
-        let not_after = roots
-            .as_deref()
-            .and_then(|roots| looming(roots, now))
-            .map(|root| root.not_after.clone())
-            .or_else(|| presets::find(&id).and_then(|preset| preset.not_after.map(str::to_owned)));
+        let first = roots.as_deref().and_then(|roots| looming(roots, now));
+        let fingerprint = first.map(|root| root.fingerprint.clone());
+        // The bundle is the strongest date source; the table is the weakest one
+        // and only answers where the bundle does not, for an id a preset knows.
+        let (not_after, not_after_source) = match first {
+            Some(root) => (Some(root.not_after.clone()), Some("bundle")),
+            None => match presets::find(&id).and_then(|preset| preset.not_after) {
+                Some(date) => (Some(date.to_owned()), Some("preset")),
+                None => (None, None),
+            },
+        };
         rows.push(Row {
             id,
             url,
@@ -366,6 +368,7 @@ fn list(repo: &Repo, json: bool) -> Exit {
             anchored,
             fingerprint,
             not_after,
+            not_after_source,
             insecure_http,
             roots,
         });
@@ -397,6 +400,7 @@ fn list(repo: &Repo, json: bool) -> Exit {
                     "anchored": row.anchored,
                     "fingerprint": row.fingerprint,
                     "not_after": row.not_after,
+                    "not_after_source": row.not_after_source,
                     "insecure_http": row.insecure_http,
                     "roots": roots,
                 })
@@ -410,17 +414,14 @@ fn list(repo: &Repo, json: bool) -> Exit {
         }
     } else {
         for row in &rows {
-            // The bundle is the source whenever it parsed, even for a dead root,
-            // so its `EXPIRED` always shows; the table only answers without one.
-            let date = match row.roots.is_some() {
-                true => {
-                    let first = row.roots.as_deref().and_then(|roots| looming(roots, now));
-                    anchors::expiry_text(first.map_or("-", |root| root.not_after.as_str()), now)
+            // The bundle leads whenever it answered, so its `EXPIRED` always
+            // shows; the table's own word keeps a measurement apart from a fact.
+            let date = match row.not_after_source {
+                Some("bundle") => {
+                    anchors::expiry_text(row.not_after.as_deref().unwrap_or("-"), now)
                 }
-                false => row
-                    .not_after
-                    .as_deref()
-                    .map_or_else(|| "-".to_owned(), |date| picker::listed(date, now)),
+                Some(_) => picker::listed(row.not_after.as_deref().unwrap_or("-"), now),
+                None => "-".to_owned(),
             };
             println!(
                 "{} {} {} {} {} {} ({}){}",
@@ -2117,7 +2118,11 @@ mod tests {
         use crate::cmd::probe::Cached;
 
         let _guard = crate::cmd::probe::tests::xdg_lock();
-        crate::cmd::probe::tests::xdg();
+        // Repointed by no other locked test, but a reader is cheap: hold the
+        // directory so a stray repoint cannot send a write and a read apart.
+        let base = crate::cmd::probe::tests::xdg().to_path_buf();
+        let hold = || unsafe { std::env::set_var("XDG_CONFIG_HOME", &base) };
+        hold();
         let _ = crate::cmd::probe::forget("freetsa");
         let now = jiff::Timestamp::now();
 
@@ -2163,6 +2168,7 @@ mod tests {
         // cached answer: a failed refresh must not blink it off.
         let _ = crate::cmd::probe::store("freetsa", &foreign, now);
         for cell in [Cell::Failed, Cell::Pending, Cell::Idle, Cell::Unpublished] {
+            hold();
             assert!(
                 rotated(preset, Some(&roots), cell, now),
                 "the last answer still rotates"
@@ -2170,6 +2176,7 @@ mod tests {
         }
         let _ = crate::cmd::probe::store("freetsa", &held, now);
         for cell in [Cell::Failed, Cell::Pending, Cell::Idle, Cell::Unpublished] {
+            hold();
             assert!(
                 !rotated(preset, Some(&roots), cell, now),
                 "the last answer is still held"
@@ -2182,6 +2189,7 @@ mod tests {
         assert!(!rotated(preset, Some(&[]), Cell::Known(foreign), now));
         let _ = crate::cmd::probe::forget("freetsa");
         for cell in [Cell::Failed, Cell::Pending, Cell::Idle, Cell::Unpublished] {
+            hold();
             assert!(!rotated(preset, Some(&roots), cell, now));
         }
     }

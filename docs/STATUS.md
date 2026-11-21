@@ -13,6 +13,9 @@ A later release adds its own heading above this one.
   git already stores instead of hashing it back in. `git time log | head` on a 149-commit
   repository went from 0.18 s to 0.07 s.
 
+- A row that publishes a root also carries the `notAfter` of its newest published one, measured at
+  release and shown as `listed <date>` where neither a bundle nor a cached answer says anything. A
+  test fails once a preset date passes, so a stale row reaches a release decision instead of a user.
 - `tsa select` and `tsa preset list` show the expiry a published authority is actually serving
   when no root is pinned here, so a rotation is visible before it is accepted. The answer is cached
   for seven days under `$XDG_CONFIG_HOME/git-time/probe/`, and `--refresh` (or `r`) is the one path
@@ -147,6 +150,7 @@ operator section.
 | `verify --openssl` embeds the roots the block names plus all pinned intermediates, judged with `-attime` | `verify --openssl` | shipped |
 | the expiry column marks past and near dates and reads them from the local bundle | `tsa list`, `tsa select`, `tsa preset list` | shipped |
 | a served date is probed, cached for a week, and shown apart from a pin | probe, tsa select, tsa preset list | shipped |
+| a preset's own newest-root expiry is shown as `listed <date>` when nothing local answers, re-measured at release and failing a test once past | `presets`, `tsa list`, `tsa preset list`, `tsa select` | shipped |
 | a preset keeps a list of published roots, so an accepted rotation is recorded at release time | `presets` | shipped |
 | the refusal vocabulary and the anchor line are specified | `docs/format.md` | shipped |
 

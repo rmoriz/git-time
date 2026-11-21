@@ -192,8 +192,10 @@ Register an authority in the local config. The id derives from the host and is r
 List the configured authorities with their URL, algorithm and anchor path, or delete a whole
 `time.tsa.<id>` section. Each line then carries the newest root's fingerprint and expiry date
 (`-` where there is no root), `anchored` or `missing`, and `insecure-http` when it applies; every
-root of the bundle follows on an indented `root` line. `remove` exits `1` when the id is unknown.
-Both exit `2` on usage or config.
+root of the bundle follows on an indented `root` line. Where the bundle is missing and the id is a
+preset, the row falls back to the date that preset measured, in the same `listed <date>` wording the
+preset listing uses, and `--json` names the source in `not_after_source` (`bundle`, `preset` or
+null). `remove` exits `1` when the id is unknown. Both exit `2` on usage or config.
 
 ### `git time tsa preset list [--refresh]` / `git time tsa preset add <name> [--accept <id>=<fingerprint>]`
 
@@ -210,9 +212,13 @@ not an error).
 Each row is: name, endpoint, algorithm, scope, the newest fingerprint the authority publishes, the
 newest root's expiry date, and `anchored` or `missing`. The scope is `default`, `opt-in` or
 `custom`; the last names a `time.tsa.<id>` section no built-in row covers, and those rows follow the
-built-ins. The date carries `(expires soon)` in its last 90 days and `EXPIRED` past it; where no
-published root is pinned here the column shows a cached probe answer in the picker's words (`fetch
-<date>`, `fetch expires <date>`, `fetch EXPIRED`) or `-` for a row the cache cannot answer. A pinned
+built-ins. The date carries `(expires soon)` in its last 90 days and `EXPIRED` past it, and three
+sources answer it in this order: the pinned bundle, then a cached probe answer in the picker's words
+(`fetch <date>`, `fetch expires <date>`, `fetch EXPIRED`), then the date the preset table measured
+for that row, in a word of its own: `listed <date>`, `listed expires <date>` or `listed EXPIRED`. The
+table is only ever the last word, and `-` is left where even it has nothing. The `listed` dates are
+measured at release with `--refresh`; a row within a year of its date is rotated or dropped before
+the next tag, and a test fails once a date passes rather than a user finding out. A pinned
 row whose authority serves a root the local bundle does not hold appends ` !` to the date: that
 authority has rotated, and the answer is a review. A plain run only ever reads, so it never prints
 `?`. Among the rows with no local pin, `?` and `…` come from `--refresh`, the latter only when an
@@ -230,8 +236,9 @@ way the cache is the only write — a probe pins nothing.
 A custom row with no bundle reads `tofu`, and one whose whole bundle is past reads `EXPIRED`, in the
 table and in the selector. `git time anchor fetch <url> --id <id> [--insecure-http]` is the pin, and
 with nothing published to compare it prints the fingerprint in full, which is all a first review has
-to weigh. `not pinned` is the wording for a built-in that publishes no root; no built-in is in that
-position any more, so `not pinned` never appears.
+to weigh. `not pinned` is the wording for a built-in that publishes no root; every built-in now
+carries a `listed` date, so `not pinned` only shows for a row whose date was dropped when its root
+was.
 
 The `default` scope marks the curated pair — `freetsa` and `digicert`, both pinned against a
 measured root. It is what the selector recommends, not a preselection; `install` writes it only
@@ -355,9 +362,12 @@ the early versions, saying so in one line.
 The `pin` column is the trust tier: the root is checked against the table when it is pinned for a
 built-in and a mismatch is a refusal. The date is the newest root's `notAfter`; a root in its last
 90 days reads `pin expires <date>` and a bundle whose every root is past reads `EXPIRED`, so the
-row is due a rotation before the answer refuses the fetch. `pin -` is a published root that is not
-pinned on this machine yet, and `enter` pins it; the probe below replaces the wording with `…` and
-then the served date on a live terminal, so `pin -` is what the line prompt keeps.
+row is due a rotation before the answer refuses the fetch. A published root that is not pinned on
+this machine yet reads the date the preset table measured for it, in a word of its own: `listed
+<date>`, `listed expires <date>` inside its last 90 days or `listed EXPIRED` past it; `enter` pins it.
+The bundle, then a probe, then the table, so nothing measured ever outranks a local fact; the probe
+below replaces the wording with `…` and then the served date on a live terminal, so `listed` is what
+a line prompt without a cached answer keeps.
 The `tofu` tier is a custom row's until its own bundle is pinned: it publishes nothing to check, so
 there is no published fingerprint to compare and no probe to run, and the first pin can only be
 reviewed by reading the fingerprint `anchor fetch` prints; `git time anchor pin` records the pinned
