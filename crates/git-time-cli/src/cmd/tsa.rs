@@ -521,11 +521,9 @@ fn remove(repo: &Repo, id: &str) -> Exit {
 ///
 /// Nothing was asked (`Cell::Idle`) has no probe date: a row no table knows is
 /// hand-added and reads `tofu`, the picker's word, because it publishes nothing
-/// to pin; `not pinned` is the message for a built-in preset that publishes no
-/// root either, so the missing date reads as the preset's shape and not as a
-/// broken pin. A published built-in with no local certificate only says the
-/// date is missing, `-`. No built-in row publishes nothing any more, so that
-/// branch keeps a unit test instead of a row.
+/// to pin; an undated built-in reads `listed <date>` from the table, and
+/// `not pinned` is the message for one that publishes no root at all (none does
+/// today, so a unit test keeps that branch alive rather than a row).
 ///
 /// A served date carries no certificate of its own, so `now` judges it against
 /// the caller's instant rather than a second clock read.
@@ -1746,13 +1744,16 @@ pub(crate) fn mark_tofu(repo: &Repo, id: &str, marked: Option<bool>) -> Result<(
 
 /// Whether `id`'s pin carries the marker, read in any scope.
 ///
-/// Parsed like the policy parses it — only a value that reads true marks — so
-/// `doctor` and the seal warning cannot disagree about whether a row is quiet.
+/// Parsed exactly like the policy parses it: only a value that reads true marks,
+/// and a value outside the vocabulary is an error rather than a silent `false`,
+/// so `doctor` and the seal warning cannot disagree about whether a row is quiet.
 pub(crate) fn marked(repo: &Repo, id: &str) -> Result<bool, Exit> {
-    Ok(repo
-        .config_non_empty(&format!("time.tsa.{id}.tofu"))
-        .map_err(Exit::config)?
-        .is_some_and(|value| reads_true(&value)))
+    let key = format!("time.tsa.{id}.tofu");
+    match repo.config_non_empty(&key).map_err(Exit::config)? {
+        None => Ok(false),
+        Some(value) => git_time_core::policy::parse_bool(&value, &key)
+            .map_err(|error| Exit::config(error.to_string())),
+    }
 }
 
 #[cfg(test)]

@@ -394,10 +394,10 @@ fn confirm(repo: &Repo, id: &str, fingerprint: Option<&str>) -> Exit {
             super::anchors::fingerprint(root)
         );
     }
-    let marked = match crate::cmd::tsa::marked(repo, id) {
-        Ok(marked) => marked,
-        Err(exit) => return exit,
-    };
+    // Clearing works even from a hand-edited value outside the vocabulary, so
+    // this is read leniently: an unparseable marker counts as marked and is
+    // removed below.
+    let marked = crate::cmd::tsa::marked(repo, id).unwrap_or(true);
     if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, Some(false)) {
         return exit;
     }

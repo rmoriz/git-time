@@ -1301,16 +1301,56 @@ fn doctor_names_a_marked_pin_whose_bundle_is_gone() {
 
     let doctor = repo.run_time(&["doctor"]);
     assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
-    assert!(
-        text(&doctor.stdout).contains("was never compared"),
-        "{}",
-        text(&doctor.stdout)
-    );
+    let stdout = text(&doctor.stdout);
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("was never compared"))
+        .unwrap_or_else(|| panic!("the marker problem: {stdout}"));
+    // `confirm` has nothing to check the value against while the bundle is
+    // gone, so the hint pins it again first.
+    let (fetch, then) = hint
+        .split_once("pin it first: ")
+        .unwrap_or_else(|| panic!("the fetch: {hint}"))
+        .1
+        .split_once(", then: ")
+        .unwrap_or_else(|| panic!("both commands: {hint}"));
+    let then = then.trim_end_matches(')').trim();
+
     let json = repo.run_time(&["doctor", "--json"]);
     let value: serde_json::Value =
         serde_json::from_str(&text(&json.stdout)).expect("doctor --json is JSON");
     assert_eq!(value["anchors"][0]["missing"], true, "{value}");
     assert_eq!(value["anchors"][0]["tofu"], true, "{value}");
+
+    // Both commands are runnable as printed once the bundle is back.
+    std::fs::rename(&moved, &repo.authority.ca).expect("put the anchor back");
+    let fetch = fetch.strip_prefix("git time ").unwrap_or(fetch);
+    let then = then.strip_prefix("git time ").unwrap_or(then);
+    let args: Vec<&str> = fetch.split_whitespace().collect();
+    let fetched = repo.run_time_env(&args, &repo.fetch_ca());
+    assert!(
+        fetched.status.success(),
+        "{fetch}: {}",
+        text(&fetched.stderr)
+    );
+    let args: Vec<&str> = then.split_whitespace().collect();
+    assert!(repo.run_time(&args).status.success(), "{then}");
+    assert!(repo.run_time(&["doctor"]).status.success());
+}
+
+/// A marker outside the vocabulary is a configuration error, not a quiet
+/// `false`: the value is named and the run exits 2, the same as the seal.
+#[test]
+fn doctor_refuses_an_unparseable_tofu_value() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.config("time.tsa.stub.tofu", "maybe");
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(2), "{}", text(&doctor.stderr));
+    let stderr = text(&doctor.stderr);
+    assert!(stderr.contains("time.tsa.stub.tofu"), "{stderr}");
+    assert!(stderr.contains("expected"), "{stderr}");
 }
 
 /// The same stale bundle on a *preset* id: the way out is `tsa restore`, and it
@@ -1467,7 +1507,7 @@ fn doctor_problems_a_head_anchoring_an_unpinned_root() {
     // positional is handed over.
     let expected = format!(
         "HEAD names `anchor stub` fingerprint {fingerprint}, which is not pinned \
-         (git time anchor fetch {} --id stub --accept stub={fingerprint} --insecure-http)",
+         (git time anchor fetch {} --id stub --insecure-http --accept stub={fingerprint})",
         repo.stub.as_ref().expect("a stub").url
     );
     assert!(stdout.contains(&expected), "{stdout}");

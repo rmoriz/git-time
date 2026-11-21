@@ -57,6 +57,23 @@ fn marker(repo: &Repo, id: &str) -> Result<bool, Exit> {
 /// other configured id is fetched by its own URL — the same one a fetch reads,
 /// which the tests can stub — with `--insecure-http` when it is plain HTTP, and
 /// an id the config has lost is configured first.
+/// The command that re-fetches `id` from its configured URL, runnable as
+/// printed, or `None` when the config carries no URL.
+fn fetch_cmd(repo: &Repo, id: &str) -> Option<String> {
+    let url = repo
+        .config_non_empty(&format!("time.tsa.{id}.url"))
+        .ok()
+        .flatten()?;
+    Some(format!(
+        "git time anchor fetch {url} --id {id}{}",
+        if url.starts_with("http://") {
+            " --insecure-http"
+        } else {
+            ""
+        }
+    ))
+}
+
 fn remedy(repo: &Repo, id: &str, fingerprint: &str) -> String {
     let url = repo
         .config_non_empty(&format!("time.tsa.{id}.url"))
@@ -66,13 +83,9 @@ fn remedy(repo: &Repo, id: &str, fingerprint: &str) -> String {
         // The positional of `restore` is a commit, so it must not be given.
         (true, Some(_)) => format!("git time tsa restore --accept {id}={fingerprint}"),
         (true, None) => format!("git time tsa preset add {id}"),
-        (false, Some(url)) => format!(
-            "git time anchor fetch {url} --id {id} --accept {id}={fingerprint}{}",
-            if url.starts_with("http://") {
-                " --insecure-http"
-            } else {
-                ""
-            }
+        (false, Some(_)) => format!(
+            "{} --accept {id}={fingerprint}",
+            fetch_cmd(repo, id).unwrap_or_default()
         ),
         (false, None) => format!("git time tsa add <url> --id {id}"),
     }
@@ -229,10 +242,19 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                 ));
                 let tofu = marker(repo, id)?;
                 if tofu {
-                    report.problem(format!(
-                        "`anchor {id}` is pinned but was never compared (confirm it: \
-                         git time anchor confirm {id})"
-                    ));
+                    // The bundle is gone, so `confirm` has nothing to check the
+                    // value against yet: pin it again first.
+                    let then = format!("git time anchor confirm {id}");
+                    match fetch_cmd(repo, id) {
+                        Some(fetch) => report.problem(format!(
+                            "`anchor {id}` is pinned but was never compared (pin it first: \
+                             {fetch}, then: {then})"
+                        )),
+                        None => report.problem(format!(
+                            "`anchor {id}` is pinned but was never compared (configure it first: \
+                             git time tsa add <url> --id {id}, then: {then})"
+                        )),
+                    }
                 }
                 anchor_reports.push(json!({
                     "id": id,
