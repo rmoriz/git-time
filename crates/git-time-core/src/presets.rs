@@ -192,7 +192,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
-        not_after: None,
+        not_after: Some("2031-11-10"),
         insecure_http: true,
         anchor_path: None,
         curated: true,
@@ -207,7 +207,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["CB:73:94:4C:04:2E:53:BF:C4:57:9D:2F:71:2F:3E:EA:99:FE:43:07"],
-        not_after: None,
+        not_after: Some("2045-10-04"),
         insecure_http: false,
         anchor_path: None,
         curated: false,
@@ -220,7 +220,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["07:E0:32:E0:20:B7:2C:3F:19:2F:06:28:A2:59:3A:19:A7:0F:06:9E"],
-        not_after: None,
+        not_after: Some("2029-12-31"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -235,7 +235,7 @@ pub const PRESETS: [Preset; 21] = [
         fingerprints: &[
             "8E:5B:8B:AE:DC:4D:58:BE:0E:30:1C:CC:B6:ED:17:3C:08:D7:C7:7C:E4:35:09:73:38:9F:F1:AF:A1:1D:7A:65",
         ],
-        not_after: None,
+        not_after: Some("2045-09-23"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -248,7 +248,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["F4:00:42:E2:E5:F7:E8:EF:81:89:FE:D1:55:19:AE:CE:42:C3:BF:A2"],
-        not_after: None,
+        not_after: Some("2045-04-16"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -260,8 +260,11 @@ pub const PRESETS: [Preset; 21] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprints: &["13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"],
-        not_after: None,
+        fingerprints: &[
+            "13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D",
+            "80:94:64:0E:B5:A7:A1:CA:11:9C:1F:DD:D5:9F:81:02:63:A7:FB:D1",
+        ],
+        not_after: Some("2034-12-10"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -274,7 +277,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["44:4D:AE:31:5D:00:21:9C:6A:15:2F:0C:C0:2A:AE:32:3B:F9:C6:AC"],
-        not_after: None,
+        not_after: Some("2039-08-05"),
         insecure_http: false,
         anchor_path: None,
         curated: false,
@@ -290,7 +293,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["E8:9D:08:31:6C:29:D1:15:74:9A:27:ED:58:13:32:CB:0A:B4:D7:9F"],
-        not_after: None,
+        not_after: Some("2043-10-04"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -303,7 +306,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["61:1E:5B:66:2C:59:3A:08:FF:58:D1:4A:E2:24:52:D1:98:DF:6C:60"],
-        not_after: None,
+        not_after: Some("2035-02-09"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -319,7 +322,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["58:81:54:65:3F:9F:C8:5A:37:F5:79:BC:FA:CD:2B:1D:D9:10:84:EE"],
-        not_after: None,
+        not_after: Some("2042-01-21"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -334,8 +337,11 @@ pub const PRESETS: [Preset; 21] = [
         chain: &[],
         alg: "sha256",
         policy: None,
-        fingerprints: &["13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D"],
-        not_after: None,
+        fingerprints: &[
+            "13:9B:1C:71:2F:D1:7C:3C:A5:DA:6E:57:01:AF:BA:01:58:F9:D4:5D",
+            "80:94:64:0E:B5:A7:A1:CA:11:9C:1F:DD:D5:9F:81:02:63:A7:FB:D1",
+        ],
+        not_after: Some("2034-12-10"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -348,7 +354,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["52:42:1A:EA:C4:24:C2:43:5E:7F:53:55:A3:04:37:A3:B1:74:58:79"],
-        not_after: None,
+        not_after: Some("2046-03-21"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -361,7 +367,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["BA:29:41:60:77:98:3F:F4:F3:EF:F2:31:05:3B:2E:EA:6D:4D:45:FD"],
-        not_after: None,
+        not_after: Some("2034-01-16"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -374,7 +380,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["1B:8E:EA:57:96:29:1A:C9:39:EA:B8:0A:81:1A:73:73:C0:93:79:67"],
-        not_after: None,
+        not_after: Some("2042-01-12"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -387,7 +393,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["B7:AB:33:08:D1:EA:44:77:BA:14:80:12:5A:6F:BD:A9:36:49:0C:BB"],
-        not_after: None,
+        not_after: Some("2041-02-12"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -400,7 +406,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["98:98:9F:EE:C1:6A:D7:74:61:54:15:E9:3A:96:3E:A3:EE:F5:FE:4F"],
-        not_after: None,
+        not_after: Some("2040-06-03"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -415,7 +421,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["E7:84:74:90:F7:11:43:FC:CE:F6:F6:5A:30:DA:1F:23:9E:0F:D7:BA"],
-        not_after: None,
+        not_after: Some("2029-02-24"),
         insecure_http: false,
         anchor_path: None,
         curated: false,
@@ -430,7 +436,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["9E:79:CD:4E:A8:C2:79:08:11:D6:DA:43:ED:23:90:A6:CE:FF:35:3C"],
-        not_after: None,
+        not_after: Some("2045-10-26"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -443,7 +449,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["88:21:9A:14:A6:A1:FF:5B:62:25:17:F7:00:1E:C3:02:C3:11:01:D7"],
-        not_after: None,
+        not_after: Some("2031-10-26"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -456,7 +462,7 @@ pub const PRESETS: [Preset; 21] = [
         alg: "sha256",
         policy: None,
         fingerprints: &["93:05:7A:88:15:C6:4F:CE:88:2F:FA:91:16:52:28:78:BC:53:64:17"],
-        not_after: None,
+        not_after: Some("2030-12-31"),
         insecure_http: true,
         anchor_path: None,
         curated: false,
@@ -490,6 +496,40 @@ mod tests {
     fn a_table_row_can_carry_the_date_its_newest_root_expires() {
         let freetsa = find("freetsa").expect("a preset");
         assert_eq!(freetsa.not_after, Some("2041-03-07"));
+    }
+
+    /// Every row carries a date, spelled the one way the listings compare it.
+    #[test]
+    fn every_preset_carries_a_well_formed_not_after() {
+        for preset in &PRESETS {
+            let not_after = preset
+                .not_after
+                .unwrap_or_else(|| panic!("{}", preset.name));
+            assert_eq!(not_after.len(), 10, "{}", preset.name);
+            assert!(
+                not_after.parse::<jiff::civil::Date>().is_ok(),
+                "{}: {not_after}",
+                preset.name
+            );
+        }
+    }
+
+    /// The canary: a root that has expired is a release decision, not a user's
+    /// surprise. A failure here means the row is rotated or dropped, then the
+    /// date is re-measured.
+    #[test]
+    fn no_preset_has_already_expired() {
+        let today = jiff::Timestamp::now()
+            .to_zoned(jiff::tz::TimeZone::UTC)
+            .date();
+        for preset in &PRESETS {
+            let not_after = preset
+                .not_after
+                .expect("a date")
+                .parse::<jiff::civil::Date>()
+                .expect("a date");
+            assert!(not_after > today, "{}: {not_after}", preset.name);
+        }
     }
 
     #[test]
