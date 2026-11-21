@@ -1110,6 +1110,7 @@ pub(crate) fn rows(repo: &Repo) -> Result<&'static [presets::Preset], Exit> {
                 .as_ref()
                 .map(|policy| leak_text(policy.clone())),
             fingerprints: &[],
+            not_after: None,
             insecure_http: section.insecure_http.unwrap_or(false),
             anchor_path: section
                 .anchor
@@ -1941,6 +1942,7 @@ mod tests {
             alg: "sha256",
             policy: None,
             fingerprints: &[],
+            not_after: None,
             insecure_http: true,
             anchor_path: None,
             curated: false,
@@ -2016,6 +2018,7 @@ mod tests {
             alg: "sha256",
             policy: None,
             fingerprints: &[],
+            not_after: None,
             insecure_http: false,
             anchor_path: None,
             curated: false,

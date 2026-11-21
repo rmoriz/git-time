@@ -879,6 +879,7 @@ pub(crate) mod tests {
             alg: "sha256",
             policy: None,
             fingerprints,
+            not_after: None,
             insecure_http: false,
             anchor_path: None,
             curated: false,

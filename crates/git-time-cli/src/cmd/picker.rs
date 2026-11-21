@@ -1189,6 +1189,7 @@ mod tests {
         let missing = frame(
             &picked(),
             &[presets::Preset {
+                not_after: None,
                 insecure_http: false,
                 ..known
             }],
@@ -1226,6 +1227,7 @@ mod tests {
             alg: "sha256",
             policy: None,
             fingerprints: &["05:63:B8:63:0D:62:D7:5A:BB:C8:AB:1E:4B:DF:B5:A8:99:B2:4D:43"],
+            not_after: None,
             insecure_http: true,
             anchor_path: None,
             curated: false,
@@ -1530,6 +1532,7 @@ mod tests {
             alg: "sha256",
             policy: None,
             fingerprints: &[],
+            not_after: None,
             insecure_http: true,
             anchor_path: None,
             curated: false,
@@ -1557,6 +1560,7 @@ mod tests {
             name: "zz-acme",
             url: "https://tsa.acme.example/tsr",
             anchor_url: "",
+            not_after: None,
             insecure_http: false,
             ..unpublished()
         }
