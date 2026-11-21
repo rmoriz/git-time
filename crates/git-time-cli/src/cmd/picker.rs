@@ -573,6 +573,8 @@ pub(crate) fn trust(
         Cell::Idle => {
             if presets::find(preset.name).is_none() {
                 "tofu".to_owned()
+            } else if let Some(not_after) = preset.not_after {
+                listed(not_after, now)
             } else {
                 "pin -".to_owned()
             }
@@ -590,6 +592,20 @@ pub(crate) fn served(cached: &probe::Cached, now: jiff::Timestamp) -> String {
     match anchors::expiry_label(&cached.not_after, now) {
         "(expires soon)" => format!("fetch expires {}", cached.not_after),
         _ => format!("fetch {date}", date = cached.not_after),
+    }
+}
+
+/// The date the table carries, in the same shape and with a word of its own.
+///
+/// The weakest source there is: it is what the authority published on the day
+/// the table was measured, so it never stands where a bundle or a probe answer.
+pub(crate) fn listed(not_after: &str, now: jiff::Timestamp) -> String {
+    if anchors::expired(not_after, now) {
+        return "listed EXPIRED".to_owned();
+    }
+    match anchors::expiry_label(not_after, now) {
+        "(expires soon)" => format!("listed expires {not_after}"),
+        _ => format!("listed {not_after}"),
     }
 }
 
@@ -1176,16 +1192,22 @@ mod tests {
             24,
             80,
         );
-        assert!(rendered.contains("pin "), "{rendered}");
+        assert!(rendered.contains("listed "), "{rendered}");
         // No built-in row is TOFU now, so the table shows the published tier;
         // the other two tiers come from constructed presets, so this does not
         // depend on which anchors the machine running the suite happens to have.
         assert!(!rendered.contains("tofu"), "{rendered}");
         let unpublished = frame(&picked(), &[unpublished()], &Probes::idle(1), 24, 80);
         assert!(unpublished.contains("tofu"), "{unpublished}");
-        // A built-in with nothing pinned here: the `pin -` wording is keyed off
-        // the table, not the publication list.
+        // A built-in with nothing pinned here: the published date is the answer,
+        // keyed off the table, and the row says where it came from.
         let known = *presets::find("digicert").expect("a preset");
+        let rendered_known = frame(&picked(), &[known], &Probes::idle(1), 24, 80);
+        assert!(
+            rendered_known.contains("listed 2031-11-10"),
+            "{rendered_known}"
+        );
+        // A published preset with no date of its own falls back to `pin -`.
         let missing = frame(
             &picked(),
             &[presets::Preset {
@@ -1430,10 +1452,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("`{marker}` in {line:?}"));
             line[..at].chars().count()
         };
-        let short = row_of(&presets::PRESETS[1..2]); // digicert: pinned and `http`
+        let short = row_of(&presets::PRESETS[1..2]); // digicert: `listed` and `http`
         assert_eq!(
             column(&long, "tofu"),
-            column(&short, "pin "),
+            column(&short, "listed "),
             "{long:?} / {short:?}"
         );
         assert_eq!(
@@ -1610,10 +1632,10 @@ mod tests {
         assert_eq!(published_without_bundle().fingerprints, ["AA:BB:CC"]);
     }
 
-    /// The two surfaces judge the "custom" tier by the same predicate: a name no
-    /// table knows is `tofu` on both, whatever its publication list says, and a
-    /// built-in with nothing pinned keeps the `pin -` column wording and the
-    /// listing's `not pinned`.
+    /// The two surfaces judge the row the same way: a name no table knows is
+    /// `tofu` on both whatever its publication list says, and a built-in with
+    /// nothing pinned falls back to the published date, or to `pin -` and the
+    /// listing's `not pinned` when the table has no date either.
     #[test]
     fn both_surfaces_agree_on_an_unpinned_tier() {
         let _home = empty_home();
@@ -1626,18 +1648,24 @@ mod tests {
         );
 
         let known = presets::find("digicert").expect("a preset");
-        assert_eq!(super::trust(known, None, now, Cell::Idle), "pin -");
         assert_eq!(
-            crate::cmd::tsa::pin_state(
-                &presets::Preset {
-                    fingerprints: &[],
-                    ..*known
-                },
-                None,
-                Cell::Idle,
-                false,
-                now
-            ),
+            super::trust(known, None, now, Cell::Idle),
+            "listed 2031-11-10"
+        );
+        assert_eq!(
+            crate::cmd::tsa::pin_state(known, None, Cell::Idle, false, now),
+            "listed 2031-11-10"
+        );
+
+        // A published row the table measured no date for keeps the bare dashes.
+        let undated = presets::Preset {
+            fingerprints: &[],
+            not_after: None,
+            ..*known
+        };
+        assert_eq!(super::trust(&undated, None, now, Cell::Idle), "pin -");
+        assert_eq!(
+            crate::cmd::tsa::pin_state(&undated, None, Cell::Idle, false, now),
             "not pinned"
         );
     }
@@ -1795,16 +1823,18 @@ mod tests {
         );
     }
 
+    /// A published root is not a local one: with no bundle the table's date
+    /// answers instead, and an empty bundle list does not take it away.
     #[test]
-    fn a_published_root_that_is_not_pinned_here_has_no_date() {
+    fn a_published_root_that_is_not_pinned_here_shows_its_listed_date() {
         let preset = presets::find("digicert").expect("a pinned preset");
         assert_eq!(
             super::trust(preset, None, at(2026, 1, 1), Cell::Idle),
-            "pin -"
+            "listed 2031-11-10"
         );
         assert_eq!(
             super::trust(preset, Some(&[]), at(2026, 1, 1), Cell::Idle),
-            "pin -"
+            "listed 2031-11-10"
         );
     }
 
@@ -1846,11 +1876,14 @@ mod tests {
         assert!(line.contains(" … "), "{line:?}");
     }
 
+    /// An idle row with nothing local to say reports the table date, and the
+    /// word keeps it from reading as a pin or a fetch.
     #[test]
-    fn an_idle_row_keeps_the_old_wording() {
+    fn an_idle_row_names_the_listed_date() {
         let _home = empty_home();
         let line = rendered(&probes_with(&[(3, Cell::Idle)]), 3);
-        assert!(line.contains("pin -"), "{line:?}");
+        assert!(line.contains("listed 2029-12-31"), "{line:?}");
+        assert!(!line.contains("pin -"), "{line:?}");
     }
 
     #[test]

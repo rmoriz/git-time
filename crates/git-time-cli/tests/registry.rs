@@ -1769,11 +1769,11 @@ fn preset_list_names_every_preset_and_marks_the_trust_level() {
     );
 }
 
-/// A published root has a fingerprint but no local certificate, so it has no
-/// date to read and says `-`/`(missing)` rather than fetching one — and no
-/// longer says `tofu`.
+/// A published root has a fingerprint and a measured date, but no local
+/// certificate: it reports the table date beside `(missing)` rather than
+/// fetching one, and never says `tofu` or pretends the table is a pin.
 #[test]
-fn preset_list_says_no_date_for_a_published_root_without_a_local_pin() {
+fn preset_list_names_the_table_date_for_a_published_root_without_a_local_pin() {
     let repo = Repo::new();
     repo.init();
 
@@ -1798,17 +1798,19 @@ fn preset_list_says_no_date_for_a_published_root_without_a_local_pin() {
         "the fingerprint is still printed: {listing}"
     );
     assert_eq!(
-        sectigo[5], "-",
-        "a published root without a local pin has no date: {listing}"
+        sectigo[5..7].join(" "),
+        "listed 2045-10-04",
+        "the published date answers instead: {listing}"
     );
-    assert_eq!(sectigo[6], "(missing)", "{listing}");
+    assert_eq!(sectigo[7], "(missing)", "{listing}");
     // The same is true of the curated row, and neither says `tofu`.
     let freetsa = fields("freetsa ");
     assert_eq!(
-        freetsa[5], "-",
-        "a published root without a local pin has no date: {listing}"
+        freetsa[5..7].join(" "),
+        "listed 2041-03-07",
+        "the published date answers instead: {listing}"
     );
-    assert_eq!(freetsa[6], "(missing)", "{listing}");
+    assert_eq!(freetsa[7], "(missing)", "{listing}");
     assert!(!listing.contains("tofu"), "no row is TOFU: {listing}");
 }
 
@@ -1831,7 +1833,35 @@ fn preset_list_says_expired_for_a_dead_pinned_bundle() {
         .unwrap_or_else(|| panic!("the preset line: {listing}"));
     assert!(sectigo.contains("EXPIRED"), "{listing}");
     assert!(!sectigo.contains("not pinned"), "{listing}");
+    assert!(
+        !sectigo.contains("listed"),
+        "the bundle outranks the table: {listing}"
+    );
     assert!(sectigo.contains("(anchored)"), "{listing}");
+}
+
+/// `tsa list` reads its date through the same resolver as `preset list`: the
+/// table answers where no bundle exists, so a configured authority with nothing
+/// pinned still shows what its authority publishes.
+#[test]
+fn tsa_list_falls_back_to_the_table_date() {
+    let repo = Repo::new();
+    repo.init();
+    ok(&repo.run_time(&[
+        "tsa",
+        "add",
+        "https://freetsa.example/tsr",
+        "--id",
+        "freetsa",
+    ]));
+
+    let listing = ok(&repo.run_time(&["tsa", "list"]));
+    let line = listing
+        .lines()
+        .find(|line| line.starts_with("freetsa "))
+        .unwrap_or_else(|| panic!("the authority line: {listing}"));
+    assert!(line.contains("listed 2041-03-07"), "{listing}");
+    assert!(line.contains("missing"), "{listing}");
 }
 
 /// A configured unknown id is a row here too: it says `custom` in the scope
@@ -1968,10 +1998,15 @@ fn preset_list_reads_the_probe_cache_and_only_refreshes_on_demand() {
             .collect()
     };
 
-    // (a) No socket, no entry, and the `-` a published root without a local
-    // certificate already says.
+    // (a) No socket, no entry: the table's own date answers, the weakest
+    // source, with the `(missing)` a published root without a local certificate
+    // already says.
     let plain = ok(&repo.run_time_env(&["tsa", "preset", "list"], &env));
-    assert_eq!(freetsa(&plain)[5], "-", "nothing was asked: {plain}");
+    assert_eq!(
+        freetsa(&plain)[5..7].join(" "),
+        "listed 2041-03-07",
+        "nothing was asked: {plain}"
+    );
     assert_eq!(calls(), 0, "a plain run fetches nothing: {plain}");
     assert!(!entry.exists(), "a plain run writes no cache entry");
 

@@ -297,6 +297,8 @@ struct Row {
     /// The fingerprint of the newest root still valid, when the bundle loads:
     /// the one the authority line speaks about, as `tsa preset list` chooses it.
     fingerprint: Option<String>,
+    /// That root's date as `YYYY-MM-DD`, or the table's when nothing is pinned.
+    not_after: Option<String>,
     insecure_http: bool,
     /// Every root of the bundle, in file order.
     roots: Option<Vec<anchors::RootRow>>,
@@ -349,6 +351,13 @@ fn list(repo: &Repo, json: bool) -> Exit {
             .as_deref()
             .and_then(|roots| looming(roots, now))
             .map(|root| root.fingerprint.clone());
+        // The table is the weakest date source: it answers where the bundle
+        // does not, and only for an id a preset knows.
+        let not_after = roots
+            .as_deref()
+            .and_then(|roots| looming(roots, now))
+            .map(|root| root.not_after.clone())
+            .or_else(|| presets::find(&id).and_then(|preset| preset.not_after.map(str::to_owned)));
         rows.push(Row {
             id,
             url,
@@ -356,6 +365,7 @@ fn list(repo: &Repo, json: bool) -> Exit {
             anchor,
             anchored,
             fingerprint,
+            not_after,
             insecure_http,
             roots,
         });
@@ -365,9 +375,8 @@ fn list(repo: &Repo, json: bool) -> Exit {
         let rows: Vec<Value> = rows
             .iter()
             .map(|row| {
-                // The authority line speaks about the newest live root, as the
-                // text listing does; every root then gets a line of its own.
-                let first = row.roots.as_deref().and_then(|roots| looming(roots, now));
+                // Every root gets a line of its own; the authority lines above
+                // carry the one the choice is about.
                 let roots: Vec<Value> = row
                     .roots
                     .iter()
@@ -387,7 +396,7 @@ fn list(repo: &Repo, json: bool) -> Exit {
                     "anchor": row.anchor.to_string_lossy(),
                     "anchored": row.anchored,
                     "fingerprint": row.fingerprint,
-                    "not_after": first.map(|root| root.not_after.as_str()),
+                    "not_after": row.not_after,
                     "insecure_http": row.insecure_http,
                     "roots": roots,
                 })
@@ -401,8 +410,18 @@ fn list(repo: &Repo, json: bool) -> Exit {
         }
     } else {
         for row in &rows {
-            let first = row.roots.as_deref().and_then(|roots| looming(roots, now));
-            let not_after = first.map_or("-", |root| root.not_after.as_str());
+            // The bundle is the source whenever it parsed, even for a dead root,
+            // so its `EXPIRED` always shows; the table only answers without one.
+            let date = match row.roots.is_some() {
+                true => {
+                    let first = row.roots.as_deref().and_then(|roots| looming(roots, now));
+                    anchors::expiry_text(first.map_or("-", |root| root.not_after.as_str()), now)
+                }
+                false => row
+                    .not_after
+                    .as_deref()
+                    .map_or_else(|| "-".to_owned(), |date| picker::listed(date, now)),
+            };
             println!(
                 "{} {} {} {} {} {} ({}){}",
                 row.id,
@@ -410,7 +429,7 @@ fn list(repo: &Repo, json: bool) -> Exit {
                 row.alg,
                 row.anchor.display(),
                 row.fingerprint.as_deref().unwrap_or("-"),
-                anchors::expiry_text(not_after, now),
+                date,
                 if row.anchored { "anchored" } else { "missing" },
                 if row.insecure_http {
                     " insecure-http"
@@ -512,6 +531,8 @@ pub(crate) fn pin_state(
             picker::Cell::Idle => {
                 if presets::find(preset.name).is_none() {
                     "tofu".to_owned()
+                } else if let Some(not_after) = preset.not_after {
+                    format!("listed {}", anchors::expiry_text(not_after, now))
                 } else if preset.fingerprints.is_empty() {
                     "not pinned".to_owned()
                 } else {
@@ -1954,13 +1975,15 @@ mod tests {
             "tofu"
         );
 
+        // A published row answers from the table before it says `not pinned`.
         let published = presets::find("freetsa").expect("a published preset");
         assert_eq!(
             pin_state(published, None, Cell::Idle, false, jiff::Timestamp::now()),
-            "-"
+            "listed 2041-03-07"
         );
         let unpublished_preset = presets::Preset {
             fingerprints: &[],
+            not_after: None,
             ..*published
         };
         assert_eq!(
@@ -1994,19 +2017,47 @@ mod tests {
         });
         let now = jiff::Timestamp::now();
         assert_eq!(
-            pin_state(&custom, None, served, false, now),
+            pin_state(&custom, None, served.clone(), false, now),
             "fetch 2041-03-07"
         );
         assert_eq!(pin_state(&custom, None, Cell::Pending, false, now), "…");
         assert_eq!(pin_state(&custom, None, Cell::Failed, false, now), "?");
         assert_eq!(pin_state(&custom, None, Cell::Unpublished, false, now), "?");
+
+        // The table is the weakest source: it answers where nothing local does,
+        // and both the bundle and the probe outrank it.
+        let dated = presets::Preset {
+            not_after: Some("2027-05-01"),
+            ..*published
+        };
+        assert_eq!(
+            pin_state(&dated, None, Cell::Idle, false, soon),
+            "listed 2027-05-01"
+        );
+        assert_eq!(
+            pin_state(&dated, Some(&roots), Cell::Failed, false, soon),
+            "2026-12-02 (expires soon)"
+        );
+        assert_eq!(
+            pin_state(&dated, None, served.clone(), false, soon),
+            "fetch 2041-03-07"
+        );
+        // The lookup decides, not the field: a custom row stays TOFU.
+        let custom_dated = presets::Preset {
+            not_after: Some("2027-05-01"),
+            ..custom
+        };
+        assert_eq!(
+            pin_state(&custom_dated, None, Cell::Idle, false, soon),
+            "tofu"
+        );
     }
 
     /// A custom row has no publication list and no bundle, so its `Idle` cell
-    /// must say `tofu`, the picker's word for trust on first use; a built-in
-    /// row keeps the listing's missing-date `-` and the picker's `pin -`.
+    /// must say `tofu`, the picker's word for trust on first use; a built-in row
+    /// has a published date and reports it as the weakest source there is.
     #[test]
-    fn a_custom_row_says_tofu_where_a_builtin_says_a_missing_date() {
+    fn a_custom_row_says_tofu_where_a_builtin_names_its_published_date() {
         use crate::cmd::picker::Cell;
 
         let now = jiff::Timestamp::now();
@@ -2026,10 +2077,13 @@ mod tests {
         assert_eq!(pin_state(&custom, None, Cell::Idle, false, now), "tofu");
 
         let freetsa = presets::find("freetsa").expect("a published preset");
-        assert_eq!(pin_state(freetsa, None, Cell::Idle, false, now), "-");
+        assert_eq!(
+            pin_state(freetsa, None, Cell::Idle, false, now),
+            "listed 2041-03-07"
+        );
         assert_eq!(
             crate::cmd::picker::trust(freetsa, None, now, Cell::Idle),
-            "pin -"
+            "listed 2041-03-07"
         );
     }
 
