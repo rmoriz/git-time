@@ -421,8 +421,9 @@ Each problem is repeated as a
 line.
 .PP
 A missing binary, no authority, a missing, unreadable or unparseable anchor,
-an anchor pinned without a comparison, a gate mismatch, an unknown gate value, a shim or preserved hook without its
-execute bit, and a dangling symlink all exit 1.
+an anchor pinned without a comparison, a gate mismatch, an unknown gate value,
+a shim or preserved hook without its execute bit, and a dangling symlink all
+exit 1.
 A foreign or absent hook alone does not.
 .TP
 .B \-\-json
@@ -507,9 +508,23 @@ plain http.
 Every root of the bundle follows on an indented
 .B root
 line.
+Where the bundle is missing and the id is a preset, the row falls back to the
+last cached probe answer, in the selector's
+.B fetch <date>
+word, and then to the date that preset measured, in the
+.B listed
+word.
+A plain listing opens no socket.
 .TP
 .B \-\-json
 Print the listing as one JSON array.
+The
+.B not_after_source
+field says which source answered
+.RB ( bundle ,
+.BR probe ,
+.B preset
+or null).
 .PP
 Exits 0, or 2 on a configuration error.
 .SS "tsa remove"

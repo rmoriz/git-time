@@ -40,10 +40,10 @@ trust this tool's own crypto.
 everything, `r` asks the authorities again, and digits typed on the prompt line take that selection
 (`1,3-4`, `all`, `none`).
 Authorities already configured start ticked, a `custom` row among them. The `pin` column is the
-trust tier: the root is checked against the table and a mismatch is a refusal. `pin -` is a
-published root that is not pinned on this machine yet, and `enter` pins it on the way out; the
-probe below replaces the wording with `…` and then the served date, so `pin -` is what the line
-prompt keeps.
+trust tier: the root is checked against the table and a mismatch is a refusal. An unpinned
+published root reads the date the table measured, as `listed <date>`, and `enter` pins it; a
+published root the table never dated reads `pin -`. The probe below replaces the wording with `…`
+and then the served date, so the table date is what the line prompt keeps.
 `tofu` is a `custom` row's tier: such a row publishes no root to check, so its first pin is a
 comparison when `tsa add --fingerprint` stored a value and otherwise trust on first use, reviewed by
 reading the fingerprint `git time anchor fetch` prints and recorded with `git time anchor confirm`

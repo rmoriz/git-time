@@ -133,7 +133,7 @@ pin compares and refuses on mismatch; without one the pin is trust on first use,
 `time.tsa.<id>.tofu`, and `doctor` keeps naming it until `git time anchor confirm` records the
 comparison. `anchor fetch` prints the fetched fingerprint, the artifact the comparison is made
 against. Plain-`http` presets record
-`time.tsa.<id>.insecure-http`; both markers share one capped warning
+`time.tsa.<id>.insecure-http`; each marker kind has its own capped warning
 line at seal time.
 
 ## Surviving a root rotation (shipped)

@@ -197,9 +197,11 @@ List the configured authorities with their URL, algorithm and anchor path, or de
 `time.tsa.<id>` section. Each line then carries the newest root's fingerprint and expiry date
 (`-` where there is no root), `anchored` or `missing`, and `insecure-http` when it applies; every
 root of the bundle follows on an indented `root` line. Where the bundle is missing and the id is a
-preset, the row falls back to the date that preset measured, in the same `listed <date>` wording the
-preset listing uses, and `--json` names the source in `not_after_source` (`bundle`, `preset` or
-null). `remove` exits `1` when the id is unknown. Both exit `2` on usage or config.
+preset, the row falls back to the last cached probe answer in the selector's `fetch <date>` word —
+a plain listing opens no socket — and then to the date that preset measured, with the `listed` word
+(`listed expires <date>` in its last 90 days, `listed EXPIRED` past it). `--json` names the source in
+`not_after_source` (`bundle`, `probe`, `preset` or null). `remove` exits `1` when the id is
+unknown. Both exit `2` on usage or config.
 
 ### `git time tsa preset list [--refresh]` / `git time tsa preset add <name> [--accept <id>=<fingerprint>]`
 
