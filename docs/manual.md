@@ -34,6 +34,8 @@ silent fallback to the default.
 | `time.tsa.<id>.anchor` | — | The pinned PEM bundle the tokens are judged against; required. |
 | `time.tsa.<id>.alg` | `sha256` | The imprint and request algorithm: `sha256` or `sha512`. |
 | `time.tsa.<id>.policy` | unset | A TSA policy OID to request; validated before it is written. |
+| `time.tsa.<id>.fingerprint` | unset | The root expected from the next pin (`tsa add --fingerprint`); a mismatch is refused. |
+| `time.tsa.<id>.tofu` | unset | Set when a pin had nothing to compare; `anchor confirm` clears it and `doctor` names it. |
 | `time.tsa.<id>.timeout` | `6s` | Per-attempt timeout. |
 
 Durations accept `500ms`, `10s`, `3m` and bare seconds. A relative anchor path is resolved
@@ -181,11 +183,13 @@ Report what is wired and pinned: the binary, the hooks directory, one state per 
 whether sealing is enabled. Each problem is repeated as a `problem:` line. Exits `0` healthy, `1`
 on any problem, `2` on usage or config.
 
-### `git time tsa add <url> [--id ID] [--anchor PATH] [--alg sha256|sha512] [--policy OID] [--timeout DURATION] [--insecure-http]`
+### `git time tsa add <url> [--id ID] [--anchor PATH] [--alg sha256|sha512] [--policy OID] [--fingerprint FP] [--timeout DURATION] [--insecure-http]`
 
 Register an authority in the local config. The id derives from the host and is restricted to
-`[a-z0-9-]`; a duplicate id is refused without writing. `http://` needs `--insecure-http`. Exits
-`0`, `1` for an existing id, `2` for a bad URL, id, duration or policy.
+`[a-z0-9-]`; a duplicate id is refused without writing. `http://` needs `--insecure-http`.
+`--fingerprint` stores the root you expect (20 or 32 colon-separated hex octets, any case) in
+`time.tsa.<id>.fingerprint`; `add` fetches nothing, so it is the next pin that compares against it.
+Exits `0`, `1` for an existing id, `2` for a bad URL, id, fingerprint, duration or policy.
 
 ### `git time tsa list [--json]` / `git time tsa remove <id>`
 
@@ -250,9 +254,11 @@ Everything else is opt-in.
 
 The table is ordered `default` rows, then `opt-in`, then `custom`. Every built-in row publishes a
 root, so any fetch of one can check it. A custom row publishes nothing, so its `anchor fetch` (the
-step after `tsa add`) falls back to trust on first use and prints the fetched root fingerprint in
-full — that line is what makes the first pin reviewable, and `git time anchor pin` records it in
-`time.anchors-lock` afterwards so a later change is visible.
+step after `tsa add`) has nothing to compare unless `tsa add --fingerprint` stored a value; without
+one the first pin is trust on first use, marked in `time.tsa.<id>.tofu`. The fetch prints the
+fetched root fingerprint in full — that line is what makes the first pin reviewable — and `doctor`
+keeps naming the mark until `git time anchor confirm` records the comparison. `git time anchor pin`
+records the bundle in `time.anchors-lock` afterwards so a later change is visible.
 
 | Preset | Endpoint | Scope | Root |
 |---|---|---|---|
@@ -369,9 +375,13 @@ The bundle, then a probe, then the table, so nothing measured ever outranks a lo
 below replaces the wording with `…` and then the served date on a live terminal, so `listed` is what
 a line prompt without a cached answer keeps.
 The `tofu` tier is a custom row's until its own bundle is pinned: it publishes nothing to check, so
-there is no published fingerprint to compare and no probe to run, and the first pin can only be
-reviewed by reading the fingerprint `anchor fetch` prints; `git time anchor pin` records the pinned
-bundle's fingerprint in `time.anchors-lock` so a later change is caught. Once a bundle is there the
+there is no published fingerprint to compare and no probe to run. Give the fingerprint you got out
+of band to `tsa add --fingerprint` and the first pin is compared against it, refusing a different
+root; without one the pin is trust on first use, marked in `time.tsa.<id>.tofu`, and `doctor` keeps
+naming it — the printed root and `git time anchor confirm <id> <fingerprint>` — until someone
+records that the comparison happened. A re-fetch of the same root does not clear the mark, because
+stability is not confirmation, and `git time anchor pin` records the pinned bundle's fingerprint in
+`time.anchors-lock` so a later change is caught. Once a bundle is there the
 row reads its date like any other, and `EXPIRED` once every root in it is past. `http` marks a
 plain-`http` endpoint; the endpoint of the cursor row is printed in full below the list.
 
@@ -444,6 +454,17 @@ for a bad id, URL or config.
 A root that is neither published by a preset nor already pinned is a rotation: the fetch refuses,
 prints both fingerprints and changes nothing. `--accept` takes the fetched root's bare fingerprint
 (the fetch addresses one id) and appends it next to the retired one.
+
+A first pin with nothing to compare — no preset, no `tsa add --fingerprint` value — is marked in
+`time.tsa.<id>.tofu` and `doctor` reports it. A re-fetch of the same root keeps the mark, and any
+`--accept` or a match against a stored expectation or a publication clears it.
+
+### `git time anchor confirm <id> [<fingerprint>]`
+
+Record that a trust-on-first-use pin was compared with the authority's own publication, and clear
+the marker. Without a fingerprint every root of the bundle is confirmed and printed; with one, that
+root must be in the bundle or nothing is cleared. A pin that was never marked says so and exits `0`;
+an unreadable bundle or a fingerprint it does not carry exits `1`, and a malformed fingerprint `2`.
 
 ### `git time anchor list [--json]`
 
@@ -531,7 +552,8 @@ the lock — while older readers have to keep checking; otherwise upgrading the 
 - **`log` versus `verify`.** `log` reports what is there and exits `0`; `verify` judges and gates.
   Use `verify` in CI and `log` for reading.
 - **Anchors are the trust store.** A token is only as good as its pinned bundle. `anchor pin` is a
-  review artifact: deleting the lock changes no verdict.
+  review artifact: deleting the lock changes no verdict. A pin that had nothing to compare is
+  marked until `anchor confirm` records the comparison; the mark changes no verdict either.
 
 ## Troubleshooting
 
@@ -543,6 +565,8 @@ symlink to a gone target. `hook <name>: foreign` means a shim is not ours. `gate
 means `time.gate` disagrees with the installed `pre-*` hooks; rerun `git time install`. `tsa: 0
 configured` means no authority. `anchor <id>: … missing` or `unparseable` is the bundle to restore.
 `enabled: false` explains a silent hook, and `problems: N` is the count that decides the exit code.
+`anchor <id>: tofu …` is a pin that was never compared: check the printed value against the
+authority's own publication and run the `anchor confirm` command the `problem:` line names.
 
 `doctor --json` carries the same facts for a script; `problems` is the list that decides the exit
 code.

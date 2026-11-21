@@ -25,6 +25,10 @@ A later release adds its own heading above this one.
   it off.
 - The cache only accepts the one entry shape a probe writes; a hand-edited or truncated line is a
   miss and is refetched rather than shown as a date.
+- `tsa add <url> --fingerprint <fp>` stores the expected root, so a custom authority's first pin is
+  a comparison rather than trust on first use. A first pin without one is marked
+  `time.tsa.<id>.tofu`; `doctor` reports it and exits 1, the seal warns on one capped line, and
+  `git time anchor confirm <id> [<fp>]` clears it. A re-fetch of the same root does not.
 - Listing a served date is judged against one instant per run, so a row cannot straddle an expiry.
 - `tsa select` and `tsa preset list` also list a configured `time.tsa.<id>` authority no preset
   knows, after the built-ins and marked `custom` where a scope is shown. Such a row starts
@@ -124,9 +128,12 @@ Presets live in `git_time_core::presets`; `tsa select` and `tsa preset add` writ
 one table. Only `anchor fetch`, `preset add`, `tsa restore` and a selection touch the network, and they all
 honour `GIT_TIME_ANCHOR_FETCH_CMD`. A preset's published root fingerprint is checked before
 it is pinned; a mismatch is refused and leaves the previous anchor alone. An authority without a
-published root is trust on first use at its `anchor fetch`, which prints the fetched fingerprint,
-the only reviewable artifact of the first pin. Plain-`http` presets record
-`time.tsa.<id>.insecure-http`; all of them share one capped warning
+published root can be given an expected fingerprint with `tsa add --fingerprint`, which the next
+pin compares and refuses on mismatch; without one the pin is trust on first use, marked with
+`time.tsa.<id>.tofu`, and `doctor` keeps naming it until `git time anchor confirm` records the
+comparison. `anchor fetch` prints the fetched fingerprint, the artifact the comparison is made
+against. Plain-`http` presets record
+`time.tsa.<id>.insecure-http`; both markers share one capped warning
 line at seal time.
 
 ## Surviving a root rotation (shipped)
@@ -147,6 +154,8 @@ operator section.
 | `--accept` appends ahead of the retired root, deduplicated (bare only when exactly one authority is in play, else `<id>=<fingerprint>`) | `install`, `anchor fetch`, `tsa restore`, `tsa preset add` | shipped |
 | the lock records one line per root, so a rotation is an `added` and a `removed` line | `anchor pin`, `anchor pin --check` | shipped |
 | `doctor` names `no root valid now` and a HEAD-named root that is not pinned | `doctor` | shipped |
+| a first pin with nothing to compare is marked, `doctor` names it with the confirming command, and `anchor confirm` clears it | `anchor fetch`, `anchor confirm`, `doctor` | shipped |
+| `tsa add --fingerprint` makes the next pin a comparison, refusing a different root | `tsa add`, `accept::apply` | shipped |
 | `verify --openssl` embeds the roots the block names plus all pinned intermediates, judged with `-attime` | `verify --openssl` | shipped |
 | the expiry column marks past and near dates and reads them from the local bundle | `tsa list`, `tsa select`, `tsa preset list` | shipped |
 | a served date is probed, cached for a week, and shown apart from a pin | probe, tsa select, tsa preset list | shipped |

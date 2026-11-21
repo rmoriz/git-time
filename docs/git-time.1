@@ -421,7 +421,7 @@ Each problem is repeated as a
 line.
 .PP
 A missing binary, no authority, a missing, unreadable or unparseable anchor,
-a gate mismatch, an unknown gate value, a shim or preserved hook without its
+an anchor pinned without a comparison, a gate mismatch, an unknown gate value, a shim or preserved hook without its
 execute bit, and a dangling symlink all exit 1.
 A foreign or absent hook alone does not.
 .TP
@@ -451,7 +451,7 @@ is absent it is derived from the URL host, so
 becomes
 .BR tsa\-example\-net .
 .SS "tsa add"
-.B git time tsa add \fIurl\fR [ \-\-id \fIID\fR ] [ \-\-anchor \fIPATH\fR ] [ \-\-alg \fIsha256\fR|\fIsha512\fR ] [ \-\-policy \fIOID\fR ] [ \-\-timeout \fIDURATION\fR ] [ \-\-insecure\-http ]
+.B git time tsa add \fIurl\fR [ \-\-id \fIID\fR ] [ \-\-anchor \fIPATH\fR ] [ \-\-alg \fIsha256\fR|\fIsha512\fR ] [ \-\-policy \fIOID\fR ] [ \-\-fingerprint \fIFP\fR ] [ \-\-timeout \fIDURATION\fR ] [ \-\-insecure\-http ]
 .PP
 Register an authority.
 Every value is validated before the first key is written, so a refused add
@@ -478,6 +478,15 @@ Default
 .B \-\-policy \fIOID\fR
 A TSA policy OID to request.
 .TP
+.B \-\-fingerprint \fIFP\fR
+The root fingerprint you expect, 20 or 32 colon\-separated hex octets in any
+case.
+It is stored in
+.B time.tsa.\fIid\fR.fingerprint
+and compared by the next pin;
+.B add
+itself fetches nothing.
+.TP
 .B \-\-timeout \fIDURATION\fR
 Per\-attempt timeout. Default
 .BR 6s .
@@ -487,7 +496,8 @@ Accept a plain
 .B http://
 endpoint and warn that the transport is unprotected.
 .PP
-Exits 0, 1 for an existing id, and 2 for a bad URL, id, duration or policy.
+Exits 0, 1 for an existing id, and 2 for a bad URL, id, fingerprint, duration
+or policy.
 .SS "tsa list"
 .B git time tsa list [ \-\-json ]
 .PP
@@ -832,6 +842,31 @@ Exits 0, 1 for an unusable bundle or a refused rotation, and 2 for a bad id,
 URL or configuration error.
 A bundle for an id without a section is written and warned about as an
 orphan.
+.PP
+A first pin with nothing to compare has no preset and no
+.B tsa add \-\-fingerprint
+value behind it, so it is trust on first use: the fetched root is printed in
+full and
+.B time.tsa.\fIid\fR.tofu
+is set.
+A re\-fetch of the same root keeps the mark, and a match against a stored
+expectation or a publication, or an
+.BR \-\-accept ,
+clears it.
+.BR "git time anchor confirm \fIid\fR"
+records the out\-of\-band comparison the mark is waiting for.
+.SS "anchor confirm"
+.B git time anchor confirm \fIid\fR [ \fIFINGERPRINT\fR ]
+.PP
+Record that a trust\-on\-first\-use pin was compared with the authority's own
+publication, and clear
+.BR time.tsa.\fIid\fR.tofu .
+Without a fingerprint every root of the bundle is confirmed and printed; with
+one, the fingerprint must be a root of the bundle or nothing is cleared.
+A pin that was never marked says so and still exits 0.
+.PP
+Exits 0, 1 for an unreadable bundle or a fingerprint it does not carry, and 2
+for a bad id or fingerprint.
 .SS "anchor list"
 .B git time anchor list [ \-\-json ]
 .PP
@@ -1010,6 +1045,21 @@ or
 .B time.tsa.\fIid\fR.policy
 Unset by default.
 A policy OID to request, validated before it is written.
+.TP
+.B time.tsa.\fIid\fR.fingerprint
+Unset by default.
+The root the next pin expects, 20 or 32 colon\-separated hex octets in any
+case; a different root is refused.
+Written by
+.BR "git time tsa add \-\-fingerprint" .
+.TP
+.B time.tsa.\fIid\fR.tofu
+Unset by default.
+Set when a pin had nothing to compare; cleared by
+.BR "git time anchor confirm" .
+It changes no verdict, so
+.B doctor
+reports it and every marked authority shares one warning line at seal time.
 .TP
 .B time.tsa.\fIid\fR.timeout
 Default
@@ -1236,6 +1286,14 @@ A token is only as good as the bundle pinned under its id, so pin deliberately
 and review a changed fingerprint out of band against the authority's own
 publication.
 The lock is a review artifact, not a trust store.
+A first pin of a custom authority that had no expected fingerprint is marked
+.BR tofu :
+it may be whatever the network handed back, so check it against the authority's
+own publication and
+.BR "git time anchor confirm \fIid\fR \fIfingerprint\fR" .
+The mark changes no verdict, and
+.B doctor
+keeps naming it until it is cleared.
 .PP
 Plain
 .B http://

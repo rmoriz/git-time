@@ -44,8 +44,10 @@ trust tier: the root is checked against the table and a mismatch is a refusal. `
 published root that is not pinned on this machine yet, and `enter` pins it on the way out; the
 probe below replaces the wording with `…` and then the served date, so `pin -` is what the line
 prompt keeps.
-`tofu` is a `custom` row's tier: such a row publishes no root to check, so its first pin can only be
-reviewed by reading the fingerprint `git time anchor fetch` prints. `enter` pins only the built-in
+`tofu` is a `custom` row's tier: such a row publishes no root to check, so its first pin is a
+comparison when `tsa add --fingerprint` stored a value and otherwise trust on first use, reviewed by
+reading the fingerprint `git time anchor fetch` prints and recorded with `git time anchor confirm`
+once `doctor` starts naming it. `enter` pins only the built-in
 rows and keeps a custom one exactly as it is; saving with a custom row unticked removes its section,
 like any other. A section in a wider config scope (a machine-wide `time.tsa.<id>`) has nothing to
 remove locally, so `enter` leaves it there and says so.
@@ -89,7 +91,10 @@ Anchors are per machine, so a clone starts out trusting none of them and `verify
 token `UNTRUSTED` until they are backfilled. `git time tsa restore` reads the authority ids out of
 the evidence — the one part of the setup a clone still has — and pins each one it recognises as a
 preset, checked against that preset's published root. An id that is not a preset carries no URL
-anywhere and is named with the `tsa add`/`anchor fetch` steps instead. `git time anchor pin` then
+anywhere and is named with the `tsa add`/`anchor fetch` steps instead. Give the root you expect to
+`tsa add --fingerprint` and the first pin is a comparison; without one it is trust on first use,
+marked and kept in `git time doctor` until `git time anchor confirm` records the comparison against
+the authority's own publication. `git time anchor pin` then
 records the fingerprints for review, and `git time anchor pin --check` catches a bundle that has
 changed since.
 
