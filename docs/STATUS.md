@@ -4,6 +4,31 @@ Design: `docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md`
 Plan: `docs/superpowers/plans/2026-11-18-git-time-rfc3161.md`
 Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-18-git-time-rfc3161/progress.md`
 
+## Release notes (v0.2.0)
+
+A later release adds its own heading above this one.
+
+- A preset now carries the `notAfter` of its newest published root, measured at release and shown
+  as `listed <date>` where neither a bundle nor a cached answer says anything. A test fails once a
+  date passes, so a stale row reaches a release decision instead of a user.
+- `tsa add <url> --fingerprint <fp>` stores the expected root, so a custom authority's first pin is
+  a comparison rather than trust on first use. A first pin without one is marked
+  `time.tsa.<id>.tofu`; `doctor` reports it and exits 1, the seal warns on one capped line, and
+  `git time anchor confirm <id> [<fp>]` clears it. A re-fetch of the same root does not.
+- The preset table gains `actalis`. Its free endpoint re-dates the token to 2030-09-22 and answers
+  on plain http only (port 443 times out), so the row is opt-in. It chains to the general Actalis
+  Authentication Root CA, not to the TSA root the legal repository advertises; the measured
+  Authentication Root is pinned, and the anchor comes from Actalis's published root and
+  intermediate downloads because a GET of the endpoint leaves the next POST at 503.
+- Every request now carries a `git-time/<version>` `User-Agent`; Actalis's front proxy answers a
+  request without one with 503. A probe reads a preset's anchor URL rather than its endpoint for
+  the same reason.
+- The served date a probe answers now outranks the table in `tsa list` too, and a rotation reply
+  that appends a root nothing compared keeps the unconfirmed pin's marker. `insecure-http` is read
+  strictly there, so a junk value is a configuration error like everywhere else. A marked pin whose
+  bundle is gone names the fetch that restores it before `confirm`, and `confirm` unsets the key in
+  the scope it actually lives in.
+
 ## Release notes (v0.1.0)
 
 A later release adds its own heading above this one.

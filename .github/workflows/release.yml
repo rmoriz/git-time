@@ -22,6 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # A tag that disagrees with the manifest would publish binaries whose
+      # `--version` names another release, and nothing downstream would notice.
+      - name: Tag matches the manifest
+        run: |
+          set -eu
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          }
+
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
         with:
