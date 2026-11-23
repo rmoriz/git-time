@@ -43,7 +43,9 @@ against the repository; `~/` resolves against `HOME`.
 
 `time.required` counts **distinct** authorities. A configured authority whose anchor bundle does
 not load is left out of the seal and recorded as a `Fail` for its id (unless failures are not
-recorded); only when no authority has a usable anchor does the seal refuse.
+recorded); only when no authority has a usable anchor does the seal refuse. The value is never
+stored in a commit: it is read again wherever evidence is judged, so raising it re-grades seals made
+earlier and lowering it forgives them.
 
 ## Commands
 

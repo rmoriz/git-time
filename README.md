@@ -168,6 +168,12 @@ X-RFC3161-Fail: id=freetsa; reason=timeout
 The commit exists, the worktree is clean, `git fsck` is silent, and the artifact says exactly which
 authority failed and why. A dead TSA costs evidence, never a commit.
 
+That default is `time.required = 1`, counted over distinct authorities — with one configured there
+is no redundancy, and such a commit is `under-quorum`, not `sealed`. Raising the key, or setting
+`time.on-failure = fail` or `time.gate = pre-commit`, makes a short quorum refuse instead. The value
+is read at verify time rather than recorded in the commit, so changing it re-grades older seals. The
+full key list is in [the manual](docs/manual.md#configuration).
+
 ## Built-in authorities
 
 `git time tsa select` is how any of these get configured; `git time tsa preset add <name>` writes
@@ -256,8 +262,8 @@ X-RFC3161-Token: ver=1; id=freetsa; …
   carry them; nothing lives in a side ref.
 - **A commit signature is preserved.** A signed commit is re-signed under the same header, so the
   commit stays signed; a signing failure leaves the original untouched.
-- **A dead TSA never costs a commit.** The quorum defaults to one of several, failures are recorded
-  in the block, and the hook exits 0 unless you ask otherwise.
+- **A dead TSA never costs a commit.** The quorum defaults to one of the configured authorities,
+  failures are recorded in the block, and the hook exits 0 unless you ask otherwise.
 
 ## Non-guarantees
 
