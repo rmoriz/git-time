@@ -845,6 +845,10 @@ fn signing_key() -> &'static str {
         let home = TempDir::new().expect("gpg home");
         // SAFETY: set once, before the only gpg runs of this binary.
         unsafe { std::env::set_var("GNUPGHOME", home.path()) };
+        // Leaked on purpose, so the key outlives the tests; the marker lets a
+        // later run reap the agent and the home (`reap_abandoned_agents`).
+        std::fs::write(home.path().join("owner"), std::process::id().to_string())
+            .expect("writes the owner");
         std::mem::forget(home);
 
         gpg(&[
