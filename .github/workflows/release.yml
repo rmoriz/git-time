@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # A tag that disagrees with the manifest would publish binaries whose
       # `--version` names another release, and nothing downstream would notice.
@@ -50,7 +50,7 @@ jobs:
     # fail long before that.
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
@@ -82,7 +82,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Download the artifacts
         uses: actions/download-artifact@v4

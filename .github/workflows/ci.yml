@@ -31,7 +31,7 @@ jobs:
     name: test (ubuntu-latest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
@@ -65,7 +65,7 @@ jobs:
     name: advisories, licenses, bans
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Dependency policy
         uses: EmbarkStudios/cargo-deny-action@v2
