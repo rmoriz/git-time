@@ -1,0 +1,56 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: deps
+    labels: ["dependencies"]
+    groups:
+      # The RustCrypto crates have to move together: der, cms and x509-cert
+      # share one const-oid/spki generation, and rsa pulls sha1 and sha2 along
+      # through its signature types. Separate PRs for them do not compile.
+      rustcrypto:
+        patterns:
+          - sha1
+          - sha2
+          - sha3
+          - rsa
+          - p256
+          - p384
+          - der
+          - spki
+          - const-oid
+          - signature
+          - digest
+          - crypto-bigint
+          - crypto-common
+          - elliptic-curve
+          - ecdsa
+          - primeorder
+          - sec1
+          - cms
+          - x509-cert
+      # Same argument for the sigstore pair, which pins its own x509-cert.
+      sigstore:
+        patterns: ["sigstore-*"]
+      # Patch-level bumps are reviewable in one batch.
+      patch:
+        update-types: ["patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    commit-message:
+      prefix: ci
+    labels: ["dependencies"]

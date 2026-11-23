@@ -1,6 +1,7 @@
 name: CI
 
-# fmt, clippy and the suite on branches and pull requests.
+# fmt, clippy, the suite and the dependency policy on branches and pull
+# requests.
 #
 # The binaries are built once, by `release.yml`, on a version tag: an ordinary
 # push has nobody waiting for four targets, and they cost a scarce macOS runner.
@@ -59,3 +60,15 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+  deny:
+    name: advisories, licenses, bans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features

@@ -1,0 +1,41 @@
+# Policy for `cargo deny check`, run by CI.
+#
+# Advisories are the point of this file: an unpatched RUSTSEC entry fails the
+# build instead of waiting to be noticed. The license list is the set the tree
+# actually carries as of 0.2.0; a dependency under a different license needs a
+# decision here rather than a silent pass. `multiple-versions` stays allowed —
+# the RustCrypto stack legitimately runs generations side by side during a
+# migration — while wildcard requirements do not.
+
+[advisories]
+version = 2
+# A yank is news, not an outage: Cargo.lock pins exact versions.
+yanked = "warn"
+
+[licenses]
+version = 2
+confidence-threshold = 0.93
+allow = [
+  "Apache-2.0",
+  "BSD-1-Clause",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
+  "GPL-2.0-only",
+  "ISC",
+  "LGPL-2.1-or-later",
+  "MIT",
+  "MIT-0",
+  "Unicode-3.0",
+  "Unlicense",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

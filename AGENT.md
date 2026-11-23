@@ -50,6 +50,7 @@ queried in parallel and verified locally before they are stored inside the commi
 cargo test --offline                     # 726 tests + 1 ignored live test
 cargo clippy --offline --workspace --all-targets -- -D warnings
 cargo fmt --all --check
+cargo deny check                         # advisories, licenses, bans, sources
 cargo test -p git-time-cli --test live_tsa -- --ignored --nocapture   # real TSA, needs network
 ```
 
