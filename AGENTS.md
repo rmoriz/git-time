@@ -1,4 +1,4 @@
-# AGENT.md
+# AGENTS.md
 
 Notes for agents (and humans driving them) working in this repository.
 
@@ -70,7 +70,7 @@ cargo test -p git-time-cli --test live_tsa -- --ignored --nocapture   # real TSA
 The version lives in `[workspace.package]` in the root `Cargo.toml`, and `git-time-cli` pins the
 path dependency to it — a bump that misses that crate does not build. A release is one commit
 carrying: both manifests, `Cargo.lock`, the `docs/git-time.1` `.TH` date and version, the README's
-`VERSION=` snippet, the test count in `AGENT.md`, and a `## Release notes (vX.Y.Z)` section above
+`VERSION=` snippet, the test count in `AGENTS.md`, and a `## Release notes (vX.Y.Z)` section above
 the previous one in `docs/STATUS.md`. `git time --version` and the man page have to agree with the
 tag, because the workflow's preflight refuses a disagreement in seconds and nothing downstream
 would notice.
