@@ -1,0 +1,164 @@
+<svg viewBox="0 0 1280 720" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="seal-path-title seal-path-desc"><rect x="0" y="0" width="1280" height="720" fill="#f5f5f5"/>
+        <title id="seal-path-title">How a commit gets sealed, in twelve steps</title>
+        <desc id="seal-path-desc">Sequence diagram: the post-commit hook hashes the stripped commit pre-image, fans out to several RFC 3161 authorities in parallel, verifies each token against pinned anchors before quorum, re-signs the trailer block, writes the object and moves the ref by compare-and-swap.</desc>
+        <defs>
+          <marker id="arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#4f5d75"/>
+          </marker>
+          <marker id="arrow-accent" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#bf4520"/>
+          </marker>
+          <marker id="arrow-link" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+            <polygon points="0 0, 8 3, 0 6" fill="#2e5aa8"/>
+          </marker>
+        </defs>
+
+        <rect width="100%" height="100%" fill="#f5f5f5"/>
+
+        <!-- Lifelines: 120 · 380 · 640 · 900 · 1160 -->
+
+        <!-- Lifelines -->
+        <line x1="120" y1="128" x2="120" y2="644" stroke="rgba(45,49,66,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="380" y1="128" x2="380" y2="644" stroke="rgba(45,49,66,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="640" y1="128" x2="640" y2="644" stroke="rgba(45,49,66,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="900" y1="128" x2="900" y2="644" stroke="rgba(45,49,66,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+        <line x1="1160" y1="128" x2="1160" y2="644" stroke="rgba(45,49,66,0.22)" stroke-width="1" stroke-dasharray="3,3"/>
+
+        <!-- Activation bars -->
+        <rect x="376" y="172" width="8" height="392" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="636" y="214" width="8" height="392" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="896" y="308" width="8" height="46" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <rect x="1156" y="476" width="8" height="46" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+
+        <!-- Messages: draw before labels and boxes -->
+
+        <!-- M1 commit -->
+        <line x1="120" y1="172" x2="376" y2="172" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M2 hook -->
+        <line x1="384" y1="214" x2="636" y2="214" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M3 strip + imprint (self) -->
+        <path d="M 648 256 L 684 256 L 684 288 L 648 288" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M4 TSA fan-out -->
+        <line x1="644" y1="308" x2="896" y2="308" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+
+        <!-- M5 token or fail (return) -->
+        <line x1="904" y1="350" x2="644" y2="350" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- M6 verify (self) -->
+        <path d="M 648 392 L 684 392 L 684 424 L 648 424" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M7 compose + assert + sign (self) -->
+        <path d="M 648 434 L 684 434 L 684 466 L 648 466" fill="none" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M8 write object -->
+        <line x1="644" y1="476" x2="1156" y2="476" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M9 new oid (return) -->
+        <line x1="1156" y1="518" x2="644" y2="518" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+
+        <!-- M10 CAS ref move -->
+        <line x1="644" y1="560" x2="384" y2="560" stroke="#4f5d75" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+        <!-- M11 sealed line (headline) -->
+        <line x1="644" y1="602" x2="120" y2="602" stroke="#bf4520" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+
+        <!-- Message labels: opaque mask 6-8px clear of the stroke -->
+
+        <rect x="220" y="152" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="248" y="161" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GIT COMMIT</text>
+
+        <rect x="468" y="194" width="84" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="510" y="203" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">POST-COMMIT HOOK</text>
+
+        <rect x="692" y="266" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="736" y="275" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">STRIP → P · SHA256</text>
+
+        <rect x="733" y="288" width="78" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="772" y="297" fill="#2e5aa8" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">RFC 3161 REQ ×N</text>
+
+        <rect x="740" y="330" width="64" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="772" y="339" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TOKEN | FAIL</text>
+
+        <rect x="692" y="402" width="102" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="743" y="411" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">CHAIN → ANCHOR · 2/3</text>
+
+        <rect x="692" y="444" width="116" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="750" y="453" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">COMPOSE · ASSERT · SIGN</text>
+
+        <rect x="716" y="456" width="88" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="760" y="465" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">HASH-OBJECT -W -T</text>
+
+        <rect x="746" y="498" width="28" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="760" y="507" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">OID′</text>
+
+        <rect x="475" y="540" width="74" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="512" y="549" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">UPDATE-REF CAS</text>
+
+        <rect x="442" y="582" width="56" height="12" rx="2" fill="#f5f5f5"/>
+        <text x="470" y="591" fill="#bf4520" font-size="8" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SEALED 2/3</text>
+
+        <!-- Actors -->
+
+        <!-- Developer -->
+        <rect x="48" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="48" y="72" width="144" height="56" rx="6" fill="rgba(79,93,117,0.10)" stroke="#5a6580" stroke-width="1"/>
+        <rect x="56" y="80" width="32" height="12" rx="2" fill="transparent" stroke="rgba(90,101,128,0.40)" stroke-width="0.8"/>
+        <text x="72" y="89" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">USER</text>
+        <text x="120" y="104" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Developer</text>
+        <text x="120" y="119" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">one command</text>
+
+        <!-- git -->
+        <rect x="308" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="308" y="72" width="144" height="56" rx="6" fill="#ffffff" stroke="#2d3142" stroke-width="1"/>
+        <rect x="316" y="80" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.30)" stroke-width="0.8"/>
+        <text x="330" y="89" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">GIT</text>
+        <text x="380" y="104" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">git</text>
+        <text x="380" y="119" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">post-commit hook</text>
+
+        <!-- sealer (focal) -->
+        <rect x="568" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="568" y="72" width="144" height="56" rx="6" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <rect x="576" y="80" width="34" height="12" rx="2" fill="transparent" stroke="rgba(191,69,32,0.50)" stroke-width="0.8"/>
+        <text x="593" y="89" fill="#bf4520" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">SEAL</text>
+        <text x="640" y="104" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">git-time</text>
+        <text x="640" y="119" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">local · synchronous</text>
+
+        <!-- TSA set -->
+        <rect x="828" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="828" y="72" width="144" height="56" rx="6" fill="rgba(45,49,66,0.03)" stroke="rgba(45,49,66,0.30)" stroke-width="1"/>
+        <rect x="836" y="80" width="28" height="12" rx="2" fill="transparent" stroke="rgba(45,49,66,0.22)" stroke-width="0.8"/>
+        <text x="850" y="89" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">TSA</text>
+        <text x="900" y="104" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Authorities</text>
+        <text x="900" y="119" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">n pinned · quorum</text>
+
+        <!-- object store -->
+        <rect x="1088" y="72" width="144" height="56" rx="6" fill="#f5f5f5"/>
+        <rect x="1088" y="72" width="144" height="56" rx="6" fill="rgba(45,49,66,0.05)" stroke="#4f5d75" stroke-width="1"/>
+        <rect x="1096" y="80" width="28" height="12" rx="2" fill="transparent" stroke="rgba(79,93,117,0.40)" stroke-width="0.8"/>
+        <text x="1110" y="89" fill="#5a6580" font-size="7" font-family="'Geist Mono', monospace" text-anchor="middle" letter-spacing="0.08em">ODB</text>
+        <text x="1160" y="104" fill="#2d3142" font-size="12" font-weight="600" font-family="'Geist', sans-serif" text-anchor="middle">Object store</text>
+        <text x="1160" y="119" fill="#4f5d75" font-size="9" font-family="'Geist Mono', monospace" text-anchor="middle">fsck-validated</text>
+
+        <!-- Legend -->
+        <line x1="48" y1="648" x2="1232" y2="648" stroke="rgba(45,49,66,0.10)" stroke-width="0.8"/>
+        <text x="48" y="664" fill="#4f5d75" font-size="8" font-family="'Geist Mono', monospace" letter-spacing="0.18em">LEGEND</text>
+
+        <rect x="48" y="678" width="14" height="10" rx="2" fill="rgba(191,69,32,0.08)" stroke="#bf4520" stroke-width="1"/>
+        <text x="68" y="686" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Focal actor</text>
+
+        <rect x="188" y="674" width="4" height="18" fill="rgba(45,49,66,0.06)" stroke="#4f5d75" stroke-width="0.8"/>
+        <text x="200" y="686" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Activation</text>
+
+        <line x1="308" y1="684" x2="336" y2="684" stroke="#2e5aa8" stroke-width="1.2" marker-end="url(#arrow-link)"/>
+        <text x="344" y="686" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">TSA request</text>
+
+        <line x1="476" y1="684" x2="504" y2="684" stroke="#4f5d75" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arrow)"/>
+        <text x="512" y="686" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Return / fail record</text>
+
+        <line x1="672" y1="684" x2="700" y2="684" stroke="#bf4520" stroke-width="1.4" marker-end="url(#arrow-accent)"/>
+        <text x="708" y="686" fill="#4f5d75" font-size="8.5" font-family="'Geist', sans-serif">Seal line on stderr</text>
+
+      </svg>

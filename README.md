@@ -222,6 +222,13 @@ lets an attacker block the authority; an insecure authority keeps printing a war
 
 ## How it works
 
+[![Sequence diagram of the seal path: the post-commit hook strips the trailer block and the
+signature, hashes the pre-image, queries the pinned authorities in parallel, verifies each token
+against its anchor, composes and signs the new commit, then moves the ref by compare-and-swap](docs/seal-path.png)](docs/seal-path.html)
+
+The same twelve steps, with the ordering that makes a seal sound, in
+[full size](docs/seal-path.html) and as a [vector drawing](docs/seal-path.svg).
+
 1. The hook reads the commit git just wrote and strips its trailer block and signature.
 2. It hashes that pre-image: a SHA-256 imprint.
 3. Every configured TSA is queried in parallel over the same imprint, each with its own nonce,
@@ -263,6 +270,8 @@ X-RFC3161-Token: ver=1; id=freetsa; …
 
 ## Documentation
 
+- [Seal path diagram](docs/seal-path.html) — the hook's sequence, twelve steps, rendered from the
+  README image.
 - [Operator manual](docs/manual.md) — every config key, command, exit code and failure mode.
 - [Trailer format](docs/format.md) — the wire format, so another tool can read or write a seal.
 - [Man page](docs/git-time.1) — the commands on one page, in roff.
