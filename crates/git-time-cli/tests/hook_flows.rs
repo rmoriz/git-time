@@ -887,7 +887,7 @@ fn a_tofu_pin_warns_at_seal_time() {
         "the authority is named: {stderr}"
     );
     assert!(
-        stderr.contains("git time anchor confirm stub"),
+        stderr.contains("git time anchor confirm 'stub'"),
         "the way out is named: {stderr}"
     );
     // One line for all of them, five named and the rest counted.
@@ -925,6 +925,12 @@ fn a_tofu_pin_warns_at_seal_time() {
         "all seven are counted: {stderr}"
     );
     assert!(stderr.contains("and 2 more)"), "only five named: {stderr}");
+    // The remedy is per authority: `confirm` takes one id, so the copy-pasteable
+    // form is a placeholder rather than the first id followed by "and the rest".
+    assert!(
+        stderr.contains("run `git time anchor confirm <id>` for each to record it"),
+        "one command per id: {stderr}"
+    );
     assert_eq!(
         stderr.matches("pinned without a comparison").count(),
         1,
@@ -1159,6 +1165,10 @@ fn signing_key() -> &'static str {
         let home = TempDir::new().expect("gpg home");
         // SAFETY: set once, before the only gpg runs of this binary.
         unsafe { std::env::set_var("GNUPGHOME", home.path()) };
+        // Leaked on purpose, so the key outlives the tests; the marker lets a
+        // later run reap the agent and the home (`reap_abandoned_agents`).
+        std::fs::write(home.path().join("owner"), std::process::id().to_string())
+            .expect("writes the owner");
         std::mem::forget(home);
 
         gpg(&[

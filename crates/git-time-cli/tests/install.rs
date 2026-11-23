@@ -1338,6 +1338,76 @@ fn doctor_names_a_marked_pin_whose_bundle_is_gone() {
     assert!(repo.run_time(&["doctor"]).status.success());
 }
 
+/// A first pin admitted by the stored `fingerprint` was compared against it: the
+/// report says the root was pinned, not that chain material was updated.
+#[test]
+fn a_configured_first_pin_says_it_was_pinned() {
+    let repo = Repo::blank();
+    let target = repo.path().join("first-pin.pem");
+    repo.config("time.tsa.freetsa.url", "https://freetsa.org/tsr");
+    repo.config("time.tsa.freetsa.anchor", &pstr(&target));
+    // The served root matches no published value, but the stored one: so the
+    // bundle is a compared first pin, not a refresh of anything.
+    let served = fingerprint_colon(&first_der(&read(&repo.authority.ca)));
+    repo.config("time.tsa.freetsa.fingerprint", &served);
+
+    let installed = repo.run_time_env(&["install"], &repo.fetch_ca());
+    assert!(installed.status.success(), "{}", text(&installed.stderr));
+    let stdout = text(&installed.stdout);
+    assert!(stdout.contains("the root was pinned"), "{stdout}");
+    assert!(
+        !stdout.contains("chain material updated"),
+        "nothing was pinned before: {stdout}"
+    );
+    assert!(target.exists(), "the root was pinned");
+    let marker = git_output(
+        repo.path(),
+        &["config", "--local", "--get", "time.tsa.freetsa.tofu"],
+        b"",
+        &[],
+    );
+    assert!(
+        !marker.status.success(),
+        "the stored value was compared: {}",
+        text(&marker.stdout)
+    );
+}
+
+/// The missing-bundle hint fetches where a preset publishes its bundle, not from
+/// its token endpoint: a GET of `actalis` answers 400 and leaves the following
+/// POST at 503, so the configured `url` would make the hint inert.
+#[test]
+fn doctor_hint_fetches_a_presets_anchor_url() {
+    let repo = Repo::blank();
+    assert!(repo.install().status.success());
+    repo.config("time.tsa.actalis.url", "http://timestamp.actalis.it");
+    repo.config(
+        "time.tsa.actalis.anchor",
+        &pstr(&repo.path().join("missing.pem")),
+    );
+    repo.config("time.tsa.actalis.tofu", "true");
+
+    let doctor = repo.run_time(&["doctor"]);
+    assert_eq!(doctor.status.code(), Some(1), "{}", text(&doctor.stdout));
+    let stdout = text(&doctor.stdout);
+    let hint = stdout
+        .lines()
+        .find(|line| line.contains("pin it first: "))
+        .unwrap_or_else(|| panic!("the fetch hint: {stdout}"));
+    assert!(
+        hint.contains("http://cacert.actalis.it/certs/actalis-autroot"),
+        "the published bundle URL: {hint}"
+    );
+    assert!(
+        !hint.contains("timestamp.actalis.it "),
+        "not the token endpoint: {hint}"
+    );
+    assert!(
+        hint.contains("--insecure-http"),
+        "plain http is flagged: {hint}"
+    );
+}
+
 /// A marker outside the vocabulary is a configuration error, not a quiet
 /// `false`: the value is named and the run exits 2, the same as the seal.
 #[test]

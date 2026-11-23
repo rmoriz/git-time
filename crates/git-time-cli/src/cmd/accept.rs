@@ -107,9 +107,17 @@ pub fn one_or_id(
 /// Whether `accept` names the certificate `der`.
 ///
 /// The length of `accept` decides the digest, so a SHA-1 and a SHA-256 spelling
-/// of the same root both compare. Case is not part of a fingerprint.
+/// of the same root both compare. Case and colons are not part of a fingerprint:
+/// the compact spelling `anchors::fingerprint` prints compares as well as the
+/// colon one a published value uses.
 pub(crate) fn matches(accept: &str, der: &[u8]) -> bool {
-    matching_digest(accept, der).eq_ignore_ascii_case(accept)
+    let bare = |value: &str| -> String {
+        value
+            .chars()
+            .filter(|character| *character != ':')
+            .collect()
+    };
+    bare(&matching_digest(accept, der)).eq_ignore_ascii_case(&bare(accept))
 }
 
 /// What applying a fetched bundle came to.
@@ -120,6 +128,10 @@ pub(crate) enum Applied {
     Replaced {
         /// The published value that matched, when one did.
         matched: Option<&'static str>,
+        /// Whether something the fetch is checked against named the root this
+        /// run is about — a publication, a block, a stored value or an accept.
+        /// A root that merely repeats one already pinned was not compared.
+        compared: bool,
         /// The fetched root in the printed length.
         fingerprint: String,
         /// The fetched root as lowercase SHA-256 hex, whatever the expectation's
@@ -354,24 +366,45 @@ pub(crate) fn apply(
         })
         .cloned()
         .unwrap_or(served_first);
+    // A typed value is an expectation of its own. On a first pin an accept that
+    // names nothing served is a refusal even though another expectation would
+    // have admitted a root: the human asked for a verdict on *that* value, and a
+    // typo must not be read as trust on first use. With a bundle already pinned
+    // the pin stands, so the typo is said out loud instead (the expired-root
+    // hint of `doctor` accepts a root the authority no longer serves).
+    let accept_missed = accept.is_some() && !accepted;
+    if accept_missed && !pinned {
+        let value = accept.unwrap_or_default();
+        let _ = std::fs::remove_file(&staging);
+        return Applied::Mismatch {
+            expected: value.to_owned(),
+            found: digest_for(Some(value), &found_root),
+        };
+    }
+    if accept_missed {
+        eprintln!(
+            "rfc3161: warning: `--accept {}` matches no root of the served bundle; judged on the \
+             other expectations",
+            accept.unwrap_or_default()
+        );
+    }
     let found = Found {
         fingerprint: digest_for(display.last().map(String::as_str), &found_root),
         sha256: crate::cmd::anchors::fingerprint(&found_root),
         expires: expires_of(&found_root),
     };
+    // Whether something the fetch is checked against named the root this run is
+    // about. A root that only rode along with an older match was not compared.
+    let compared = accepted
+        || named.iter().any(|value| matches(value, &found_root))
+        || fingerprint_matches(published, &found_root).is_some()
+        || matches_configured(configured, &found_root);
 
     // Something the fetch brought is accounted for: a root already pinned, one a
     // publication names, one a block names, one a stored value names, or one a
     // human accepted. A pinned bundle is then merged, so the retired root
     // survives even when the served bundle no longer carries it.
     if pinned && (expected || accepted) {
-        // Whether the *appended* root is itself named by something. A reply
-        // carrying the old root plus a new one appends the new one, and the
-        // old root's match says nothing about it.
-        let compared = accepted
-            || named.iter().any(|value| matches(value, &found_root))
-            || fingerprint_matches(published, &found_root).is_some()
-            || matches_configured(configured, &found_root);
         return append(
             &mut store,
             id,
@@ -386,6 +419,7 @@ pub(crate) fn apply(
         return match replace(&staging, path) {
             Ok(()) => Applied::Replaced {
                 matched: matched.published,
+                compared,
                 fingerprint: found.fingerprint,
                 sha256: found.sha256,
                 expires: found.expires,
@@ -396,7 +430,7 @@ pub(crate) fn apply(
     if !accepted {
         // Nothing is expected and nothing was pinned: trust on first use. A
         // stored value is an expectation, so it is not one of these.
-        if !pinned && configured.is_none() && (tofu || display.is_empty()) {
+        if accept.is_none() && !pinned && configured.is_none() && (tofu || display.is_empty()) {
             return match replace(&staging, path) {
                 Ok(()) => Applied::FirstPin {
                     fingerprint: found.fingerprint,
@@ -468,6 +502,7 @@ fn append(
     let outcome = if added == 0 {
         Applied::Replaced {
             matched: published,
+            compared,
             fingerprint: found.fingerprint.clone(),
             sha256: found.sha256.clone(),
             expires: found.expires.clone(),
@@ -619,6 +654,72 @@ mod tests {
             _ => panic!("expected a mismatch"),
         }
         assert!(!path.exists(), "nothing was pinned");
+    }
+
+    /// An accept is an expectation of its own: one that names nothing served is
+    /// a refusal, not trust on first use. A typo must not silently pin whatever
+    /// the authority happened to serve.
+    #[test]
+    fn an_accept_that_matches_nothing_is_a_mismatch() {
+        let path = scratch("acme.pem");
+        let expected = "00:".repeat(19) + "00";
+        match apply("acme", &path, ROOT, &[], &[], None, Some(&expected), true) {
+            Applied::Mismatch {
+                expected: field,
+                found,
+            } => {
+                assert_eq!(field, expected, "the typed value is what was expected");
+                assert_eq!(found.len(), 59, "a SHA-1, the typed length: {found}");
+            }
+            _ => panic!("expected a mismatch"),
+        }
+        assert!(!path.exists(), "nothing was pinned");
+    }
+
+    /// The same refusal when another expectation would have matched: a human who
+    /// typed a fingerprint gets a verdict on *that* value.
+    #[test]
+    fn an_accept_that_matches_nothing_refuses_even_a_published_root() {
+        let path = scratch("acme.pem");
+        let expected = "00:".repeat(19) + "00";
+        let applied = apply(
+            "acme",
+            &path,
+            ROOT,
+            &[ROOT_SHA1],
+            &[],
+            None,
+            Some(&expected),
+            false,
+        );
+        assert!(
+            matches!(applied, Applied::Mismatch { .. }),
+            "the typed value decides"
+        );
+        assert!(!path.exists(), "nothing was pinned");
+    }
+
+    /// A root a stored value names was compared, so the marker can be cleared:
+    /// `compared` carries that, which `matched` (publications only) cannot.
+    #[test]
+    fn a_configured_match_is_reported_as_compared() {
+        let path = scratch("acme.pem");
+        match apply("acme", &path, ROOT, &[], &[], Some(ROOT_SHA1), None, true) {
+            Applied::Replaced { compared, .. } => assert!(compared),
+            _ => panic!("expected a replace"),
+        }
+    }
+
+    /// A re-fetch of the root already pinned says nothing new, so it is not a
+    /// comparison and the marker is left alone.
+    #[test]
+    fn a_refresh_of_a_pinned_root_is_not_compared() {
+        let path = scratch("acme.pem");
+        apply("acme", &path, ROOT, &[], &[], None, None, true);
+        match apply("acme", &path, ROOT, &[], &[], None, None, true) {
+            Applied::Replaced { compared, .. } => assert!(!compared),
+            _ => panic!("expected a replace"),
+        }
     }
 
     /// An accept still decides, even with a configured value that does not match.
