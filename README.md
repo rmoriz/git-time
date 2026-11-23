@@ -230,10 +230,10 @@ lets an attacker block the authority; an insecure authority keeps printing a war
 
 [![Sequence diagram of the seal path: the post-commit hook strips the trailer block and the
 signature, hashes the pre-image, queries the pinned authorities in parallel, verifies each token
-against its anchor, composes and signs the new commit, then moves the ref by compare-and-swap](docs/seal-path.png)](docs/seal-path.html)
+against its anchor, composes and signs the new commit, then moves the ref by compare-and-swap](docs/seal-path.png)](docs/seal-path.png)
 
-The same twelve steps, with the ordering that makes a seal sound, in
-[full size](docs/seal-path.html) and as a [vector drawing](docs/seal-path.svg).
+The same twelve steps, with the ordering that makes a seal sound: [full size](docs/seal-path.png),
+[vector drawing](docs/seal-path.svg), [styled page](docs/seal-path.html).
 
 1. The hook reads the commit git just wrote and strips its trailer block and signature.
 2. It hashes that pre-image: a SHA-256 imprint.
