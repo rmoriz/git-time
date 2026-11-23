@@ -566,7 +566,7 @@ pub(crate) fn pin_state(
                 if presets::find(preset.name).is_none() {
                     "tofu".to_owned()
                 } else if let Some(not_after) = preset.not_after {
-                    format!("listed {}", anchors::expiry_text(not_after, now))
+                    picker::listed(not_after, now)
                 } else if preset.fingerprints.is_empty() {
                     "not pinned".to_owned()
                 } else {
@@ -1630,6 +1630,20 @@ pub(crate) fn validate_id(command: &str, id: &str) -> Result<(), Exit> {
 /// than in every reader.
 pub(crate) fn validate_fingerprint(fingerprint: &str) -> Result<String, String> {
     let fingerprint = fingerprint.trim().to_ascii_uppercase();
+    // The compact spelling is what `anchors::fingerprint`, `doctor` and
+    // `anchor confirm` print, so it is the same value and has to be accepted; it
+    // is rewritten into the colon form everything else speaks.
+    let fingerprint =
+        if fingerprint.contains(':') || (fingerprint.len() != 40 && fingerprint.len() != 64) {
+            fingerprint
+        } else {
+            fingerprint
+                .as_bytes()
+                .chunks(2)
+                .map(|octet| String::from_utf8_lossy(octet).into_owned())
+                .collect::<Vec<_>>()
+                .join(":")
+        };
     let octets: Vec<&str> = fingerprint.split(':').collect();
     let shaped = octets.len() == 20 || octets.len() == 32;
     let hex = octets
@@ -1705,23 +1719,42 @@ fn scoped_get(repo: &Repo, key: &str) -> Result<Option<(String, String)>, Exit> 
             let (scope, value) = line.split_once('\t').unwrap_or(("", line));
             Ok(Some((scope.to_owned(), value.to_owned())))
         }
-        // git exits 1 for an unset key, which `git_stdout` reports as usage.
-        Err(exit) if exit.code() == 2 => Ok(None),
-        Err(exit) => Err(exit),
+        // `git_stdout` folds every git failure into one exit code, so the code
+        // alone cannot tell an unset key from a config `git` could not read.
+        // `Repo::config` maps only exit 1 to `None`: that is the authority on
+        // "unset", and everything else survives as the error it was.
+        Err(exit) => match repo.config_non_empty(key) {
+            Ok(None) => Ok(None),
+            Ok(Some(_)) | Err(_) => Err(exit),
+        },
     }
 }
 
-/// Remove one config key in the scope it is set in, tolerating an unset key.
+/// Remove one config key wherever it is set, tolerating an unset key.
 fn unset_key(repo: &Repo, key: &str) -> Result<(), Exit> {
-    let Some((scope, _)) = scoped_get(repo, key)? else {
-        return Ok(());
-    };
-    // `command` scope cannot be unset from a file, so it falls back to local.
-    let flag = match scope.as_str() {
-        "global" | "system" | "worktree" => format!("--{scope}"),
-        _ => "--local".to_owned(),
-    };
-    git_stdout(repo, &["config", &flag, "--unset", key]).map(|_| ())
+    // The key can be set in several scopes at once (a global value shadowed by a
+    // local one) and an editor can leave it set twice. Removing only the nearest
+    // copy would let the wider one resurface as soon as the inner one is gone,
+    // so `--unset-all` clears the duplicates of one scope and the loop then takes
+    // the next scope the key is still reachable in.
+    let mut done: Vec<&str> = Vec::new();
+    while let Some((scope, _)) = scoped_get(repo, key)? {
+        let flag = match scope.as_str() {
+            "global" => "--global",
+            "system" => "--system",
+            "worktree" => "--worktree",
+            // A value given with `-c` cannot be unset from a file; a local copy
+            // is removed all the same. The next read then sees the command scope
+            // again, which the repeated-flag check ends.
+            _ => "--local",
+        };
+        if done.contains(&flag) {
+            break;
+        }
+        done.push(flag);
+        git_stdout(repo, &["config", flag, "--unset-all", key])?;
+    }
+    Ok(())
 }
 
 /// Record or clear the trust-on-first-use marker of `id`.
@@ -2192,6 +2225,25 @@ mod tests {
         assert_eq!(
             crate::cmd::picker::trust(freetsa, None, now, Cell::Idle),
             "listed 2041-03-07"
+        );
+    }
+
+    /// The table date is rendered in the picker's words, so `preset list` and the
+    /// selector cannot say one state two ways.
+    #[test]
+    fn pin_state_speaks_the_pickers_listed_words() {
+        use crate::cmd::picker::Cell;
+
+        let preset = presets::find("freetsa").expect("a published preset");
+        let soon = jiff::Timestamp::from_second(2_240_611_206).expect("2041-01-01");
+        let after = jiff::Timestamp::from_second(2_253_657_606).expect("2041-06-01");
+        assert_eq!(
+            pin_state(preset, None, Cell::Idle, false, soon),
+            "listed expires 2041-03-07"
+        );
+        assert_eq!(
+            pin_state(preset, None, Cell::Idle, false, after),
+            "listed EXPIRED"
         );
     }
 

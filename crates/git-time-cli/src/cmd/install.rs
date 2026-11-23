@@ -289,8 +289,9 @@ pub(crate) async fn pin(
     let mut fingerprint_mismatch = false;
     let mut unusable = false;
     let mut missing_anchor = None;
-    // Whether a human named the root in this run.
-    let accepted_named = accept.contains_key(authority.name);
+    // Whether a bundle is already pinned: it decides whether a replace updated
+    // anything, which the report has to say.
+    let pinned_before = path.exists();
     // What the marker becomes: `Some(true)` for a first pin with nothing to
     // compare, `Some(false)` once something confirmed the root, `None` to leave
     // it as it is.
@@ -326,7 +327,8 @@ pub(crate) async fn pin(
             accept.get(authority.name).map(String::as_str),
         ) {
             crate::cmd::accept::Applied::Replaced {
-                matched: Some(expected),
+                matched,
+                compared,
                 fingerprint,
                 sha256: _,
                 expires,
@@ -335,29 +337,22 @@ pub(crate) async fn pin(
                 // visible: the reader has to be able to see that the fetch was
                 // checked, not just that a file appeared. The line names the
                 // published value that matched, so a rotation is visible too.
-                marked = Some(false);
-                println!("{}: root fingerprint matches {expected}", authority.name);
-                println!(
-                    "anchor {}: {} fingerprint {}",
-                    authority.name,
-                    path.display(),
-                    crate::cmd::accept::root_label(&fingerprint, expires.as_deref())
-                );
-            }
-            crate::cmd::accept::Applied::Replaced {
-                matched: None,
-                fingerprint,
-                sha256: _,
-                expires,
-            } => {
-                // A root the block named, or one already pinned (a rotation a
-                // human accepted earlier): the bundle is the same root with new
-                // chain material. An accept in this run is a naming, so it
-                // clears the marker.
-                if accepted_named {
+                if let Some(expected) = matched {
+                    println!("{}: root fingerprint matches {expected}", authority.name);
+                } else if pinned_before {
+                    // A root the block named, or one already pinned (a rotation
+                    // a human accepted earlier): the bundle is the same root
+                    // with new chain material.
+                    println!("anchor {}: chain material updated", authority.name);
+                } else {
+                    // Nothing was pinned, so nothing was updated: the stored or
+                    // accepted value admitted this root as a first pin.
+                    println!("{}: the root was pinned", authority.name);
+                }
+                // Anything that named the root this run is about was compared.
+                if compared {
                     marked = Some(false);
                 }
-                println!("anchor {}: chain material updated", authority.name);
                 println!(
                     "anchor {}: {} fingerprint {}",
                     authority.name,
@@ -375,12 +370,8 @@ pub(crate) async fn pin(
             } => {
                 // An appended root was matched by something only when
                 // `compared`; one that rode along with an older pinned root
-                // was not, so the marker then stays.
-                if accepted_named || compared {
-                    marked = Some(false);
-                } else {
-                    marked = None;
-                }
+                // was not, so the marker stays.
+                marked = Some(!compared);
                 println!(
                     "anchor {}: {added} root(s) appended, {roots} now pinned",
                     authority.name
@@ -483,7 +474,15 @@ pub(crate) async fn pin(
     if !path.exists() {
         missing_anchor = Some(path);
     }
-    crate::cmd::tsa::mark_tofu(repo, authority.name, marked)?;
+    // The pin is already reported, so a marker failure is a warning: aborting
+    // here would turn a written pin into a "missing anchor".
+    if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, authority.name, marked) {
+        eprintln!(
+            "rfc3161: warning: tsa {}: the trust-on-first-use marker was not updated: {}",
+            authority.name,
+            exit.message()
+        );
+    }
     Ok(Pinned {
         id: authority.name,
         kept,
@@ -496,17 +495,17 @@ pub(crate) async fn pin(
 /// The digest of `der` in the length the expectation is written in.
 ///
 /// SHA-1 (20 octets) and SHA-256 (32) are both published by authorities and both
-/// pinned; taking the length from the expectation keeps a mismatched spelling a
-/// mismatch instead of silently comparing the wrong digest — and makes a printed
-/// value comparable with the line above it. Without an expectation (trust on
-/// first use) it is SHA-1, because that printed value is the only artefact a
-/// human gets to check.
+/// pinned. The length is counted in hex digits, with or without colons, because
+/// the compact spelling is what `anchors::fingerprint` prints and what `doctor`
+/// and `confirm` hand out: a value copied from either has to compare. Without an
+/// expectation (trust on first use) it is SHA-1, because that printed value is
+/// the only artefact a human gets to check.
 pub(crate) fn digest_for(expected: Option<&str>, der: &[u8]) -> String {
+    let digits = |value: &str| value.chars().filter(|character| *character != ':').count();
     match expected {
-        Some(expected) if expected.split(':').count() != 20 => {
-            git_time_core::trust::fingerprint(der)
-        }
-        _ => git_time_core::trust::sha1_fingerprint(der),
+        Some(expected) if digits(expected) == 40 => git_time_core::trust::sha1_fingerprint(der),
+        Some(_) => git_time_core::trust::fingerprint(der),
+        None => git_time_core::trust::sha1_fingerprint(der),
     }
 }
 

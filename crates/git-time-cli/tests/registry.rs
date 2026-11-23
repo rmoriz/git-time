@@ -1150,6 +1150,156 @@ fn an_appended_root_nothing_checked_keeps_the_marker() {
     );
 }
 
+/// An accept that names nothing served is a refusal even on the first pin: the
+/// human typed a fingerprint, so a typo must not be read as trust on first use.
+#[test]
+fn an_accept_that_matches_nothing_pins_nothing() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    let wrong = "00:".repeat(19) + "00";
+
+    let refused = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "acme",
+            "--insecure-http",
+            "--accept",
+            &wrong,
+        ],
+        &repo.fetch_ca(),
+    );
+    assert_eq!(refused.status.code(), Some(1), "{}", text(&refused.stderr));
+    assert!(
+        text(&refused.stderr).contains(&wrong),
+        "the typed value is named: {}",
+        text(&refused.stderr)
+    );
+    assert!(
+        !repo.anchors().join("acme.pem").exists(),
+        "nothing was pinned"
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None, "no marker");
+}
+
+/// A typo on an already confirmed pin does not throw the pin away, but it is
+/// said out loud.
+#[test]
+fn an_accept_that_matches_nothing_is_said_on_a_pinned_bundle() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert!(
+        repo.run_time(&["anchor", "confirm", "acme"])
+            .status
+            .success()
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+    let wrong = "00:".repeat(19) + "00";
+
+    let again = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "acme",
+            "--insecure-http",
+            "--accept",
+            &wrong,
+        ],
+        &repo.fetch_ca(),
+    );
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert!(
+        text(&again.stderr).contains("matches no root of the served bundle"),
+        "the typo is named: {}",
+        text(&again.stderr)
+    );
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu"),
+        None,
+        "the confirmed pin stays quiet"
+    );
+}
+
+/// A confirmed pin that later appends a root nobody checked goes back to
+/// unconfirmed: the retired root's confirmation says nothing about the new one.
+#[test]
+fn an_appended_root_into_a_confirmed_pin_is_marked() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert!(
+        repo.run_time(&["anchor", "confirm", "acme"])
+            .status
+            .success()
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+    let old = repo.anchors().join("acme.pem");
+    let new = stale_ca(repo.authority.dir.path());
+
+    let env = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {} {}", pstr(&old), pstr(&new)),
+    )];
+    let together = repo.run_time_env(
+        &[
+            "anchor",
+            "fetch",
+            &repo.stub_url(),
+            "--id",
+            "acme",
+            "--insecure-http",
+        ],
+        &env,
+    );
+    assert!(together.status.success(), "{}", text(&together.stderr));
+    assert!(
+        text(&together.stdout).contains("appended"),
+        "{}",
+        text(&together.stdout)
+    );
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu").as_deref(),
+        Some("true"),
+        "the appended root is not confirmed by the old one's check"
+    );
+}
+
+/// A fetch admitted by the stored `fingerprint` was compared against it, so the
+/// marker clears: the stored value is an expectation like a publication.
+#[test]
+fn a_configured_match_clears_the_marker() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    assert_eq!(repo.config("time.tsa.acme.tofu").as_deref(), Some("true"));
+    let served = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    git(
+        repo.path(),
+        &["config", "time.tsa.acme.fingerprint", &served],
+    );
+
+    let again = repo.fetch_anchor("acme");
+    assert!(again.status.success(), "{}", text(&again.stderr));
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu"),
+        None,
+        "the stored expectation was compared"
+    );
+}
+
 /// `anchor confirm` is where the out-of-band comparison is recorded: it prints
 /// what it confirmed and clears the marker.
 #[test]
@@ -1224,6 +1374,197 @@ fn confirm_clears_a_marker_from_a_wider_scope() {
         .success(),
         "the global key is gone"
     );
+}
+
+/// A key an editor left set twice is one key: `confirm` clears every copy
+/// instead of failing with git's "has multiple values".
+#[test]
+fn confirm_clears_a_duplicated_marker() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let root = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    for _ in 0..2 {
+        git(
+            repo.path(),
+            &["config", "--local", "--add", "time.tsa.acme.tofu", "true"],
+        );
+    }
+
+    let confirmed = repo.run_time(&["anchor", "confirm", "acme", &root]);
+    assert!(confirmed.status.success(), "{}", text(&confirmed.stderr));
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// The marker is per id, so naming one root clears it for the whole bundle; the
+/// roots nobody named are said to be covered too.
+#[test]
+fn confirm_naming_one_root_says_the_others_are_covered() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let old = repo.anchors().join("acme.pem");
+    let new = stale_ca(repo.authority.dir.path());
+    let env = [(
+        "GIT_TIME_ANCHOR_FETCH_CMD",
+        format!("cat {} {}", pstr(&old), pstr(&new)),
+    )];
+    assert!(
+        repo.run_time_env(
+            &[
+                "anchor",
+                "fetch",
+                &repo.stub_url(),
+                "--id",
+                "acme",
+                "--insecure-http",
+            ],
+            &env,
+        )
+        .status
+        .success()
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu").as_deref(), Some("true"));
+    let root = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+
+    let confirmed = repo.run_time(&["anchor", "confirm", "acme", &root]);
+    let stdout = ok(&confirmed);
+    assert!(
+        stdout.contains("1 other root(s) of the bundle were not named"),
+        "the rest is called out: {stdout}"
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// A marker outside the vocabulary is no reason to refuse: it is cleared, but a
+/// config that cannot be read is named instead of passed off as success.
+#[test]
+fn confirm_names_a_marker_it_could_not_read() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    git(repo.path(), &["config", "time.tsa.acme.tofu", "maybe"]);
+
+    let confirmed = repo.run_time(&["anchor", "confirm", "acme"]);
+    assert!(confirmed.status.success(), "{}", text(&confirmed.stderr));
+    assert!(
+        text(&confirmed.stderr).contains("the trust-on-first-use marker could not be read"),
+        "{}",
+        text(&confirmed.stderr)
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
+}
+
+/// A wider-scope marker shadowed by a local one would resurface as soon as the
+/// local copy is removed, so both scopes are cleared in one run.
+#[test]
+fn confirm_clears_a_shadowed_marker_in_both_scopes() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let root = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let global = repo.path().join("global-config");
+    let global_file = pstr(&global);
+    let wider: [(&str, String); 1] = [("GIT_CONFIG_GLOBAL", global_file.clone())];
+    let wider_str: [(&str, &str); 1] = [("GIT_CONFIG_GLOBAL", global_file.as_str())];
+    // The same key in both scopes: local shadows global.
+    assert!(
+        git_output_env(
+            repo.path(),
+            &["config", "--global", "time.tsa.acme.tofu", "true"],
+            &wider_str
+        )
+        .status
+        .success()
+    );
+    assert!(
+        repo.run_time_env(&["anchor", "confirm", "acme", &root], &wider)
+            .status
+            .success()
+    );
+    assert_eq!(
+        repo.config("time.tsa.acme.tofu"),
+        None,
+        "the local copy is gone"
+    );
+    assert!(
+        !git_output_env(
+            repo.path(),
+            &["config", "--global", "--get", "time.tsa.acme.tofu"],
+            &wider_str
+        )
+        .status
+        .success(),
+        "the shadowed global copy is gone too"
+    );
+}
+
+/// A config that cannot be read is not "unset": `confirm` fails loudly instead
+/// of claiming it cleared a marker that is still there.
+#[test]
+fn confirm_refuses_when_the_config_cannot_be_read() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let root = git_time_core::trust::sha1_fingerprint(&first_der(&text(&repo.authority.bytes())));
+    let global = repo.path().join("global-config");
+    std::fs::write(&global, "this is not a config file\n").expect("corrupt config");
+    let global_file = pstr(&global);
+    let wider: [(&str, String); 1] = [("GIT_CONFIG_GLOBAL", global_file)];
+    // A unset search path, so only the broken file is in play.
+    let empty = repo.path().join("no-system-config");
+    let empty_file = pstr(&empty);
+    let mut wider = wider.to_vec();
+    wider.push(("GIT_CONFIG_SYSTEM", empty_file));
+
+    let confirmed = repo.run_time_env(&["anchor", "confirm", "acme", &root], &wider);
+    assert_eq!(
+        confirmed.status.code(),
+        Some(2),
+        "{}",
+        text(&confirmed.stderr)
+    );
+    assert!(
+        !text(&confirmed.stdout).contains("marked as compared"),
+        "no success was claimed: {}",
+        text(&confirmed.stdout)
+    );
+}
+
+/// The SHA-256 `confirm` prints is the compact form, and it has to be a usable
+/// input: the value beside it in the transcript is copied, not retyped.
+#[test]
+fn confirm_accepts_the_compact_sha256_it_prints() {
+    let mut repo = Repo::new();
+    repo.init();
+    repo.serve();
+    repo.add_tsa("acme", &repo.stub_url());
+    assert!(repo.fetch_anchor("acme").status.success());
+    let printed = ok(&repo.run_time(&["anchor", "confirm", "acme"]));
+    let compact = printed
+        .lines()
+        .find_map(|line| line.split("sha256 ").nth(1))
+        .map(str::trim)
+        .unwrap_or_else(|| panic!("the printed sha256: {printed}"));
+    assert!(!compact.contains(':'), "the compact form: {compact}");
+
+    let by_value = repo.run_time(&["anchor", "confirm", "acme", compact]);
+    assert!(
+        by_value.status.success(),
+        "{compact}: {}",
+        text(&by_value.stderr)
+    );
+    assert_eq!(repo.config("time.tsa.acme.tofu"), None);
 }
 
 /// A value the bundle does not carry confirms nothing, and the marker stays.

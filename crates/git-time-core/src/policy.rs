@@ -369,21 +369,25 @@ impl Policy {
                 list.push_str(&format!(", and {} more", unconfirmed.len() - shown.len()));
             }
             let first = shown.first().copied().unwrap_or("<id>");
+            // `anchor confirm` takes exactly one id (its next positional is a
+            // fingerprint), so several authorities need one command each. The
+            // value is quoted because a hand-written id may hold characters the
+            // shell would otherwise split on.
+            let remedy = if unconfirmed.len() == 1 {
+                format!("run `git time anchor confirm '{first}'` to record it")
+            } else {
+                "run `git time anchor confirm <id>` for each to record it".to_owned()
+            };
             eprintln!(
-                "rfc3161: warning: {} {} pinned without a comparison ({}); run \
-                 `git time anchor confirm {first}`{} to record it — the token verifies either way",
+                "rfc3161: warning: {} {} pinned without a comparison ({}); {remedy} — the token \
+                 verifies either way",
                 unconfirmed.len(),
                 if unconfirmed.len() == 1 {
                     "authority is"
                 } else {
                     "authorities are"
                 },
-                list,
-                if unconfirmed.len() == 1 {
-                    ""
-                } else {
-                    " and the rest"
-                }
+                list
             );
         }
         Ok(policy)

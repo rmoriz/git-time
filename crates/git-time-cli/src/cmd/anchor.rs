@@ -160,9 +160,6 @@ async fn fetch(
         ));
     }
     let pinned_before = target.exists();
-    // Whether a human named the root in this run. A confirmed root clears the
-    // marker even when it is nothing new: the naming is the point.
-    let accepted_named = accept.is_some();
 
     // The expectation a person stored when the section was written. A hand-edited
     // value that is not a fingerprint would compare as garbage, so it is refused
@@ -229,15 +226,12 @@ async fn fetch(
         } => {
             println!("anchor {id}: {added} root(s) appended, {roots} now pinned");
             // An appended root was matched by something only when `compared`;
-            // one that rode along with an older pinned root was not.
+            // one that rode along with an older pinned root was not, and a
+            // confirmed pin can carry a marker again.
             (
                 sha256,
                 expires,
-                if accepted_named || compared {
-                    Some(false)
-                } else {
-                    None
-                },
+                if compared { Some(false) } else { Some(true) },
             )
         }
         super::accept::Applied::FirstPin {
@@ -273,23 +267,16 @@ async fn fetch(
             fingerprint: _,
             sha256,
             expires,
-            matched,
+            matched: _,
+            compared,
         } => {
             if pinned_before {
                 println!("anchor {id}: chain material updated");
             }
-            // A match against a publication clears the marker, and so does an
-            // accepted root; a re-fetch that only matched the root already
+            // A root matched by a publication, a block, a stored value or an
+            // accept was compared; a re-fetch that only matched the root already
             // pinned says nothing new.
-            (
-                sha256,
-                expires,
-                if accepted_named {
-                    Some(false)
-                } else {
-                    matched.map(|_| false)
-                },
-            )
+            (sha256, expires, if compared { Some(false) } else { None })
         }
     };
     // Before the marker is written: it is itself a `time.tsa.<id>` key, and a
@@ -303,14 +290,20 @@ async fn fetch(
         ),
         Err(exit) => return exit,
     }
-    if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, marked) {
-        return exit;
-    }
+    // The bundle is already written, so the pin is reported before the marker:
+    // a marker failure must not turn a successful pin into a lost one. The
+    // marker is a config key of the id; the pin itself stands either way.
     println!(
         "anchor {id}: {} sha256 {}",
         target.display(),
         super::accept::root_label(&sha256, expires.as_deref())
     );
+    if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, marked) {
+        eprintln!(
+            "rfc3161: warning: tsa {id}: the trust-on-first-use marker was not updated: {}",
+            exit.message()
+        );
+    }
     Exit::ok()
 }
 
@@ -395,14 +388,35 @@ fn confirm(repo: &Repo, id: &str, fingerprint: Option<&str>) -> Exit {
         );
     }
     // Clearing works even from a hand-edited value outside the vocabulary, so
-    // this is read leniently: an unparseable marker counts as marked and is
-    // removed below.
-    let marked = crate::cmd::tsa::marked(repo, id).unwrap_or(true);
+    // an unparseable marker is counted as marked and removed below. A config
+    // that cannot be read is not that, and is said out loud rather than being
+    // passed off as a successful confirmation.
+    let marked = match crate::cmd::tsa::marked(repo, id) {
+        Ok(marked) => marked,
+        Err(exit) => {
+            eprintln!(
+                "rfc3161: warning: tsa {id}: the trust-on-first-use marker could not be read \
+                 ({}); it is cleared all the same",
+                exit.message()
+            );
+            true
+        }
+    };
     if let Err(exit) = crate::cmd::tsa::mark_tofu(repo, id, Some(false)) {
         return exit;
     }
+    // The marker is per id, not per root: naming one root of a bundle clears it
+    // for every root in it, so the ones nobody named are called out.
+    let skipped = roots.len() - confirmed.len();
     if marked {
-        println!("anchor {id}: the pin is marked as compared");
+        if skipped == 0 {
+            println!("anchor {id}: the pin is marked as compared");
+        } else {
+            println!(
+                "anchor {id}: the pin is marked as compared; {skipped} other root(s) of the \
+                 bundle were not named and count as confirmed with it"
+            );
+        }
     } else {
         println!("anchor {id}: the pin was not marked as unconfirmed; nothing to clear");
     }

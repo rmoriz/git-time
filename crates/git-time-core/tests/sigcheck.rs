@@ -89,20 +89,29 @@ impl Drop for GlobalConfig {
     }
 }
 
+/// The marker naming the pid a [`GpgHome`] belongs to.
+const OWNER: &str = "owner";
+
 /// A temporary gpg home, whose agent is killed when the home goes away.
 ///
 /// The agent dies before the `TempDir` does, or it would keep running against a
-/// deleted directory. Killing can race the agent's own start-up, so it is
-/// retried a few times.
+/// deleted directory. Each home also records the pid of the binary that made
+/// it, so an agent a killed run left behind can be reaped by the next one — see
+/// [`reap_abandoned_agents`]. Without that, every aborted run costs two process
+/// slots for good, and a development machine runs out of them: spawning then
+/// fails with `EAGAIN` and unrelated tests fail on their first `git`.
 struct GpgHome {
     _dir: TempDir,
 }
 
 impl GpgHome {
     fn new() -> Self {
-        Self {
+        let home = Self {
             _dir: TempDir::new().expect("temp home"),
-        }
+        };
+        std::fs::write(home.path().join(OWNER), std::process::id().to_string())
+            .expect("writes the owner");
+        home
     }
 
     fn path(&self) -> &Path {
@@ -112,27 +121,197 @@ impl GpgHome {
 
 impl Drop for GpgHome {
     fn drop(&mut self) {
-        // The socket disappearing means the agent is going away, but it can
-        // briefly reappear while a last client is served, so require three
-        // sightings before giving up on the kill.
-        let mut gone = 0;
-        for _ in 0..20 {
-            let _ = Command::new("gpgconf")
-                .args(["--kill", "gpg-agent"])
-                .env("GNUPGHOME", self.path())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            std::thread::sleep(std::time::Duration::from_millis(10));
-            if self.path().join("S.gpg-agent").exists() {
-                gone = 0;
-            } else {
-                gone += 1;
-                if gone == 3 {
-                    break;
+        kill_agent(self.path());
+        // The agent is gone, so removing the home is the `TempDir`'s to finish
+        // (or to fail at, if something else still holds a file open).
+        let _ = std::fs::remove_dir_all(self.path());
+    }
+}
+
+/// Whether `pid` is a running process.
+fn running(pid: u32) -> bool {
+    // Through a shell, so the built-in `kill` does the work where no `kill`
+    // binary is installed.
+    Command::new("sh")
+        .arg("-c")
+        .arg(format!("kill -0 {pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Send `signal` to `pid`, ignoring a process that is already gone.
+fn signal(pid: u32, signal: &str) {
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(format!("kill {signal} {pid}"))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// The pids of the processes serving `home` — its agent and any `scdaemon`.
+fn processes_of(home: &Path) -> Vec<u32> {
+    let Ok(output) = Command::new("pgrep")
+        .arg("-f")
+        .arg("--")
+        .arg(format!("--homedir {}", home.display()))
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+/// The `scdaemon` children of `pid`.
+fn children(pid: u32) -> Vec<u32> {
+    let Ok(output) = Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse().ok())
+        .collect()
+}
+
+/// The pid of the agent serving `home`, if one is up.
+fn agent_pid(home: &Path) -> Option<u32> {
+    let output = Command::new("gpg-connect-agent")
+        .arg("GETINFO pid")
+        .arg("/bye")
+        .env("GNUPGHOME", home)
+        .output()
+        .ok()?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("D "))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Kill the agent serving `home` and the `scdaemon` children it started, then
+/// wait until they are gone.
+///
+/// `gpgconf --kill` sends `SIGTERM`, which an agent defers for as long as a
+/// `scdaemon` still holds a connection: it then outlives the test and its home.
+/// `SIGKILL` cannot be deferred. A killed agent leaves its children orphaned
+/// rather than taking them along, so they are killed first, in every round in
+/// case the agent starts a fresh one in between.
+fn kill_agent(home: &Path) {
+    let Some(pid) = agent_pid(home) else {
+        return;
+    };
+    for _ in 0..20 {
+        for child in children(pid) {
+            signal(child, "-9");
+        }
+        signal(pid, "-9");
+        if !running(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Kill the agents of homes whose owning run is gone, and remove those homes.
+///
+/// A leftover agent names its home on the command line, the home lies under the
+/// temp directory, and its [`OWNER`] file names a pid that no longer runs. A
+/// home without the marker predates it, and is only touched once it is old
+/// enough not to belong to a run that is starting up right now.
+fn reap_abandoned_agents() {
+    let temp = std::env::temp_dir();
+    let Ok(uid) = Command::new("id").arg("-u").output() else {
+        return;
+    };
+    let Ok(listing) = Command::new("ps")
+        .args([
+            "-U",
+            String::from_utf8_lossy(&uid.stdout).trim(),
+            "-o",
+            "pid=,command=",
+        ])
+        .output()
+    else {
+        return;
+    };
+    // `pgrep` per agent would be thousands of spawns on a machine that has
+    // collected leftovers; one listing names agents and their `scdaemon`
+    // children alike, and one `kill` takes all of them.
+    let mut agents: Vec<(u32, PathBuf)> = Vec::new();
+    let mut scdaemons: Vec<(u32, PathBuf)> = Vec::new();
+    for line in String::from_utf8_lossy(&listing.stdout).lines() {
+        let Some((pid, command)) = line.trim_start().split_once(char::is_whitespace) else {
+            continue;
+        };
+        let Ok(pid) = pid.parse::<u32>() else {
+            continue;
+        };
+        let Some((kind, rest)) = command.split_once(' ') else {
+            continue;
+        };
+        let Some(home) = rest
+            .split_once("--homedir ")
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+        else {
+            continue;
+        };
+        let home = PathBuf::from(home);
+        if !home.starts_with(&temp) {
+            continue;
+        }
+        if kind == "scdaemon" {
+            scdaemons.push((pid, home));
+            continue;
+        }
+        if kind != "gpg-agent" {
+            continue;
+        }
+        match std::fs::read_to_string(home.join(OWNER)) {
+            Ok(owner) if owner.trim().parse::<u32>().is_ok_and(running) => continue,
+            Ok(_) => {}
+            Err(_) => {
+                // A home from before the marker existed could be one that is
+                // being set up right now, so it needs to be older than a run.
+                let stale = std::fs::metadata(&home)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|written| written.elapsed().ok())
+                    .is_some_and(|age| age > std::time::Duration::from_secs(60));
+                if !stale {
+                    continue;
                 }
             }
         }
+        agents.push((pid, home));
+    }
+    if agents.is_empty() {
+        return;
+    }
+
+    let mut victims: Vec<String> = agents.iter().map(|(pid, _)| pid.to_string()).collect();
+    for (pid, home) in &scdaemons {
+        if agents.iter().any(|(_, abandoned)| abandoned == home) {
+            victims.push(pid.to_string());
+        }
+    }
+    let _ = Command::new("sh")
+        .arg("-c")
+        .arg(format!("kill -9 {}", victims.join(" ")))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    for (_, home) in &agents {
+        let _ = std::fs::remove_dir_all(home);
     }
 }
 
@@ -172,6 +351,7 @@ fn fixtures() -> Arc<Fixtures> {
     // `insulate` first: the key and agent are made with the ambient config and
     // environment already pinned.
     insulate();
+    reap_abandoned_agents();
     let created = Arc::new(Fixtures {
         pgp: gpg_home(),
         agent: isolated_agent(),
@@ -1405,4 +1585,99 @@ fn sign_uses_the_signature_issuer_over_a_configured_one() {
         !verified.status.success() && stderr.contains("no public key"),
         "the configured key must not have signed: {stderr}"
     );
+}
+
+/// An agent serving `home`, started the way gpg starts it, with its pid.
+fn launch_agent(home: &GpgHome) -> u32 {
+    run(
+        Command::new("gpgconf")
+            .arg("--launch")
+            .arg("gpg-agent")
+            .env("GNUPGHOME", home.path()),
+        &[],
+    );
+    let mut pid = None;
+    for _ in 0..200 {
+        pid = agent_pid(home.path());
+        if pid.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    pid.expect("launches an agent")
+}
+
+/// Whether the tools the agent plumbing needs are installed.
+fn have_agent_tools() -> bool {
+    ["gpg", "gpgconf", "gpg-connect-agent", "pgrep", "ps", "id"]
+        .iter()
+        .all(|tool| have(tool))
+}
+
+/// A dropped home takes its agent and the agent's `scdaemon` with it.
+///
+/// `gpgconf --kill` alone is not enough: it sends `SIGTERM`, which an agent
+/// defers while a `scdaemon` holds a connection. One leftover agent per run
+/// costs two process slots until the machine runs out of them.
+#[test]
+fn a_dropped_home_takes_its_agent_and_scdaemon_with_it() {
+    if !have_agent_tools() {
+        return;
+    }
+    let home = GpgHome::new();
+    let pid = launch_agent(&home);
+    let path = home.path().to_owned();
+    drop(home);
+
+    for _ in 0..100 {
+        if processes_of(&path).is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!running(pid), "agent {pid} outlived its home");
+    assert!(
+        processes_of(&path).is_empty(),
+        "{:?} still serve {}",
+        processes_of(&path),
+        path.display()
+    );
+    assert!(!path.exists(), "the home of a dropped agent stays");
+}
+
+/// The next run reaps the agent of a home whose owning run died without a drop.
+#[test]
+fn an_abandoned_home_is_reaped_by_the_next_run() {
+    if !have_agent_tools() {
+        return;
+    }
+    let home = GpgHome::new();
+    let pid = launch_agent(&home);
+    // A pid that is certainly gone: a child of ours, waited for.
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(":")
+        .spawn()
+        .expect("spawns");
+    let dead = child.id();
+    child.wait().expect("waits");
+    std::fs::write(home.path().join(OWNER), dead.to_string()).expect("rewrites the owner");
+    let path = home.path().to_owned();
+
+    reap_abandoned_agents();
+
+    for _ in 0..100 {
+        if processes_of(&path).is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!running(pid), "agent {pid} survived the reap");
+    assert!(
+        processes_of(&path).is_empty(),
+        "{:?} still serve {}",
+        processes_of(&path),
+        path.display()
+    );
+    assert!(!path.exists(), "an abandoned home stays behind");
 }

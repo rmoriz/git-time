@@ -15,10 +15,12 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # A tag triggers nothing else (CI skips tags), so nothing makes the publish
-  # wait for the suite: without this gate a failing suite still publishes.
-  test:
+  # The cheapest check runs alone and first: nothing else starts before it, so a
+  # tag that disagrees with the manifest fails in seconds instead of after four
+  # targets and a macOS queue.
+  preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
 
@@ -27,11 +29,28 @@ jobs:
       - name: Tag matches the manifest
         run: |
           set -eu
-          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
-          test "v$version" = "$GITHUB_REF_NAME" || {
-            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+          # Anchored to the section: a root-level `version` added later would
+          # otherwise make the match multi-line and the message misleading.
+          version=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          test "$(printf '%s\n' "$version" | wc -l)" -eq 1 || {
+            echo "::error::expected exactly one workspace.package version, got: ${version:-<none found>}"
             exit 1
           }
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          }
+
+  # A tag triggers nothing else (CI skips tags), so nothing makes the publish
+  # wait for the suite: without this gate a failing suite still publishes.
+  test:
+    needs: preflight
+    runs-on: ubuntu-latest
+    # The default is six hours; `release` waits on this job, so a stall has to
+    # fail long before that.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
 
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
@@ -52,6 +71,7 @@ jobs:
   # first and the publish below needs this job, so a tag tests macOS before it
   # publishes anything.
   binaries:
+    needs: preflight
     uses: ./.github/workflows/binaries.yml
     with:
       retention-days: 7

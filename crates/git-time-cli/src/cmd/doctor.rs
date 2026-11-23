@@ -50,43 +50,46 @@ fn marker(repo: &Repo, id: &str) -> Result<bool, Exit> {
     crate::cmd::tsa::marked(repo, id)
 }
 
-/// The command that re-fetches `id` from its configured URL, runnable as
-/// printed, or `None` when the config carries no URL.
-fn fetch_cmd(repo: &Repo, id: &str) -> Option<String> {
-    let url = repo
-        .config_non_empty(&format!("time.tsa.{id}.url"))
-        .ok()
-        .flatten()?;
-    Some(format!(
+/// The URL `id` should be refetched from.
+///
+/// A preset publishes its bundle where the table says (`anchor_url`), which is
+/// not always the token endpoint: `actalis` answers a GET with 400 and leaves
+/// the next POST at 503, and `cartaodecidadao` never serves its root there. An
+/// id the table does not know can only be fetched from its configured URL.
+fn fetch_url(repo: &Repo, id: &str) -> Result<Option<String>, Exit> {
+    if let Some(preset) = git_time_core::presets::find(id) {
+        return Ok(Some(preset.anchor_url.to_owned()));
+    }
+    repo.config_non_empty(&format!("time.tsa.{id}.url"))
+        .map_err(Exit::config)
+}
+
+/// The command that re-fetches `id` from `url`, runnable as printed.
+fn fetch_cmd(url: &str, id: &str) -> String {
+    format!(
         "git time anchor fetch {url} --id {id}{}",
         if url.starts_with("http://") {
             " --insecure-http"
         } else {
             ""
         }
-    ))
+    )
 }
 
 /// The command that pins `fingerprint` for `id`, runnable as printed.
 ///
 /// `restore` can only fetch a preset (the evidence does not carry a URL) and its
 /// positional is a commit, so the accept is the only argument it takes. Any
-/// other configured id is fetched by its own URL — the same one a fetch reads,
-/// which the tests can stub — with `--insecure-http` when it is plain HTTP, and
-/// an id the config has lost is configured first.
+/// other id is fetched from the URL [`fetch_url`] answers — the same one a fetch
+/// reads, which the tests can stub — and an id the config has lost is configured
+/// first.
 fn remedy(repo: &Repo, id: &str, fingerprint: &str) -> String {
-    let url = repo
-        .config_non_empty(&format!("time.tsa.{id}.url"))
-        .ok()
-        .flatten();
+    let url = fetch_url(repo, id).ok().flatten();
     match (git_time_core::presets::find(id).is_some(), url) {
         // The positional of `restore` is a commit, so it must not be given.
         (true, Some(_)) => format!("git time tsa restore --accept {id}={fingerprint}"),
         (true, None) => format!("git time tsa preset add {id}"),
-        (false, Some(_)) => format!(
-            "{} --accept {id}={fingerprint}",
-            fetch_cmd(repo, id).unwrap_or_default()
-        ),
+        (false, Some(url)) => format!("{} --accept {id}={fingerprint}", fetch_cmd(&url, id)),
         (false, None) => format!("git time tsa add <url> --id {id}"),
     }
 }
@@ -245,10 +248,11 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                     // The bundle is gone, so `confirm` has nothing to check the
                     // value against yet: pin it again first.
                     let then = format!("git time anchor confirm {id}");
-                    match fetch_cmd(repo, id) {
-                        Some(fetch) => report.problem(format!(
+                    match fetch_url(repo, id)? {
+                        Some(url) => report.problem(format!(
                             "`anchor {id}` is pinned but was never compared (pin it first: \
-                             {fetch}, then: {then})"
+                             {}, then: {then})",
+                            fetch_cmd(&url, id)
                         )),
                         None => report.problem(format!(
                             "`anchor {id}` is pinned but was never compared (configure it first: \
