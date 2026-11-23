@@ -114,7 +114,6 @@ use der::asn1::{GeneralizedTime, Ia5String, ObjectIdentifier, OctetString, Octet
 use der::{Decode, Encode, Reader, Sequence, SliceReader, Tag};
 use jiff::Timestamp;
 use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
-use p384::ecdsa::signature::hazmat::PrehashVerifier as _;
 use rsa::pkcs8::DecodePublicKey as _;
 use rsa::signature::Verifier as _;
 use rustls_pki_types::{CertificateDer, UnixTime};
@@ -756,7 +755,7 @@ fn verify_without_ring(
 
     // The RSA verifiers hash the message themselves, so they take it as it is.
     let key_der = spki.to_der().map_err(|_| Invalid::Malformed)?;
-    let key = rsa::RsaPublicKey::from_public_key_der(&key_der).map_err(|_| Invalid::Malformed)?;
+    let key = rsa::PublicKey::from_public_key_der(&key_der).map_err(|_| Invalid::Malformed)?;
     if spki.algorithm.oid == OID_RSA {
         let key = rsa::pkcs1v15::VerifyingKey::<sha1::Sha1>::new(key);
         let signature =

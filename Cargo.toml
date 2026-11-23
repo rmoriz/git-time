@@ -12,11 +12,11 @@ repository = "https://github.com/rmoriz/git-time"
 publish = false
 
 [workspace.dependencies]
-sha1 = { version = "0.10", features = ["oid"] }
-sha2 = "0.10"
+sha1 = { version = "0.11", features = ["oid"] }
+sha2 = "0.11"
 p256 = { version = "0.14", default-features = false, features = ["ecdsa"] }
-p384 = { version = "0.13", default-features = false, features = ["ecdsa"] }
-rsa = { version = "0.9", default-features = false, features = ["std", "pem"] }
+p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
+rsa = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
 thiserror = "2"
 proptest = "1"
 zstd = "0.13"
