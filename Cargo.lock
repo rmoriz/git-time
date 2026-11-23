@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "git-time-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -765,7 +765,7 @@ dependencies = [
 
 [[package]]
 name = "git-time-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",

@@ -123,7 +123,7 @@ to unpack, no checksum file beside it.
 | macOS, Intel | `git-time-x86_64-apple-darwin` |
 
 ```console
-$ VERSION=0.2.0
+$ VERSION=0.3.0
 $ TARGET=x86_64-unknown-linux-musl        # or aarch64-apple-darwin, etc.
 
 $ curl -fLO https://github.com/rmoriz/git-time/releases/download/v$VERSION/git-time-$TARGET

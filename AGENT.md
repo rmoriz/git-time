@@ -47,7 +47,7 @@ queried in parallel and verified locally before they are stored inside the commi
 ## Working in this repo
 
 ```sh
-cargo test --offline                     # 726 tests + 1 ignored live test
+cargo test --offline                     # 745 tests + 1 ignored live test
 cargo clippy --offline --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 cargo deny check                         # advisories, licenses, bans, sources

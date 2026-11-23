@@ -13,7 +13,7 @@ name = "git-time"
 path = "src/main.rs"
 
 [dependencies]
-git-time-core = { path = "../git-time-core", version = "0.2.0" }
+git-time-core = { path = "../git-time-core", version = "0.3.0" }
 base64.workspace = true
 clap = { workspace = true, features = ["derive"] }
 cms.workspace = true

@@ -4,6 +4,36 @@ Design: `docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md`
 Plan: `docs/superpowers/plans/2026-11-18-git-time-rfc3161.md`
 Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-18-git-time-rfc3161/progress.md`
 
+## Release notes (v0.3.0)
+
+A later release adds its own heading above this one.
+
+- `--accept` that named nothing the anchor served reported a successful first pin, where nothing had
+  been pinned to compare against; that is a mismatch now. `Applied::Replaced` carries how many roots
+  were compared, so a checked root and a repeated one no longer look alike, and a `confirm` naming
+  one root says how many others it covers instead of confirming the bundle silently.
+- The pin line is printed before the marker is written, so a warning about an unconfirmed pin is no
+  longer preceded by a success line; a first pin under a configured authority names that scoped
+  wording in its remedy. `doctor` fetches from the preset's anchor URL rather than a guessed one,
+  `tsa pin-state` lists rows the way `tsa list` does, and `scoped_get`/`unset_key` clear every
+  duplicate of a key.
+- A check tag now fails in seconds on a manifest that disagrees with it, and the release jobs carry
+  bounded timeouts: a tag that would publish four binaries naming another release, or stall on a
+  queued runner, no longer waits to be noticed by hand.
+- The test fixtures stop leaking `gpg-agent`/`scdaemon` pairs. The drop SIGKILLs the agent and its
+  children and waits, a home whose owning pid is dead is reaped by the next run, and homes from
+  before the marker are only reaped once a minute old so a starting run is never raced. Measured
+  with 150 leftovers against 40 free process slots: the suite failed before and passes after, and
+  the process count is flat across runs.
+- The README shows the seal path as a diagram instead of only prose, and documents `time.required`
+  and the cost of a single pinned authority — the key is read wherever evidence is judged, never
+  stored in a commit, so raising it re-grades older seals.
+- RustCrypto moves to the constant-time generation: `rsa` 0.10 on `crypto-bigint` 0.7, `p384` 0.14,
+  `sha1`/`sha2` 0.11. This clears RUSTSEC-2023-0071 and RUSTSEC-2026-0387 (RSA and `crypto-bigint`
+  timing), and `url` 2.5.9 clears RUSTSEC-2026-0592; it also collapses the duplicated generation
+  the tree had been building. `cargo deny` gates advisories, licenses, bans and sources in CI, and
+  dependabot opens weekly grouped update PRs.
+
 ## Release notes (v0.2.0)
 
 A later release adds its own heading above this one.
