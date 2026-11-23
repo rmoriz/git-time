@@ -65,6 +65,26 @@ cargo test -p git-time-cli --test live_tsa -- --ignored --nocapture   # real TSA
 - Commit messages: no `Co-Authored-By` trailers (repo owner's preference), and say *why* the
   change exists, not just what moved.
 
+## Releasing
+
+The version lives in `[workspace.package]` in the root `Cargo.toml`, and `git-time-cli` pins the
+path dependency to it — a bump that misses that crate does not build. A release is one commit
+carrying: both manifests, `Cargo.lock`, the `docs/git-time.1` `.TH` date and version, the README's
+`VERSION=` snippet, the test count in `AGENT.md`, and a `## Release notes (vX.Y.Z)` section above
+the previous one in `docs/STATUS.md`. `git time --version` and the man page have to agree with the
+tag, because the workflow's preflight refuses a disagreement in seconds and nothing downstream
+would notice.
+
+Then tag annotated, not lightweight (`git tag -a -m "git-time X.Y.Z"`), push `main` first and the
+tag second. The workflow runs fmt, clippy and the suite, builds the four targets and publishes with
+`generate_release_notes: true`.
+
+That auto body is a changelog link and nothing else, so **the release body is set by hand once the
+release exists**: `gh release edit vX.Y.Z --notes-file <file>`, with the STATUS notes under a
+`## Notes` heading and, above them, the install preamble from the previous release — assets link,
+the four quick-start commands, and what (if anything) a user has to migrate. Notes written only
+into `STATUS.md` and never onto the release reach nobody but the repository.
+
 ## When docs and code disagree
 
 `docs/STATUS.md` records deliberate deviations from the design and is the authority for shipped
