@@ -8,10 +8,19 @@ name: CI
 # Tags are therefore left out of this workflow entirely (`branches` below matches
 # branches only) and handled by the release build, which runs the same suite on
 # macOS as well before it packages.
+#
+# A change under `docs/` or to a markdown file cannot move a byte of the binary,
+# so it runs no compiler here. That also skips the check runs, so a branch
+# protected on them would wait on checks that never start; this repository pushes
+# straight to `main` and tolerates that. The tag build is a full run either way.
 on:
   push:
     branches: ['**']
+    paths-ignore: &docs-only
+      - '**.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore: *docs-only
 
 permissions:
   contents: read
