@@ -979,6 +979,35 @@ pub(crate) mod tests {
         prober.drain()
     }
 
+    /// A fetch that parks every worker until [`open`] is called.
+    ///
+    /// Each call reads the root only after the gate opens, so a test can look at
+    /// the queue without a row finishing in between: an answered row leaves
+    /// `pending`, and on a loaded machine a whole table of file reads can finish
+    /// before the next assertion runs.
+    fn gated() -> (Arc<(Mutex<bool>, std::sync::Condvar)>, super::Fetch) {
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let fetch: super::Fetch = {
+            let gate = Arc::clone(&gate);
+            Arc::new(move |_, _| {
+                let (open, wake) = &*gate;
+                let mut ready = open.lock().unwrap();
+                while !*ready {
+                    ready = wake.wait(ready).unwrap();
+                }
+                drop(ready);
+                std::fs::read(FREETSA_ROOT).map_err(|error| error.to_string())
+            })
+        };
+        (gate, fetch)
+    }
+
+    /// Let the workers of a [`gated`] fetch through.
+    fn open(gate: &(Mutex<bool>, std::sync::Condvar)) {
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+    }
+
     #[test]
     fn a_result_carries_the_index_and_is_stored() {
         let _guard = xdg_lock();
@@ -1136,19 +1165,7 @@ pub(crate) mod tests {
         // The gate parks every worker inside its fetch, so no row can finish
         // before the refresh: the mid-run case is the only one that can leave a
         // row both in flight and queued again.
-        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let fetch: super::Fetch = {
-            let gate = Arc::clone(&gate);
-            Arc::new(move |_, _| {
-                let (open, wake) = &*gate;
-                let mut ready = open.lock().unwrap();
-                while !*ready {
-                    ready = wake.wait(ready).unwrap();
-                }
-                drop(ready);
-                std::fs::read(FREETSA_ROOT).map_err(|error| error.to_string())
-            })
-        };
+        let (gate, fetch) = gated();
         let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
         prober.refresh(&[]);
         // Every row is outstanding once before and once after the refresh, and
@@ -1156,8 +1173,7 @@ pub(crate) mod tests {
         assert_eq!(prober.pending(), 2 * presets::PRESETS.len());
         assert!(prober.drain().is_empty());
 
-        *gate.0.lock().unwrap() = true;
-        gate.1.notify_all();
+        open(&gate);
         let mut indices: Vec<usize> = wait(&prober).into_iter().map(|(index, _)| index).collect();
         indices.sort_unstable();
         assert!(
@@ -1170,11 +1186,15 @@ pub(crate) mod tests {
     fn refresh_queues_everything_again() {
         let _guard = xdg_lock();
         xdg();
-        urls();
-        let prober = super::Prober::start(&presets::PRESETS, answering(FREETSA_ROOT), &[]);
-        wait(&prober);
+        // Gated, so the first run cannot drain while the refresh is inspected:
+        // every row is in flight and a refresh that skipped any of them would
+        // leave the count short of two tables.
+        let (gate, fetch) = gated();
+        let prober = super::Prober::start(&presets::PRESETS, fetch, &[]);
+        assert_eq!(prober.pending(), presets::PRESETS.len());
         prober.refresh(&[]);
-        assert!(prober.pending() >= presets::PRESETS.len());
+        assert_eq!(prober.pending(), 2 * presets::PRESETS.len());
+        open(&gate);
         wait(&prober);
     }
 
