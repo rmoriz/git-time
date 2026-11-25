@@ -10,7 +10,7 @@
 # tools, no rust-src. `cargo deny` is installed separately by CI.
 [toolchain]
 # Rustup resolves this to the release; rust-toolchain.toml cannot name a commit
-# hash. On this machine it is `rustc 1.99.0 (b940084d7 2026-09-28)`.
-channel = "1.99.0"
+# hash. On this machine it is `rustc 1.100.0 (0ef1bc386 2026-11-09)`.
+channel = "1.100.0"
 profile = "minimal"
 components = ["clippy", "rustfmt"]

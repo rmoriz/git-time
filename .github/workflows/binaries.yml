@@ -38,7 +38,7 @@ jobs:
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
           targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl
 
       - name: Cache the cargo registry
@@ -96,7 +96,7 @@ jobs:
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
           targets: aarch64-apple-darwin,x86_64-apple-darwin
           components: rustfmt, clippy
 

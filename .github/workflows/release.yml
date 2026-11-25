@@ -55,7 +55,7 @@ jobs:
       - name: Install the pinned toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.99.0
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - name: Formatting
