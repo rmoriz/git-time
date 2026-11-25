@@ -773,7 +773,7 @@ name = "git-time-cli"
 version = "0.3.0"
 dependencies = [
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "cms 0.3.0-rc.2",
  "der 0.8.3",
@@ -795,7 +795,7 @@ dependencies = [
  "async-trait",
  "aws-lc-rs",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "cms 0.3.0-rc.2",
  "der 0.8.3",
  "futures",
