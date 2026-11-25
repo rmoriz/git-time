@@ -22,9 +22,9 @@ proptest = "1"
 zstd = "0.13"
 base64 = "0.22"
 tempfile = "3"
-der = { version = "0.7", default-features = false, features = ["alloc"] }
+der = { version = "0.8", default-features = false, features = ["alloc"] }
 cms = "0.2"
-x509-cert = "0.2"
+x509-cert = "0.3"
 rustls-pki-types = "1"
 sigstore-tsa = "0.16"
 sigstore-types = "0.16"
