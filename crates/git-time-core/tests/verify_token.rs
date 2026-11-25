@@ -944,7 +944,7 @@ fn throwaway_tsa_token_under(
     // signer; the ESS identifier below is written by openssl and does match.
     remove_tsa(&mut tst);
     let now = Timestamp::now()
-        .to_zoned(jiff::tz::TimeZone::UTC)
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .datetime();
     let stamp = stamp.map(str::to_owned).unwrap_or_else(|| {
         format!(

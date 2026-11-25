@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn no_preset_has_already_expired() {
         let today = jiff::Timestamp::now()
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .date();
         for preset in &PRESETS {
             let not_after = preset

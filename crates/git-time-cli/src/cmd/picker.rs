@@ -1543,7 +1543,7 @@ mod tests {
     fn at(year: i16, month: i8, day: i8) -> jiff::Timestamp {
         jiff::civil::date(year, month, day)
             .at(0, 0, 0, 0)
-            .to_zoned(jiff::tz::TimeZone::UTC)
+            .to_zoned_datetime(jiff::tz::TimeZone::UTC)
             .expect("an instant")
             .timestamp()
     }
