@@ -8,7 +8,7 @@
 //! change what later verification hashes over.
 
 use der::asn1::{ObjectIdentifier, OctetStringRef, UintRef};
-use der::{Decode, Encode, Reader, SliceReader, Tag};
+use der::{Decode, Encode, Header, Reader, SliceReader, Tag};
 use git_time_core::imprint::{Alg, Digest};
 use git_time_core::tsa::{RawResponse, StampRequest, TsaError, encode, parse_response};
 use rand_core::TryRng;
@@ -51,7 +51,7 @@ struct MirrorRequest<'a> {
 #[derive(Debug, der::Sequence)]
 struct MirrorImprint<'a> {
     hash_algorithm: MirrorAlgorithm,
-    hashed_message: OctetStringRef<'a>,
+    hashed_message: &'a OctetStringRef,
 }
 
 #[derive(Debug, der::Sequence)]
@@ -690,14 +690,14 @@ fn reader_offsets_and_tags_are_what_the_parser_relies_on() {
     // absolute offsets, and peeking the token header yields the length the
     // fixture declares (0x1217 content plus its 4-byte header).
     let mut reader = SliceReader::new(GRANTED).expect("reader");
-    let outer = reader.peek_header().expect("outer header");
-    assert_eq!(outer.tag, Tag::Sequence);
+    let outer = Header::peek(&reader).expect("outer header");
+    assert_eq!(outer.tag(), Tag::Sequence);
     let _ = reader
         .read_slice(outer.encoded_len().expect("header length"))
         .expect("outer header");
-    let status = reader.peek_header().expect("status info");
+    let status = Header::peek(&reader).expect("status info");
     let status_len =
-        (status.encoded_len().expect("header length") + status.length).expect("length");
+        (status.encoded_len().expect("header length") + status.length()).expect("length");
     let _ = reader.read_slice(status_len).expect("status info");
     assert_eq!(
         u32::from(reader.offset()),

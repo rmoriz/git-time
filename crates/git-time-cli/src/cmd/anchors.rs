@@ -94,8 +94,8 @@ pub fn fingerprint(bytes: &[u8]) -> String {
 #[must_use]
 pub fn not_after(certificate: &Certificate) -> String {
     certificate
-        .tbs_certificate
-        .validity
+        .tbs_certificate()
+        .validity()
         .not_after
         .to_string()
         .chars()
@@ -389,7 +389,7 @@ async fn resolve_root(
     let mut errors: Vec<String> = Vec::new();
     for _ in 0..MAX_HOPS {
         if let Some(index) = pool.iter().position(|certificate| {
-            certificate.tbs_certificate.subject == certificate.tbs_certificate.issuer
+            certificate.tbs_certificate().subject() == certificate.tbs_certificate().issuer()
         }) {
             let root = pool.remove(index);
             return Ok((root, pool));
@@ -430,9 +430,9 @@ async fn resolve_root(
         }
         for certificate in fetched {
             let known = pool.iter().any(|other| {
-                other.tbs_certificate.subject == certificate.tbs_certificate.subject
-                    && other.tbs_certificate.serial_number
-                        == certificate.tbs_certificate.serial_number
+                other.tbs_certificate().subject() == certificate.tbs_certificate().subject()
+                    && other.tbs_certificate().serial_number()
+                        == certificate.tbs_certificate().serial_number()
             });
             if !known {
                 pool.push(certificate);
@@ -453,7 +453,7 @@ async fn resolve_root(
 /// Whether any certificate in `pool` names `candidate`'s issuer as its subject.
 fn issued_in(pool: &[Certificate], candidate: &Certificate) -> bool {
     pool.iter()
-        .any(|other| other.tbs_certificate.subject == candidate.tbs_certificate.issuer)
+        .any(|other| other.tbs_certificate().subject() == candidate.tbs_certificate().issuer())
 }
 
 /// The `caIssuers` URLs `certificate` publishes, in the order it lists them.
@@ -464,9 +464,9 @@ fn ca_issuers(certificate: &Certificate) -> Vec<String> {
         der::asn1::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.48.2");
 
     certificate
-        .tbs_certificate
-        .extensions
-        .iter()
+        .tbs_certificate()
+        .extensions()
+        .into_iter()
         .flatten()
         .find(|extension| extension.extn_id == OID_AIA)
         .and_then(|extension| {
@@ -741,7 +741,8 @@ mod tests {
         let der = BASE64.decode(first).expect("base64");
         let certificate = x509_cert::Certificate::from_der(&der).expect("a certificate");
         assert_eq!(
-            certificate.tbs_certificate.subject, certificate.tbs_certificate.issuer,
+            certificate.tbs_certificate().subject(),
+            certificate.tbs_certificate().issuer(),
             "the first certificate is the self-signed root"
         );
     }
@@ -1014,14 +1015,15 @@ mod tests {
 
         let first = parse_certificates(&pem).remove(0);
         assert_eq!(
-            first.tbs_certificate.subject, first.tbs_certificate.issuer,
+            first.tbs_certificate().subject(),
+            first.tbs_certificate().issuer(),
             "the bundle starts with the self-signed root"
         );
         assert!(
             parse_certificates(&pem)
                 .iter()
-                .any(|certificate| certificate.tbs_certificate.subject
-                    != certificate.tbs_certificate.issuer),
+                .any(|certificate| certificate.tbs_certificate().subject()
+                    != certificate.tbs_certificate().issuer()),
             "the intermediate stays in the bundle"
         );
         let seen = server.join().expect("server");

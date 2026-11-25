@@ -196,7 +196,7 @@ impl Eq for TsaError {}
 pub fn parse_response(bytes: &[u8]) -> Result<RawResponse, TsaError> {
     let mut outer = SliceReader::new(bytes).map_err(malformed)?;
     let body = read_tlv(&mut outer, Tag::Sequence)?;
-    outer.finish(()).map_err(malformed)?;
+    outer.finish().map_err(malformed)?;
 
     let mut response = SliceReader::new(body).map_err(malformed)?;
     let info = read_tlv(&mut response, Tag::Sequence)?;
@@ -208,8 +208,8 @@ pub fn parse_response(bytes: &[u8]) -> Result<RawResponse, TsaError> {
     let mut texts = Vec::new();
     let mut fail_info = None;
     while !status_info.is_finished() {
-        let header = status_info.peek_header().map_err(malformed)?;
-        match header.tag {
+        let header = Header::peek(&status_info).map_err(malformed)?;
+        match header.tag() {
             Tag::Sequence => texts.extend(parse_status_strings(&mut status_info)?),
             Tag::BitString => fail_info = Some(parse_fail_info(&mut status_info)?),
             other => {
@@ -219,14 +219,14 @@ pub fn parse_response(bytes: &[u8]) -> Result<RawResponse, TsaError> {
             }
         }
     }
-    status_info.finish(()).map_err(malformed)?;
+    status_info.finish().map_err(malformed)?;
 
     let token = if response.is_finished() {
         None
     } else {
         Some(read_token(&mut response)?)
     };
-    response.finish(()).map_err(malformed)?;
+    response.finish().map_err(malformed)?;
 
     // A grant reports only what the TSA wrote as text; the failInfo fallback is
     // what a rejection may use instead of a statusString.
@@ -259,8 +259,8 @@ fn parse_status_strings(reader: &mut SliceReader<'_>) -> Result<Vec<String>, Tsa
     let mut texts = Vec::new();
     let mut strings = SliceReader::new(body).map_err(malformed)?;
     while !strings.is_finished() {
-        let string_header = strings.peek_header().map_err(malformed)?;
-        let tag = match string_header.tag {
+        let string_header = Header::peek(&strings).map_err(malformed)?;
+        let tag = match string_header.tag() {
             tag
             @ (Tag::Utf8String | Tag::PrintableString | Tag::TeletexString | Tag::Ia5String) => tag,
             other => {
@@ -348,15 +348,16 @@ fn parse_status(bytes: &[u8]) -> Result<u8, TsaError> {
 
 /// Read a whole tag-length-value triple.
 fn read_tlv_full<'a>(reader: &mut SliceReader<'a>, tag: Tag) -> Result<&'a [u8], TsaError> {
-    let header = reader.peek_header().map_err(malformed)?;
+    let header = Header::peek(&*reader).map_err(malformed)?;
     expect(&header, tag)?;
-    let total = (header.encoded_len().map_err(malformed)? + header.length).map_err(malformed)?;
+    let header_len = header.encoded_len().map_err(malformed)?;
+    let total = (header_len + header.length()).map_err(malformed)?;
     reader.read_slice(total).map_err(malformed)
 }
 
 /// Read the content octets of a tag-length-value triple, header consumed.
 fn read_tlv<'a>(reader: &mut SliceReader<'a>, tag: Tag) -> Result<&'a [u8], TsaError> {
-    let header = reader.peek_header().map_err(malformed)?;
+    let header = Header::peek(&*reader).map_err(malformed)?;
     let header_len = header.encoded_len().map_err(malformed)?;
     let full = read_tlv_full(reader, tag)?;
     let header_len = usize::try_from(u32::from(header_len))
@@ -366,12 +367,12 @@ fn read_tlv<'a>(reader: &mut SliceReader<'a>, tag: Tag) -> Result<&'a [u8], TsaE
 
 /// Require `header` to carry `tag`.
 fn expect(header: &Header, tag: Tag) -> Result<(), TsaError> {
-    if header.tag == tag {
+    if header.tag() == tag {
         Ok(())
     } else {
         Err(TsaError::Malformed(format!(
             "expected {tag}, found {}",
-            header.tag
+            header.tag()
         )))
     }
 }

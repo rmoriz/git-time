@@ -23,7 +23,7 @@ zstd = "0.13"
 base64 = "0.22"
 tempfile = "3"
 der = { version = "0.8", default-features = false, features = ["alloc"] }
-cms = "0.2"
+cms = "0.3.0-rc.2"
 x509-cert = "0.3"
 rustls-pki-types = "1"
 sigstore-tsa = "0.16"

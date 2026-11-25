@@ -1298,7 +1298,7 @@ fn roots_at_respects_the_boundaries() {
         .as_bytes()
         .to_vec();
     let certificate = x509_cert::Certificate::from_der(&der).expect("CA is a certificate");
-    let validity = &certificate.tbs_certificate.validity;
+    let validity = &certificate.tbs_certificate().validity();
     let not_before = i64::try_from(validity.not_before.to_unix_duration().as_secs())
         .expect("notBefore fits a timestamp");
     let not_after = i64::try_from(validity.not_after.to_unix_duration().as_secs())

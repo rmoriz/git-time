@@ -349,6 +349,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cms"
+version = "0.3.0-rc.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d089eddc8a5c984d82fcf1427367a6fa0d019d5af04b6e3197e86c8989533b8d"
+dependencies = [
+ "const-oid 0.10.3",
+ "der 0.8.3",
+ "spki 0.8.1",
+ "x509-cert 0.3.1",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -763,7 +775,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "clap",
- "cms",
+ "cms 0.3.0-rc.2",
  "der 0.8.3",
  "git-time-core",
  "jiff",
@@ -784,7 +796,7 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "base64 0.22.1",
- "cms",
+ "cms 0.3.0-rc.2",
  "der 0.8.3",
  "futures",
  "jiff",
@@ -2049,7 +2061,7 @@ version = "0.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34e319615ab084c5a5e29ab451a6f717d989db4ce2d68a1c116f5038d33f448b"
 dependencies = [
- "cms",
+ "cms 0.2.3",
  "const-oid 0.9.6",
  "der 0.7.10",
  "hex",

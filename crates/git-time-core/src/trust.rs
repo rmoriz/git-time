@@ -99,7 +99,7 @@ impl Anchor {
                 let Ok(certificate) = Certificate::from_der(certificate.as_bytes()) else {
                     return false;
                 };
-                let validity = &certificate.tbs_certificate.validity;
+                let validity = &certificate.tbs_certificate().validity();
                 let not_before = validity.not_before.to_unix_duration().as_secs();
                 let not_after = validity.not_after.to_unix_duration().as_secs();
                 not_before <= second && second <= not_after
@@ -284,8 +284,8 @@ fn read_anchor(id: &str, path: &Path) -> Result<Anchor, TrustError> {
 /// must not reclassify a root as an intermediate.
 fn is_self_signed(certificate: &Certificate) -> bool {
     match (
-        certificate.tbs_certificate.issuer.to_der(),
-        certificate.tbs_certificate.subject.to_der(),
+        certificate.tbs_certificate().issuer().to_der(),
+        certificate.tbs_certificate().subject().to_der(),
     ) {
         (Ok(issuer), Ok(subject)) => issuer == subject,
         _ => false,

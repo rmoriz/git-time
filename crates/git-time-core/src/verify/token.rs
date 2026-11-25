@@ -109,9 +109,9 @@ use aws_lc_rs::signature::{
 use cms::cert::CertificateChoices;
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerIdentifier};
-use der::TagNumber;
 use der::asn1::{GeneralizedTime, Ia5String, ObjectIdentifier, OctetString, OctetStringRef};
 use der::{Decode, Encode, Reader, Sequence, SliceReader, Tag};
+use der::{Header, TagNumber};
 use jiff::Timestamp;
 use p256::ecdsa::signature::hazmat::PrehashVerifier as _;
 use rsa::pkcs8::DecodePublicKey as _;
@@ -329,8 +329,8 @@ pub fn token(
     TokenVerdict::Valid {
         gen_time: parsed.tst.gen_time,
         tsa: common_name(&parsed.signer)
-            .unwrap_or_else(|| parsed.signer.tbs_certificate.subject.to_string()),
-        serial: hex(parsed.signer.tbs_certificate.serial_number.as_bytes()),
+            .unwrap_or_else(|| parsed.signer.tbs_certificate().subject().to_string()),
+        serial: hex(parsed.signer.tbs_certificate().serial_number().as_bytes()),
     }
 }
 
@@ -445,17 +445,15 @@ fn der_length(out: &mut Vec<u8>, length: usize) {
 
 /// The common name of a certificate's subject, when it has one.
 fn common_name(certificate: &Certificate) -> Option<String> {
-    for rdn in certificate.tbs_certificate.subject.0.iter() {
-        for attribute in rdn.0.iter() {
-            if attribute.oid == OID_COMMON_NAME {
-                return Some(
-                    attribute
-                        .to_string()
-                        .strip_prefix("CN=")
-                        .unwrap_or_default()
-                        .to_owned(),
-                );
-            }
+    for attribute in certificate.tbs_certificate().subject().iter() {
+        if attribute.oid == OID_COMMON_NAME {
+            return Some(
+                attribute
+                    .to_string()
+                    .strip_prefix("CN=")
+                    .unwrap_or_default()
+                    .to_owned(),
+            );
         }
     }
     None
@@ -529,7 +527,7 @@ impl Parsed {
         let tst = Tst::parse(tst_info_der)?;
 
         let signer = find_signer(&signed_data)?;
-        let signer_serial = signer.tbs_certificate.serial_number.clone();
+        let signer_serial = signer.tbs_certificate().serial_number().clone();
         let mut intermediates = Vec::new();
         for choice in signed_data
             .certificates
@@ -539,7 +537,7 @@ impl Parsed {
             .flatten()
         {
             if let CertificateChoices::Certificate(certificate) = choice
-                && certificate.tbs_certificate.serial_number != signer_serial
+                && certificate.tbs_certificate().serial_number() != &signer_serial
             {
                 intermediates.push(DerCertificate::new(
                     certificate.to_der().map_err(|_| Invalid::Malformed)?,
@@ -552,7 +550,13 @@ impl Parsed {
             .0
             .get(0)
             .ok_or(Invalid::Malformed)?;
-        let not_after = unix(signer.tbs_certificate.validity.not_after.to_unix_duration())?;
+        let not_after = unix(
+            signer
+                .tbs_certificate()
+                .validity()
+                .not_after
+                .to_unix_duration(),
+        )?;
         let signed_attributes = signer_info
             .signed_attrs
             .as_ref()
@@ -646,7 +650,7 @@ impl Parsed {
         }
         content_type(&self.attributes)?;
 
-        let spki = &self.signer.tbs_certificate.subject_public_key_info;
+        let spki = self.signer.tbs_certificate().subject_public_key_info();
         let Some(algorithm) = signature_algorithm(
             &spki.algorithm.oid,
             spki.algorithm.parameters.as_ref(),
@@ -871,13 +875,12 @@ fn find_signer(signed_data: &SignedData) -> Result<Certificate, Invalid> {
 fn identifies(sid: &SignerIdentifier, certificate: &Certificate) -> bool {
     match sid {
         SignerIdentifier::IssuerAndSerialNumber(issuer) => {
-            certificate.tbs_certificate.issuer == issuer.issuer
-                && certificate.tbs_certificate.serial_number == issuer.serial_number
+            certificate.tbs_certificate().issuer() == &issuer.issuer
+                && certificate.tbs_certificate().serial_number() == &issuer.serial_number
         }
         SignerIdentifier::SubjectKeyIdentifier(wanted) => certificate
-            .tbs_certificate
-            .extensions
-            .as_ref()
+            .tbs_certificate()
+            .extensions()
             .into_iter()
             .flatten()
             .filter(|extension| extension.extn_id == OID_SUBJECT_KEY_ID)
@@ -899,7 +902,7 @@ fn message_digest(attributes: &x509_cert::attr::Attributes) -> Result<Vec<u8>, I
     }
     let value = attribute.values.get(0).ok_or(Invalid::Malformed)?;
     let encoded = value.to_der().map_err(|_| Invalid::Malformed)?;
-    OctetStringRef::from_der(&encoded)
+    <&OctetStringRef>::from_der(&encoded)
         .map(|octets| octets.as_bytes().to_vec())
         .map_err(|_| Invalid::Malformed)
 }
@@ -1021,8 +1024,8 @@ fn tsa_name(tsa: Option<&GeneralName>, signer: &Certificate) -> Result<(), Inval
         GeneralName::DirectoryName(name) => {
             let name = name.to_der().map_err(|_| Invalid::TsaName)?;
             let subject = signer
-                .tbs_certificate
-                .subject
+                .tbs_certificate()
+                .subject()
                 .to_der()
                 .map_err(|_| Invalid::TsaName)?;
             if name == subject {
@@ -1048,7 +1051,12 @@ fn tsa_name(tsa: Option<&GeneralName>, signer: &Certificate) -> Result<(), Inval
 /// second way to name the signer, and the subject comparison is unaffected.
 fn dns_names(certificate: &Certificate) -> Vec<Ia5String> {
     let mut names = Vec::new();
-    for extension in certificate.tbs_certificate.extensions.iter().flatten() {
+    for extension in certificate
+        .tbs_certificate()
+        .extensions()
+        .into_iter()
+        .flatten()
+    {
         if extension.extn_id != OID_SUBJECT_ALT_NAME {
             continue;
         }
@@ -1076,7 +1084,12 @@ fn dns_names(certificate: &Certificate) -> Vec<Ia5String> {
 /// nothing else.
 fn sole_timestamping_eku(certificate: &Certificate) -> bool {
     let mut seen = false;
-    for extension in certificate.tbs_certificate.extensions.iter().flatten() {
+    for extension in certificate
+        .tbs_certificate()
+        .extensions()
+        .into_iter()
+        .flatten()
+    {
         if extension.extn_id != OID_EXTENDED_KEY_USAGE {
             continue;
         }
@@ -1122,7 +1135,7 @@ impl Tst {
     fn parse(bytes: &[u8]) -> Result<Self, Invalid> {
         let mut outer = SliceReader::new(bytes).map_err(|_| Invalid::Malformed)?;
         let body = tlv(&mut outer, Tag::Sequence)?;
-        outer.finish(()).map_err(|_| Invalid::Malformed)?;
+        outer.finish().map_err(|_| Invalid::Malformed)?;
         let mut reader = SliceReader::new(body).map_err(|_| Invalid::Malformed)?;
 
         let version = tlv(&mut reader, Tag::Integer)?;
@@ -1148,7 +1161,7 @@ impl Tst {
             .decode::<ObjectIdentifier>()
             .map_err(|_| Invalid::Malformed)?;
         let imprint = tlv(&mut imprint_reader, Tag::OctetString)?.to_vec();
-        imprint_reader.finish(()).map_err(|_| Invalid::Malformed)?;
+        imprint_reader.finish().map_err(|_| Invalid::Malformed)?;
 
         let _serial = tlv(&mut reader, Tag::Integer)?;
         let gen_time = generalized_time(tlv_full(&mut reader, Tag::GeneralizedTime)?)?;
@@ -1170,7 +1183,7 @@ impl Tst {
         while let Some(tag) = next_tag(&mut reader)? {
             match tag {
                 Tag::ContextSpecific {
-                    number: TagNumber::N0,
+                    number: TagNumber(0),
                     ..
                 } => {
                     if tsa.is_some() {
@@ -1182,7 +1195,7 @@ impl Tst {
                     tsa = Some(GeneralName::from_der(content).map_err(|_| Invalid::Malformed)?);
                 }
                 Tag::ContextSpecific {
-                    number: TagNumber::N1,
+                    number: TagNumber(1),
                     ..
                 } => {
                     tlv_full(&mut reader, tag)?;
@@ -1190,7 +1203,7 @@ impl Tst {
                 _ => return Err(Invalid::Malformed),
             }
         }
-        reader.finish(()).map_err(|_| Invalid::Malformed)?;
+        reader.finish().map_err(|_| Invalid::Malformed)?;
 
         Ok(Self {
             policy,
@@ -1290,19 +1303,18 @@ fn unix(duration: std::time::Duration) -> Result<Timestamp, Invalid> {
 
 /// Read a whole tag-length-value, header included.
 fn tlv_full<'a>(reader: &mut SliceReader<'a>, tag: Tag) -> Result<&'a [u8], Invalid> {
-    let header = reader.peek_header().map_err(|_| Invalid::Malformed)?;
-    if header.tag != tag {
+    let header = Header::peek(&*reader).map_err(|_| Invalid::Malformed)?;
+    if header.tag() != tag {
         return Err(Invalid::Malformed);
     }
-    let total = (header.encoded_len().map_err(|_| Invalid::Malformed)? + header.length)
+    let total = (header.encoded_len().map_err(|_| Invalid::Malformed)? + header.length())
         .map_err(|_| Invalid::Malformed)?;
     reader.read_slice(total).map_err(|_| Invalid::Malformed)
 }
 
 /// Read the content octets of a tag-length-value, header consumed.
 fn tlv<'a>(reader: &mut SliceReader<'a>, tag: Tag) -> Result<&'a [u8], Invalid> {
-    let header_len = reader
-        .peek_header()
+    let header_len = Header::peek(&*reader)
         .map_err(|_| Invalid::Malformed)?
         .encoded_len()
         .map_err(|_| Invalid::Malformed)?;
@@ -1317,7 +1329,9 @@ fn next_tag(reader: &mut SliceReader<'_>) -> Result<Option<Tag>, Invalid> {
         return Ok(None);
     }
     Ok(Some(
-        reader.peek_header().map_err(|_| Invalid::Malformed)?.tag,
+        Header::peek(&*reader)
+            .map_err(|_| Invalid::Malformed)?
+            .tag(),
     ))
 }
 
@@ -1782,7 +1796,7 @@ mod tests {
     #[test]
     fn the_signers_own_subject_is_accepted_as_tsa_name() {
         let signer = certificate_with_eku("extendedKeyUsage=critical,timeStamping");
-        let name = GeneralName::DirectoryName(signer.tbs_certificate.subject.clone());
+        let name = GeneralName::DirectoryName(signer.tbs_certificate().subject().clone());
 
         assert_eq!(tsa_name(Some(&name), &signer), Ok(()));
     }

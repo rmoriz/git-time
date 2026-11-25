@@ -143,10 +143,18 @@ pub fn encode(request: &StampRequest) -> Vec<u8> {
 /// One DER tag-length-value triple.
 fn tlv(tag: Tag, content: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(content.len() + 6);
-    out.push(tag.into());
+    out.push(tag_byte(tag));
     write_length(content.len(), &mut out);
     out.extend_from_slice(content);
     out
+}
+
+/// The single identifier octet of one of the low-tag-number `tag`s this module
+/// emits. `der` 0.8 stopped converting `Tag` to `u8`; a tag above 30 would need
+/// a second octet and does not occur here.
+fn tag_byte(tag: Tag) -> u8 {
+    debug_assert!(tag.number().value() < 31);
+    (tag.class() as u8) | (u8::from(tag.is_constructed()) << 5) | (tag.number().value() as u8)
 }
 
 /// A DER definite length: short form below 128, else long form with the smallest

@@ -397,8 +397,8 @@ fn report(repo: &Repo, json_output: bool) -> Result<u8, Exit> {
                                 .filter_map(|certificate| {
                                     i64::try_from(
                                         certificate
-                                            .tbs_certificate
-                                            .validity
+                                            .tbs_certificate()
+                                            .validity()
                                             .not_after
                                             .to_unix_duration()
                                             .as_secs(),
