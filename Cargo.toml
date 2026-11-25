@@ -19,7 +19,7 @@ p384 = { version = "0.14", default-features = false, features = ["ecdsa"] }
 rsa = { version = "0.10", default-features = false, features = ["std", "encoding", "pkcs1v15"] }
 thiserror = "2"
 proptest = "1"
-zstd = "0.13"
+zstd = "0.14"
 base64 = "0.22"
 tempfile = "3"
 der = { version = "0.8", default-features = false, features = ["alloc"] }
