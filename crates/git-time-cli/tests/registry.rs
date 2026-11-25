@@ -20,6 +20,11 @@
 //! serial file because `-CAcreateserial` writes into the shared temp directory
 //! and races between parallel fixtures.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

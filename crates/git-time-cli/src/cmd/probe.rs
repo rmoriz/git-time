@@ -566,6 +566,9 @@ pub(crate) mod tests {
     pub(crate) fn xdg() -> &'static Path {
         static XDG: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         let dir = XDG.get_or_init(|| tempfile::TempDir::new().expect("xdg dir"));
+        // SAFETY: test-only. The directory is created once and lives for the
+        // process, so a concurrent reader sees this path or an earlier one that
+        // still exists; tests that depend on the value hold `xdg_lock`.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", dir.path()) };
         dir.path()
     }
@@ -585,6 +588,7 @@ pub(crate) mod tests {
     fn both_state_dirs_hang_off_one_config_home() {
         let _guard = xdg_lock();
         let base = std::path::PathBuf::from(xdg());
+        // SAFETY: test-only, under the lock taken above.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", &base) };
         let home = crate::cmd::anchors::config_home();
         assert_eq!(home, base);

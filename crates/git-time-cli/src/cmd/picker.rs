@@ -984,6 +984,8 @@ mod tests {
     /// across the frame and keeps the directory alive.
     fn pinned_home() -> tempfile::TempDir {
         let xdg = tempfile::TempDir::new().expect("xdg dir");
+        // SAFETY: test-only. The caller holds `xdg_lock` across the frame, so
+        // no other thread reads `XDG_CONFIG_HOME` while it is written.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let anchors = xdg.path().join("git-time/anchors");
         std::fs::create_dir_all(&anchors).expect("anchors dir");
@@ -1005,6 +1007,8 @@ mod tests {
     fn empty_home() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         let lock = crate::cmd::probe::tests::xdg_lock();
         let xdg = tempfile::TempDir::new().expect("xdg dir");
+        // SAFETY: test-only, and the lock this frame returns is taken before the
+        // write, so nothing reads the variable until the guard is released.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         (lock, xdg)
     }
@@ -1606,6 +1610,7 @@ mod tests {
         // `XDG_CONFIG_HOME` is process-wide, so hold it across both frames.
         let _xdg = crate::cmd::probe::tests::xdg_lock();
         let xdg = tempfile::TempDir::new().expect("xdg dir");
+        // SAFETY: test-only, under the lock taken above.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let bundle = xdg.path().join("acme.pem");
 
@@ -1770,6 +1775,7 @@ mod tests {
         // repoint it between `set_var` and `frame()`.
         let _xdg = crate::cmd::probe::tests::xdg_lock();
         let xdg = tempfile::TempDir::new().expect("xdg dir");
+        // SAFETY: test-only, under the lock taken above.
         unsafe { std::env::set_var("XDG_CONFIG_HOME", xdg.path()) };
         let anchors = xdg.path().join("git-time/anchors");
         std::fs::create_dir_all(&anchors).expect("anchors dir");

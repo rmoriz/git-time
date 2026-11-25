@@ -1,0 +1,19 @@
+# Clippy reads this for every target, including the tests.
+#
+# Two jobs: keep suggestions inside the oldest compiler this project supports,
+# and name the safe APIs that break a contract `unsafe_code` cannot express.
+
+# This is `[workspace.package] rust-version`, not the pinned toolchain in
+# `rust-toolchain.toml`. The toolchain is what checks and releases are built
+# with; this is the oldest rustc a packager may build with, and it stops Clippy
+# from suggesting an API that did not exist there.
+msrv = "1.88"
+
+# The CLI's exit codes are one contract — 0 success, 1 evidence or seal failure,
+# 2 usage or configuration, 141 a stream cut short, and 3 only under
+# `time.on-failure = fail`. `process::exit` leaves through the side door: no
+# destructors, no runtime shutdown, no `Exit` value, so the contract would gain
+# a second owner. Return `ExitCode` from `main` instead.
+disallowed-methods = [
+  { path = "std::process::exit", reason = "return ExitCode so the exit-code contract keeps one owner" },
+]

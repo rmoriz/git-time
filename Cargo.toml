@@ -39,3 +39,22 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 axum = "0.8"
 clap = "4"
+
+# Lints every crate inherits with `[lints] workspace = true`.
+#
+# This tool rewrites commit objects and moves refs, so a memory-safety bug is not
+# a crash but a wrong commit: there is no `unsafe` here to get wrong, and none
+# should be added. The level is `deny` rather than `forbid` because there are
+# exactly two kinds of justified exception — the binary restores the default
+# `SIGPIPE` disposition through one reviewed FFI call, and the test harnesses
+# set process environment (and one wraps the global allocator) — and each site
+# opts in with a reasoned `allow`. `undocumented_unsafe_blocks` is what keeps
+# such an `allow` from landing without its SAFETY argument.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+# The pairings live in `clippy.toml`; this turns the lint on outside the
+# restriction group so the list is enforced by a normal `cargo clippy`.
+disallowed_methods = "deny"

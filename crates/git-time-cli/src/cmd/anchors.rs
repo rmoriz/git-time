@@ -1122,6 +1122,10 @@ mod tests {
     /// The fetch must not need the stub, and `GIT_TIME_ANCHOR_FETCH_CMD` is read
     /// from the process, so every test here clears it.
     fn unset_stub() {
+        // SAFETY: test-only process-wide state. The variable only selects the
+        // stub fetch path, and this removes it rather than pointing it
+        // somewhere new; a test that reads it does so from its own thread after
+        // this call.
         unsafe { std::env::remove_var("GIT_TIME_ANCHOR_FETCH_CMD") };
     }
 

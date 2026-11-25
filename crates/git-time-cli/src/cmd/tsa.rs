@@ -2280,7 +2280,10 @@ mod tests {
         // Repointed by no other locked test, but a reader is cheap: hold the
         // directory so a stray repoint cannot send a write and a read apart.
         let base = crate::cmd::probe::tests::xdg().to_path_buf();
-        let hold = || unsafe { std::env::set_var("XDG_CONFIG_HOME", &base) };
+        let hold = || {
+            // SAFETY: test-only, under the lock taken above.
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", &base) };
+        };
         hold();
         let _ = crate::cmd::probe::forget("freetsa");
         let now = jiff::Timestamp::now();

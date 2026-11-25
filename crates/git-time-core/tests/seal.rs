@@ -18,6 +18,11 @@
 //! `GNUPGHOME` point into temporary directories, so nothing on the machine can
 //! steer branches, signing keys or hooks.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;

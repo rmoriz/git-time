@@ -1,3 +1,16 @@
+# The compiler every check and every release binary is built with.
+#
+# The channel is exact rather than a floating `stable`: a Rust release must not
+# change a lint, a diagnostic or a `Cargo.lock` resolution between two CI runs on
+# the same commit. `rust-version` in the workspace manifest is deliberately
+# older — that is the MSRV a packager may build with, and `clippy.toml` reads it
+# so no suggestion reaches past it.
+#
+# `minimal` plus the two components is all the checks need: no docs, no llvm
+# tools, no rust-src. `cargo deny` is installed separately by CI.
 [toolchain]
+# Rustup resolves this to the release; rust-toolchain.toml cannot name a commit
+# hash. On this machine it is `rustc 1.99.0 (b940084d7 2026-09-28)`.
 channel = "1.99.0"
+profile = "minimal"
 components = ["clippy", "rustfmt"]

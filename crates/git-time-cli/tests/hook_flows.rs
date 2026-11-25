@@ -25,6 +25,11 @@
 //! the commit carries exactly one block, the tree, parents and author are
 //! untouched, the worktree is clean and `git fsck` says nothing.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

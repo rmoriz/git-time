@@ -2,6 +2,11 @@
 //! forward-compatible unknown fields, and size accounting that degrades by
 //! dropping the largest token instead of writing an over-long block.
 
+#![allow(
+    unsafe_code,
+    reason = "the allocator wrapper measures peak allocation and forwards to the system allocator unchanged"
+)]
+
 use git_time_core::imprint::{Alg, Digest, digest};
 use git_time_core::store::{
     DecodeError, EncodeError, FailureRecord, MAX_TOKEN_BYTES, TokenRecord, TrailerBlock, decode,
@@ -29,23 +34,40 @@ fn record(size: usize) {
     });
 }
 
+// SAFETY: the wrapper only observes the requested size and forwards every call
+// to the system allocator, so it upholds the `GlobalAlloc` contract exactly as
+// `System` does.
 unsafe impl GlobalAlloc for PeakAllocator {
+    // SAFETY: `layout` is the caller's, unmodified, and `System` is the
+    // allocator the `GlobalAlloc` contract is written against.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
+        // SAFETY: same layout, forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
 
+    // SAFETY: `layout` is the caller's, unmodified, and `System` is the
+    // allocator the `GlobalAlloc` contract is written against.
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
         record(layout.size());
+        // SAFETY: same layout, forwarded unchanged to the system allocator.
         unsafe { System.alloc_zeroed(layout) }
     }
 
+    // SAFETY: `ptr`, `layout` and `new_size` are the caller's, unmodified, and
+    // `System` is the allocator the `GlobalAlloc` contract is written against.
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         record(new_size);
+        // SAFETY: a block from this allocator, with the caller's layout and
+        // size, forwarded unchanged to the system allocator.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
 
+    // SAFETY: `ptr` and `layout` are the caller's, unmodified, and `System` is
+    // the allocator the `GlobalAlloc` contract is written against.
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: a block from this allocator, with the caller's layout,
+        // forwarded unchanged to the system allocator.
         unsafe { System.dealloc(ptr, layout) }
     }
 }

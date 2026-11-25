@@ -5,6 +5,11 @@
 //! sigcheck tests are — `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` point at
 //! `/dev/null` — so nothing on the machine can steer branch names or reflogs.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use git_time_core::object::{CommitObject, ParseError};
 use git_time_core::repo::{CasOutcome, Head, Repo, RepoError};
 

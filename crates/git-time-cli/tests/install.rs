@@ -31,6 +31,11 @@
 //! second `install` nor an unparseable fetch destroys working config or
 //! the previous anchor.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

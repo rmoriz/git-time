@@ -8,6 +8,11 @@
 //! test relies on are written into the repo itself, and every OpenPGP and SSH
 //! fixture is built from an ephemeral home directory.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use git_time_core::object::CommitObject;
 use git_time_core::repo::Repo;
 use git_time_core::sigcheck::{

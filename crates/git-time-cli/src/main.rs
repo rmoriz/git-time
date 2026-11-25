@@ -19,6 +19,19 @@
 //! a post-commit exit status and only a wrapper reads it; its gate is the real
 //! stop and exits `1`.
 
+// Unit tests live in the same crate as the code they test, and some of them
+// point the process environment at a temporary directory before spawning git.
+// Edition 2024 makes `set_var`/`remove_var` unsafe for that reason; the test
+// modules repeat the reasoning next to each block. Production code gets no such
+// escape hatch.
+#![cfg_attr(
+    test,
+    allow(
+        unsafe_code,
+        reason = "unit tests set process environment once, before any child runs"
+    )
+)]
+
 mod cmd;
 
 use std::path::PathBuf;
@@ -181,6 +194,7 @@ enum Command {
 }
 
 #[cfg(unix)]
+#[allow(unsafe_code, reason = "the one FFI declaration this binary needs")]
 unsafe extern "C" {
     /// `signal(2)`; the two constants below are all this needs of it.
     fn signal(number: i32, handler: usize) -> usize;
@@ -194,16 +208,27 @@ const SIGPIPE: i32 = 13;
 #[cfg(unix)]
 const SIG_DFL: usize = 0;
 
-fn main() -> ExitCode {
-    // `verify` and `log` stream, so `| head` is a normal way to read them. With
-    // Rust's ignored SIGPIPE the write past `head` panics with a broken pipe and
-    // exit 101; the default disposition ends the process quietly, and no caller
-    // of a streaming reader wants more than that.
-    #[cfg(unix)]
+/// Restore the default `SIGPIPE` disposition, which Rust masks.
+///
+/// `verify` and `log` stream, so `| head` is a normal way to read them. With
+/// Rust's ignored `SIGPIPE` the write past `head` panics with a broken pipe and
+/// exit 101; the default disposition ends the process quietly, and no caller
+/// of a streaming reader wants more than that.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "the one FFI call in this binary, reviewed above"
+)]
+fn restore_sigpipe_default() {
     // SAFETY: `SIG_DFL` is always a valid handler for `SIGPIPE`.
     unsafe {
         signal(SIGPIPE, SIG_DFL);
     }
+}
+
+fn main() -> ExitCode {
+    #[cfg(unix)]
+    restore_sigpipe_default();
     let cli = Cli::parse();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()

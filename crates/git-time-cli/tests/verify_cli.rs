@@ -19,6 +19,11 @@
 //! and every case checks the read-only contract where it matters: `verify` adds
 //! no stub hit and leaves the ref, the index and the worktree alone.
 
+#![allow(
+    unsafe_code,
+    reason = "the harness points the process environment at a temporary directory before any child runs"
+)]
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};

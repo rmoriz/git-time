@@ -58,6 +58,13 @@ cargo test -p git-time-cli --test live_tsa -- --ignored --nocapture   # real TSA
   local cargo cache is usually primed. A per-process firewall (Lulu and similar) can block the
   `git-time` binary while `curl` works — that shows up as `Fail: reason=timeout`, which is the
   fail-open path working, not a bug.
+- `unsafe` is denied workspace-wide (`[workspace.lints]` in `Cargo.toml`); `git-time-core` forbids
+  it outright. The binary's one `signal(2)` call and the test harnesses that set the process
+  environment carry a reasoned `allow`, and `undocumented_unsafe_blocks` demands the SAFETY
+  argument at each of them. A new `allow` needs the same kind of argument, not a blanket one.
+- `rust-toolchain.toml` pins the compiler checks and releases are built with; `clippy.toml` reads
+  the older `rust-version` so no suggestion reaches past the MSRV. `cargo deny` checks the graph
+  for every released target, not just the host — keep that list in step with `release.yml`.
 - Tests must be hermetic: `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_SYSTEM=/dev/null`, temp
   `GNUPGHOME`, throwaway CA, loopback stub TSAs. Never read the developer's real keys or config.
 - Fixtures in `crates/git-time-core/tests/fixtures/` are real captured bytes; their `README.md`
