@@ -4,6 +4,33 @@ Design: `docs/superpowers/specs/2026-11-18-git-time-rfc3161-design.md`
 Plan: `docs/superpowers/plans/2026-11-18-git-time-rfc3161.md`
 Ledger (per-task decisions and rulings, git-ignored): `.superpowers/sdd/2026-11-18-git-time-rfc3161/progress.md`
 
+## Release notes (v0.3.1)
+
+A later release adds its own heading above this one.
+
+- The decoder behind stored tokens moves to zstd 1.6.0 (`zstd` 0.14.5), which closes
+  CVE-2026-124851 and a batch of memory-safety bugs upstream. Token payloads are zstd frames a third
+  party wrote, so this is the path where the fix matters: `git time verify`, `show` and `log` read
+  them with the fixed decoder.
+- The DER stack moves to `der` 0.8 / `x509-cert` 0.3, with `cms` 0.3.0-rc.2 so CMS, DER and X.509
+  stay on one type generation — a CMS type on the old generation meets no conversion to the new one.
+  Nothing in the CLI changes; the suite pins the bytes of every fixture and golden, and the ignored
+  live test seals and verifies against a real authority through the new parsers before a release
+  goes out. `sigstore-tsa` stays on 0.16 and meets us only at the byte-based `DerCertificate`.
+- `unsafe` is denied workspace-wide. The one remaining block is the `signal(2)` call that restores
+  `SIGPIPE`'s default, with its SAFETY argument inline; the test harnesses that set process
+  environment carry a reasoned `allow` each, under `undocumented_unsafe_blocks`.
+- `rust-toolchain.toml` pins the exact compiler the checks and the release build use (1.100.0), and
+  `clippy.toml` reads the 1.88 floor so no suggestion reaches past what a packager may build with.
+- `jiff` 1.0 and `base64` 0.23; the four `to_zoned` call sites become `to_zoned_datetime` for the
+  `Zoned` → `ZonedDateTime` rename. Neither reaches a command-line surface.
+- The suite stops flaking on a loaded runner: a killed `gpg-agent` is waited out until it is reaped
+  rather than until `pgrep` stops listing it, and the probe table's refresh test parks its workers in
+  a gate instead of racing a file read that can answer a row before the assertion.
+- The workflow actions move to the Node 24 line (`checkout` v7, `cache` v6, `upload-artifact` v7,
+  `download-artifact` v8, `action-gh-release` v3). `download-artifact` v8 also checks artifact
+  digests and fails the release on a mismatch instead of warning about it.
+
 ## Release notes (v0.3.0)
 
 A later release adds its own heading above this one.
