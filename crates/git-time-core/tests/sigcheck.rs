@@ -1619,6 +1619,21 @@ fn have_agent_tools() -> bool {
         .all(|tool| have(tool))
 }
 
+/// Wait until `pid` is gone and nothing serves `home` any more.
+///
+/// Both have to be waited for: a killed process keeps its pid until its parent
+/// reaps it, and on a busy machine that reaper (init in CI) can lag, while
+/// `pgrep` already stops reporting the process the moment it is a zombie. Two
+/// seconds is far beyond anything a `SIGKILL` should need.
+fn wait_gone(home: &Path, pid: u32) {
+    for _ in 0..200 {
+        if !running(pid) && processes_of(home).is_empty() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// A dropped home takes its agent and the agent's `scdaemon` with it.
 ///
 /// `gpgconf --kill` alone is not enough: it sends `SIGTERM`, which an agent
@@ -1634,12 +1649,7 @@ fn a_dropped_home_takes_its_agent_and_scdaemon_with_it() {
     let path = home.path().to_owned();
     drop(home);
 
-    for _ in 0..100 {
-        if processes_of(&path).is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_gone(&path, pid);
     assert!(!running(pid), "agent {pid} outlived its home");
     assert!(
         processes_of(&path).is_empty(),
@@ -1671,12 +1681,7 @@ fn an_abandoned_home_is_reaped_by_the_next_run() {
 
     reap_abandoned_agents();
 
-    for _ in 0..100 {
-        if processes_of(&path).is_empty() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_gone(&path, pid);
     assert!(!running(pid), "agent {pid} survived the reap");
     assert!(
         processes_of(&path).is_empty(),
